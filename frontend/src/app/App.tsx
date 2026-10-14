@@ -4,6 +4,7 @@ import { BrowserRouter, NavLink, Route, Routes } from 'react-router'
 import { DashboardLayout } from '../features/dashboard/DashboardLayout'
 import { ClustersPage } from '../features/clusters/ClustersPage'
 import { TopicsPage } from '../features/topics/TopicsPage'
+import { ConsumerGroupsPage } from '../features/consumer-groups/ConsumerGroupsPage'
 
 function App() {
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
@@ -23,7 +24,7 @@ function App() {
         <Route element={<DashboardLayout />}>
           <Route index element={<section aria-label="概览内容" />} />
           <Route path="topics" element={<TopicsPage />} />
-          <Route path="consumer-groups" element={<section aria-label="Consumer Groups 内容" />} />
+          <Route path="consumer-groups" element={<ConsumerGroupsPage />} />
         </Route>
         <Route path="settings" element={<ClustersPage />} />
       </Routes>

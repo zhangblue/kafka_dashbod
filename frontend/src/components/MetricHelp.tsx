@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type ReactNode } from 'react'
 
-export function MetricHelp({ label, children }: { label: string; children: ReactNode }) {
+export function MetricHelp({ label, children, trigger = '?' }: { label: string; children: ReactNode; trigger?: ReactNode }) {
   const id = useId()
   const [hovered, setHovered] = useState(false)
   const [focused, setFocused] = useState(false)
@@ -20,7 +20,7 @@ export function MetricHelp({ label, children }: { label: string; children: React
     <button type="button" aria-label={`${label} 字段说明`} aria-describedby={visible ? id : undefined}
       onFocus={() => { setFocused(true); setDismissed(false) }}
       onBlur={() => { setFocused(false); setPinned(false); setDismissed(false) }}
-      onClick={() => { setPinned(!pinned); setDismissed(pinned) }}>?</button>
+      onClick={() => { setPinned(!pinned); setDismissed(pinned) }}>{trigger}</button>
     {visible && <span id={id} role="tooltip" style={{ position: 'absolute', left: 0, top: '100%', zIndex: 1,
       width: 'min(22rem, 70vw)', padding: '0.75rem', background: '#172033', color: '#fff', textAlign: 'left', fontWeight: 400 }}>
       {children}

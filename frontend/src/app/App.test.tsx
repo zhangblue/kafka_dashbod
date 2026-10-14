@@ -1,8 +1,8 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import App from './App'
-import { clustersApi, sessionsApi } from '../api/client'
-import { clusterFixture, snapshotFixture } from '../test/handlers'
+import { clustersApi, lagRulesApi, sessionsApi } from '../api/client'
+import { clusterFixture, rulesFixture, snapshotFixture } from '../test/handlers'
 
 afterEach(() => { vi.restoreAllMocks(); window.history.replaceState({}, '', '/') })
 
@@ -33,4 +33,16 @@ it('opens settings without retaining a dashboard session and supports direct set
   render(<App />)
   expect(await screen.findByRole('button', { name: '新增集群' })).toBeInTheDocument()
   expect(sessionsApi.create).not.toHaveBeenCalled()
+})
+
+it('opens the Consumer Groups route with real snapshot rows', async () => {
+  window.history.replaceState({}, '', '/consumer-groups')
+  vi.spyOn(clustersApi, 'list').mockResolvedValue([clusterFixture])
+  vi.spyOn(lagRulesApi, 'get').mockResolvedValue(rulesFixture)
+  vi.spyOn(sessionsApi, 'create').mockResolvedValue({ sessionId: 'groups', leaseSeconds: 30 })
+  vi.spyOn(sessionsApi, 'snapshot').mockResolvedValue(snapshotFixture)
+  vi.spyOn(sessionsApi, 'close').mockResolvedValue(undefined)
+  render(<App />)
+  expect(await screen.findByRole('table', { name: 'Consumer Groups 汇总' })).toBeInTheDocument()
+  expect(screen.getByText('audit-worker')).toBeInTheDocument()
 })
