@@ -39,6 +39,7 @@ describe('Lag rule configuration', () => {
     await user.clear(defaults.getByLabelText('高 Lag 起始值'))
     await user.type(defaults.getByLabelText('高 Lag 起始值'), '999')
     expect(screen.getByRole('button', { name: '保存规则' })).toBeDisabled()
+    expect(defaults.getByLabelText('高 Lag 起始值')).toHaveAccessibleDescription(/高 Lag 起始值大于正常上限/)
     await user.clear(defaults.getByLabelText('高 Lag 起始值'))
     await user.type(defaults.getByLabelText('高 Lag 起始值'), '5000')
     await user.clear(defaults.getByLabelText('持续超限时间（秒）'))
@@ -70,5 +71,29 @@ describe('Lag rule configuration', () => {
   it('rejects a snapshot from another cluster for dropdown choices', () => {
     render(<LagRulesForm clusterId="cluster-b" snapshot={snapshotFixture} value={rulesFixture} onChange={() => {}} />)
     expect(screen.getByRole('button', { name: '新增规则' })).toBeDisabled()
+  })
+
+  it('treats a successful HTTP snapshot with total discovery failures as unreachable', () => {
+    render(<Harness snapshot={{ ...snapshotFixture, consumerGroupIds: [], consumerGroups: [], partialFailures: [
+      { scope: 'topics', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'Topic metadata failed' },
+      { scope: 'groups', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'Group discovery failed' },
+    ] }} initial={{ ...rulesFixture, overrides: [{ id: 'saved', groupId: 'flink-order-enrich', topic: 'raw-orders', ...rulesFixture.defaults }] }} />)
+    expect(screen.getByRole('button', { name: '新增规则' })).toBeDisabled()
+    expect(screen.getByLabelText('Consumer Group')).toBeDisabled()
+    expect(within(screen.getByRole('group', { name: '集群默认规则' })).getByLabelText('正常上限')).toBeDisabled()
+    expect(screen.getByText(/Topic metadata failed/)).toBeInTheDocument()
+    expect(screen.getByText(/Group discovery failed/)).toBeInTheDocument()
+  })
+
+  it('allows known group/topic choices while explaining partial collection failures', async () => {
+    const user = userEvent.setup()
+    render(<Harness snapshot={{ ...snapshotFixture, partialFailures: [
+      { scope: 'watermark', resource: 'other:0', code: 'KAFKA_TIMEOUT', message: 'Partition query failed' },
+    ] }} />)
+    expect(screen.getByText(/不完整/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '新增规则' }))
+    await user.selectOptions(screen.getByLabelText('Consumer Group'), 'flink-order-enrich')
+    expect(screen.getByRole('option', { name: 'raw-orders' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Topic')).toBeEnabled()
   })
 })
