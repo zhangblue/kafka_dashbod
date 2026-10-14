@@ -22,6 +22,7 @@
 - 浏览器内最近一小时 Lag 折线图。
 - 短租约监控会话，仅在仪表盘使用期间维持 Kafka 连接。
 - 集群认证信息加密持久化至 SQLite。
+- 单目录跨平台发行包，同时包含 macOS ARM64 与 Linux x86_64 可执行文件、前端静态资源和自动选平台启动脚本。
 
 ### 2.2 第一版不包含
 
@@ -50,7 +51,9 @@
 
 ### 3.3 部署边界
 
-前后端独立构建。开发环境分别启动；生产环境可由反向代理托管前端静态文件并将 `/api` 转发给 Rust 服务。后端默认仅监听本机地址。内网暴露时由部署方通过反向代理提供 HTTPS 和访问控制。
+开发环境分别启动前端和后端。生产发行包由一个 Rust 进程同时提供 `/api` 和已构建的前端静态资源；除 `/api` 外的未知 GET 路径回退到 `index.html`，支持前端路由直接访问。后端默认仅监听本机地址。内网暴露时由部署方通过反向代理提供 HTTPS 和访问控制。
+
+发行包同时携带 macOS ARM64 与 Linux x86_64 二进制，目标机器不需要安装 Node.js、Rust 或系统版 librdkafka。Linux 二进制以 `x86_64-unknown-linux-musl` 为目标构建，并从源码静态链接 librdkafka 与 vendored OpenSSL。第一版只支持 SASL/PLAIN 和 SASL/SCRAM，不包含需要额外 Cyrus SASL/GSSAPI 运行库的 Kerberos 认证。
 
 ## 4. Kafka 连接生命周期
 
@@ -250,7 +253,55 @@ Lag 首次超过正常上限时开始计时。在连续超限时间达到当前�
 
 覆盖新增集群、测试连接、进入仪表盘、查看 Topic 和消费组、切换刷新频率、查看趋势、切换集群以及退出后释放会话。
 
-## 13. 验收标准
+### 12.4 发行包
+
+- 自动测试启动脚本的平台识别、环境变量检查、参数透传和不支持平台报错。
+- 使用 `file` 检查两个后端二进制的目标架构。
+- 在 macOS ARM64 主机构建并启动本机二进制，验证健康检查与 SPA 回退。
+- 在 Docker 的 Linux/amd64 环境启动 Linux 二进制，验证健康检查、静态资源、SQLite 写入与优雅退出。
+- 校验发行目录不存在源码、明文密钥、开发依赖和绝对构建路径，并验证 SHA-256 校验文件。
+
+## 13. 发行与运行
+
+### 13.1 发行目录
+
+`tools/build-release.sh` 生成下列单一目录，并另外生成便于传输的压缩包：
+
+```text
+dist/kafka-dashboard/
+├── bin/
+│   ├── kafka-dashboard-darwin-arm64
+│   └── kafka-dashboard-linux-amd64
+├── web/
+├── start.sh
+├── .env.example
+├── README.txt
+└── SHA256SUMS
+```
+
+`web/` 只保存 Vite 生产构建产物。`start.sh` 根据 `uname -s` 与 `uname -m` 选择对应二进制，支持 Darwin/arm64 和 Linux/x86_64；其他组合以非零状态退出并显示支持列表。脚本从当前发行目录定位资源，因此整个目录可以移动。命令行参数原样传给后端。
+
+### 13.2 构建流程
+
+构建入口只有 `tools/build-release.sh`。脚本在 macOS ARM 主机上检查 Node.js/npm、Rust 和 Docker Buildx，使用锁文件安装依赖并构建前端；本机构建 macOS ARM64 后端；再通过 Docker Buildx 构建 Linux/amd64 musl 后端并用 local exporter 取回文件。脚本从空的临时暂存目录组装发行内容，最后生成校验和与压缩包，任一步失败都不发布不完整目录。
+
+前后端依赖锁文件必须提交。`dist/`、运行期 SQLite 数据和本地 `.env` 不提交到 Git。
+
+### 13.3 运行配置
+
+启动时必须通过环境变量提供 `KAFKA_DASHBOARD_MASTER_KEY`；发行包只包含不带秘密的 `.env.example`。默认将 SQLite 文件写到发行目录下的 `data/`，也允许用环境变量覆盖监听地址、数据库 URL 和日志级别。启动脚本创建缺失的 `data/`，但不会生成、保存或打印主密钥。
+
+## 14. 项目文档
+
+根目录 `README.md` 面向使用者和开发者，包含功能、限制、快速启动、环境变量、Kafka 认证字段、Offset/Lag 语义、源码开发、测试、发行构建、安全部署和故障排查。发行目录的 `README.txt` 是离线精简运行指南。
+
+根目录 `AGENTS.md` 面向后续编码代理，记录架构边界、常用命令、TDD 与验证要求、敏感信息规则、生成目录约定，以及涉及第三方库/API/CLI 时必须通过 Context7 查询当前文档的要求。
+
+## 15. GitHub 交付
+
+本地仓库将 `origin` 设置为 `https://github.com/zhangblue/kafka_dashbod.git`。在完整测试、发行包验证和秘密扫描通过后，把源码、锁文件、设计、计划、README 与 AGENTS 提交并推送到 `main`。构建产物、数据库和本地秘密不推送；本次交付不额外创建 Pull Request 或 GitHub Release。
+
+## 16. 验收标准
 
 - 可以保存和切换多个 Kafka 集群，并支持约定的 PLAINTEXT、TLS、SASL/PLAIN、SASL/SCRAM 配置。
 - 页面只在仪表盘可见并使用时维持 Kafka 连接；关闭、切换或租约到期后释放连接。
@@ -264,3 +315,7 @@ Lag 首次超过正常上限时开始计时。在连续超限时间达到当前�
 - 最近一小时趋势只保存在浏览器内存，连续运行超过一小时后不会保留超期样本。
 - Kafka 局部错误不会清空健康数据，界面能区分部分失败、断开和陈旧状态。
 - 敏感认证字段不会通过读取 API 或日志泄露，数据库中不保存明文密码。
+- 一个构建脚本可以生成规定结构的双平台单目录发行包和校验和；macOS ARM64 与 Linux x86_64 的运行验证均通过。
+- 发行目录复制到对应目标机后无需安装 Node.js、Rust、librdkafka 或 OpenSSL，只需配置主密钥即可启动前后端一体服务。
+- 根目录包含可独立指导安装、开发、测试、打包和运维的 `README.md`，并包含约束后续代理工作的 `AGENTS.md`。
+- GitHub `main` 分支包含已验证的完整项目，且不包含发行产物、数据库或秘密。
