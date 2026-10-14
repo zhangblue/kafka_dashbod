@@ -7,7 +7,10 @@ use crate::{
     db::{clusters::ClusterRepository, lag_rules::LagRuleRepository},
     error,
 };
-use axum::{Extension, Router, middleware, routing::get};
+use axum::{
+    Extension, Router, middleware,
+    routing::{get, post},
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -34,6 +37,7 @@ pub fn router() -> Router {
     Router::new()
         .route("/api/health", get(health::health))
         .route("/api/clusters", get(clusters::list).post(clusters::create))
+        .route("/api/clusters/{id}/test", post(clusters::test_connection))
         .route(
             "/api/clusters/{id}",
             get(clusters::get)

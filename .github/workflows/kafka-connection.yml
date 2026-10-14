@@ -1,0 +1,23 @@
+name: Kafka connection
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  plaintext-connection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential perl
+      - name: Start Kafka
+        run: docker compose -p kafka-dashboard-ci -f docker-compose.test.yml up -d --wait
+      - name: Test backend and real Kafka connection
+        run: |
+          cargo test -p backend
+          TEST_KAFKA_BROKERS=127.0.0.1:19092 cargo test -p backend --test kafka_connection -- --ignored
+      - name: Stop Kafka
+        if: always()
+        run: docker compose -p kafka-dashboard-ci -f docker-compose.test.yml down

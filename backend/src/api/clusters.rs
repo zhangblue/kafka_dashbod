@@ -11,6 +11,7 @@ use crate::{
     db::clusters::ClusterRepository,
     domain::cluster::{ClusterDto, ClusterInput},
     error::ApiError,
+    kafka::client::{ConnectionError, ConnectionTestResult},
 };
 
 #[derive(Deserialize)]
@@ -74,6 +75,27 @@ pub async fn delete(
         return Err(ApiError::cluster_not_found());
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn test_connection(
+    Extension(repository): Extension<ClusterRepository>,
+    Path(id): Path<String>,
+) -> Result<Json<ConnectionTestResult>, ApiError> {
+    let config = repository
+        .decrypted_config(&id)
+        .await?
+        .ok_or_else(ApiError::cluster_not_found)?;
+    crate::kafka::client::test_connection(config)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            let status = if error == ConnectionError::InvalidConfig {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            ApiError::new(status, error.code(), &error.to_string())
+        })
 }
 
 fn validate(input: &ClusterInput) -> Result<(), ApiError> {

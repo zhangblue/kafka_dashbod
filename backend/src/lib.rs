@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod db;
 pub mod domain;
 pub mod error;
+pub mod kafka;
 
 use axum::Router;
 
