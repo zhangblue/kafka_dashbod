@@ -1,15 +1,23 @@
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--version")
+    {
+        println!("kafka-dashboard {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     tracing_subscriber::fmt::init();
 
-    let config = kafka_dashboard::config::Config::from_env().map_err(std::io::Error::other)?;
+    let config = kafka_dashboard::config::Config::from_env()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let pool = kafka_dashboard::db::connect(&config.database_url)
         .await
         .map_err(|_| std::io::Error::other("failed to initialize configuration database"))?;
     let state = kafka_dashboard::api::AppState::new(pool, config.cipher);
     let sessions = state.sessions.clone();
     let state_cleanup = sessions.clone();
-    let app = kafka_dashboard::api::router_with_state(state);
+    let app = kafka_dashboard::api::router_with_state_and_web_root(state, config.web_dir);
 
     let address = std::env::var("KAFKA_DASHBOARD_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into());
     let listener = tokio::net::TcpListener::bind(address).await?;

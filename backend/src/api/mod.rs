@@ -2,6 +2,9 @@ pub mod clusters;
 pub mod health;
 pub mod lag_rules;
 pub mod sessions;
+pub mod static_assets;
+
+use std::path::PathBuf;
 
 use crate::{
     crypto::SecretCipher,
@@ -49,18 +52,25 @@ impl<F: SessionClientFactory> AppState<F> {
 }
 
 pub fn router_with_state<F: SessionClientFactory>(state: AppState<F>) -> Router {
-    routes::<F>()
+    router_with_state_and_web_root(state, None)
+}
+
+pub fn router_with_state_and_web_root<F: SessionClientFactory>(
+    state: AppState<F>,
+    web_root: Option<PathBuf>,
+) -> Router {
+    routes::<F>(web_root)
         .layer(Extension(state.clusters))
         .layer(Extension(state.lag_rules))
         .layer(Extension(state.sessions))
 }
 
 pub fn router() -> Router {
-    routes::<KafkaSessionClientFactory>()
+    routes::<KafkaSessionClientFactory>(None)
 }
 
-fn routes<F: SessionClientFactory>() -> Router {
-    Router::new()
+fn routes<F: SessionClientFactory>(web_root: Option<PathBuf>) -> Router {
+    let router = Router::new()
         .route("/api/health", get(health::health))
         .route("/api/clusters", get(clusters::list).post(clusters::create))
         .route("/api/clusters/{id}/test", post(clusters::test_connection))
@@ -76,8 +86,12 @@ fn routes<F: SessionClientFactory>() -> Router {
         )
         .route("/api/clusters/{id}/sessions", post(sessions::create::<F>))
         .route("/api/sessions/{id}", delete(sessions::delete::<F>))
-        .route("/api/sessions/{id}/snapshot", get(sessions::snapshot::<F>))
-        .fallback(error::not_found)
+        .route("/api/sessions/{id}/snapshot", get(sessions::snapshot::<F>));
+    let router = match web_root {
+        Some(root) => router.fallback(move |request| static_assets::serve(root.clone(), request)),
+        None => router.fallback(error::not_found),
+    };
+    router
         .method_not_allowed_fallback(error::method_not_allowed)
         .layer(DefaultBodyLimit::max(256 * 1024))
         .layer(middleware::from_fn(error::request_id))
