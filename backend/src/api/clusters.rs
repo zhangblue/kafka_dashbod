@@ -12,6 +12,7 @@ use crate::{
     domain::cluster::{ClusterDto, ClusterInput},
     error::ApiError,
     kafka::client::{ConnectionError, ConnectionTestResult},
+    sessions::manager::{SessionClientFactory, SessionManager},
 };
 
 #[derive(Deserialize)]
@@ -67,10 +68,17 @@ pub async fn update(
     ))
 }
 
-pub async fn delete(
+pub async fn delete<F: SessionClientFactory>(
     Extension(repository): Extension<ClusterRepository>,
+    Extension(sessions): Extension<SessionManager<F>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let _operation = sessions.cluster_operation().await;
+    repository
+        .get(&id)
+        .await?
+        .ok_or_else(ApiError::cluster_not_found)?;
+    sessions.close_for_cluster(&id).await;
     if !repository.delete(&id).await? {
         return Err(ApiError::cluster_not_found());
     }

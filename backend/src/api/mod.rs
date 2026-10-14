@@ -1,39 +1,63 @@
 pub mod clusters;
 pub mod health;
 pub mod lag_rules;
+pub mod sessions;
 
 use crate::{
     crypto::SecretCipher,
     db::{clusters::ClusterRepository, lag_rules::LagRuleRepository},
     error,
+    sessions::manager::{
+        KafkaSessionClientFactory, LEASE_DURATION, SessionClientFactory, SessionManager,
+    },
 };
 use axum::{
     Extension, Router, middleware,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 
 #[derive(Clone)]
-pub struct AppState {
+pub struct AppState<F: SessionClientFactory = KafkaSessionClientFactory> {
     pub clusters: ClusterRepository,
     pub lag_rules: LagRuleRepository,
+    pub sessions: SessionManager<F>,
 }
 
-impl AppState {
+impl AppState<KafkaSessionClientFactory> {
     pub fn new(pool: sqlx::SqlitePool, cipher: SecretCipher) -> Self {
         Self {
             clusters: ClusterRepository::new(pool.clone(), cipher),
             lag_rules: LagRuleRepository::new(pool),
+            sessions: SessionManager::new(LEASE_DURATION, KafkaSessionClientFactory),
         }
     }
 }
 
-pub fn router_with_state(state: AppState) -> Router {
-    router()
+impl<F: SessionClientFactory> AppState<F> {
+    pub fn with_session_manager<G: SessionClientFactory>(
+        self,
+        sessions: SessionManager<G>,
+    ) -> AppState<G> {
+        AppState {
+            clusters: self.clusters,
+            lag_rules: self.lag_rules,
+            sessions,
+        }
+    }
+}
+
+pub fn router_with_state<F: SessionClientFactory>(state: AppState<F>) -> Router {
+    routes::<F>()
         .layer(Extension(state.clusters))
         .layer(Extension(state.lag_rules))
+        .layer(Extension(state.sessions))
 }
 
 pub fn router() -> Router {
+    routes::<KafkaSessionClientFactory>()
+}
+
+fn routes<F: SessionClientFactory>() -> Router {
     Router::new()
         .route("/api/health", get(health::health))
         .route("/api/clusters", get(clusters::list).post(clusters::create))
@@ -42,12 +66,14 @@ pub fn router() -> Router {
             "/api/clusters/{id}",
             get(clusters::get)
                 .put(clusters::update)
-                .delete(clusters::delete),
+                .delete(clusters::delete::<F>),
         )
         .route(
             "/api/clusters/{id}/lag-rules",
             get(lag_rules::get).put(lag_rules::put),
         )
+        .route("/api/clusters/{id}/sessions", post(sessions::create::<F>))
+        .route("/api/sessions/{id}", delete(sessions::delete::<F>))
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
         .layer(middleware::from_fn(error::request_id))

@@ -5,6 +5,7 @@ pub mod db;
 pub mod domain;
 pub mod error;
 pub mod kafka;
+pub mod sessions;
 
 use axum::Router;
 
