@@ -221,3 +221,98 @@ it('retains the last snapshot but marks it disconnected while rebuilding', async
   expect(result.current.status).toBe('connected')
   expect(result.current.history).toHaveLength(2)
 })
+
+it('backs off on a server collection still running after hidden cancellation and resumes the same session', async () => {
+  let serverBusy = false
+  let finishCollection!: () => void
+  let requests = 0
+  let activeCollections = 0
+  let maxCollections = 0
+  vi.mocked(sessionsApi.snapshot).mockImplementation(async (id, signal) => {
+    collected.push(id)
+    requests++
+    if (serverBusy) throw new ApiError(409, { code: 'SNAPSHOT_IN_PROGRESS' })
+    activeCollections++
+    maxCollections = Math.max(maxCollections, activeCollections)
+    if (requests === 2) {
+      serverBusy = true
+      finishCollection = () => { serverBusy = false; activeCollections-- }
+      // Abort ends only the HTTP request; the simulated server collection stays busy.
+      await new Promise<never>((_, reject) => signal!.addEventListener('abort',
+        () => reject(new DOMException('HTTP request cancelled', 'AbortError')), { once: true }))
+    }
+    activeCollections--
+    return { ...snapshotFixture, collectedAt: new Date(requests * 1000).toISOString() }
+  })
+  const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
+  await flush()
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+  expect(requests).toBe(2)
+  await visibility('hidden')
+  await visibility('visible')
+  expect(requests).toBe(3)
+  expect(result.current.status).toBe('connected')
+  expect(result.current.error).toBeNull()
+  expect(created).toEqual(['a-1'])
+  expect(closed).toEqual([])
+  await act(async () => { void result.current.refresh(); await vi.advanceTimersByTimeAsync(250) })
+  expect(requests).toBe(3)
+  finishCollection()
+  await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+  await flush()
+  expect(requests).toBe(4)
+  expect(result.current.history).toHaveLength(2)
+  expect(result.current.snapshot?.collectedAt).toBe(new Date(4000).toISOString())
+  expect(created).toEqual(['a-1'])
+  expect(closed).toEqual([])
+  expect(maxCollections).toBe(1)
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+  await flush()
+  expect(requests).toBe(5)
+})
+
+it.each(['hidden', 'unmount'] as const)('cancels SNAPSHOT_IN_PROGRESS backoff on %s', async action => {
+  let requests = 0
+  vi.mocked(sessionsApi.snapshot).mockImplementation(async () => {
+    requests++
+    throw new ApiError(409, { code: 'SNAPSHOT_IN_PROGRESS' })
+  })
+  const { result, unmount } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
+  await flush()
+  expect(result.current.status).toBe('connecting')
+  expect(result.current.error).toBeNull()
+  if (action === 'hidden') await visibility('hidden')
+  else unmount()
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+  expect(requests).toBe(1)
+  expect(created).toEqual(['a-1'])
+  expect(closed).toEqual(action === 'hidden' ? [] : ['a-1'])
+})
+
+it('caps busy backoff and preserves the independent single expiry rebuild allowance', async () => {
+  const busy = new ApiError(409, { code: 'SNAPSHOT_IN_PROGRESS' })
+  const expired = new ApiError(410, { code: 'SESSION_EXPIRED' })
+  const failures = [busy, busy, busy, busy, expired, busy]
+  vi.mocked(sessionsApi.snapshot).mockImplementation(async id => {
+    collected.push(id)
+    const failure = failures.shift()
+    if (failure) throw failure
+    return snapshotFixture
+  })
+  const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
+  await flush()
+  // Retries occur at 500, 1500, 3500, and 5500 ms: the delay caps at 2 seconds.
+  await act(async () => { await vi.advanceTimersByTimeAsync(5498) })
+  expect(collected).toEqual(['a-1', 'a-1', 'a-1', 'a-1'])
+  expect(created).toEqual(['a-1'])
+  expect(closed).toEqual([])
+  await act(async () => { await vi.advanceTimersByTimeAsync(2) })
+  expect(created).toEqual(['a-1', 'a-2'])
+  expect(closed).toEqual(['a-1'])
+  expect(result.current.error).toBeNull()
+  await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+  await flush()
+  expect(collected).toEqual(['a-1', 'a-1', 'a-1', 'a-1', 'a-1', 'a-2', 'a-2'])
+  expect(result.current.status).toBe('connected')
+  expect(result.current.history).toHaveLength(1)
+})

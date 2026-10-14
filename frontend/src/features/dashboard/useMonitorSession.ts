@@ -15,6 +15,22 @@ function closeLease(runtime: { lease: Lease | undefined }) {
   if (lease) void sessionsApi.close(lease.sessionId).catch(() => {})
 }
 
+function waitForCollection(milliseconds: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    const cancelled = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', cancelled)
+      reject(new DOMException('Monitoring paused', 'AbortError'))
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', cancelled)
+      resolve()
+    }, milliseconds)
+    if (signal.aborted) cancelled()
+    else signal.addEventListener('abort', cancelled, { once: true })
+  })
+}
+
 export function useMonitorSession(clusterId: string | null, refreshSeconds: RefreshSeconds = 5, enabled = true) {
   const client = useQueryClient()
   const [visible, setVisible] = useState(() => document.visibilityState === 'visible')
@@ -104,16 +120,32 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
         if (!usable()) throw aborted()
         return runtime.lease!
       }
+      async function collect(lease: Lease): Promise<ClusterSnapshot> {
+        let backoff = 500
+        while (usable()) {
+          try {
+            return await sessionsApi.snapshot(lease.sessionId, signal)
+          } catch (error) {
+            if (!(error instanceof ApiError && error.status === 409 && error.code === 'SNAPSHOT_IN_PROGRESS') || !usable()) throw error
+            // The server renews a live lease before checking its collection lock.
+            // Cancelling HTTP does not cancel that server-side collection.
+            lease.expiresAt = Date.now() + lease.leaseSeconds * 1000
+            await waitForCollection(backoff, signal)
+            backoff = Math.min(backoff * 2, 2000)
+          }
+        }
+        throw aborted()
+      }
       try {
         let lease = await connect()
         let snapshot: ClusterSnapshot
         try {
-          snapshot = await sessionsApi.snapshot(lease.sessionId, signal)
+          snapshot = await collect(lease)
         } catch (error) {
           if (!(error instanceof ApiError && error.code === 'SESSION_EXPIRED') || !usable()) throw error
           close()
           lease = await connect()
-          snapshot = await sessionsApi.snapshot(lease.sessionId, signal)
+          snapshot = await collect(lease)
         }
         if (!usable()) throw aborted()
         lease.expiresAt = Date.now() + lease.leaseSeconds * 1000
