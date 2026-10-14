@@ -2,6 +2,8 @@
 
 Kafka 只读监控面板：管理集群连接配置，查看 Topic / Partition 水位、Consumer Group Lag、最近一小时趋势，以及集群默认和 Group / Topic 自定义 Lag 规则。后端为 Rust / Axum，前端为 React / Vite，SQLite 只保存配置与加密凭据。常规应用不会创建 Topic、生产消息或提交消费位置。
 
+当前版本没有后台常驻采集、跨页面持久化指标、消息内容浏览、消费位置重置、通知渠道或内置用户认证。数据范围受 Kafka 账户权限限制。截图约定放在 `docs/screenshots/`（当前未附截图）；如补充截图，请使用临时测试集群并隐藏连接地址及所有凭据。
+
 ## 系统要求
 
 - 支持 Rust 2024 edition 的稳定 Rust 工具链、Cargo、C/C++ 编译器、CMake、Perl 和 make（构建 vendored librdkafka / OpenSSL）。macOS 可使用 Xcode Command Line Tools；Linux 需安装相应编译工具。
@@ -38,9 +40,32 @@ npm --prefix frontend run build
 npm --prefix frontend run preview -- --host 127.0.0.1
 ```
 
+## 环境变量
+
+| 变量 | 默认值 / 用途 |
+| --- | --- |
+| `KAFKA_DASHBOARD_MASTER_KEY` | 必填；32 字节随机值的标准 Base64，同一数据库重启时保持不变 |
+| `DATABASE_URL` | 源码运行为 `sqlite://kafka-dashboard.db`；发行启动器为 `sqlite://data/kafka-dashboard.db?mode=rwc` |
+| `KAFKA_DASHBOARD_BIND` | `127.0.0.1:3000`，HTTP 监听地址 |
+| `KAFKA_DASHBOARD_WEB_DIR` | 源码运行不设置时仅提供 API；发行启动器自动指定包内 `web/`，自定义目录必须含 `index.html` |
+| `KAFKA_DASHBOARD_API_TARGET` | Vite 开发/preview 代理目的地，默认 `http://127.0.0.1:3000` |
+| `RUST_LOG` | 可用 `info` 设置日志级别；调试时也不得输出敏感配置 |
+| `KAFKA_TEST_PORT` | 手动 Compose 测试 broker 默认宿主端口 `19092`；一键 E2E 自动选择 |
+
+应用和发行启动器均不会自动读取 `.env`，需由 shell 或服务管理器注入变量。`packaging/.env.example` 是占位示例，不能直接作为真实主密钥使用。
+
 ## 连接与凭据
 
 Bootstrap Servers 填写逗号分隔的 `host:port`。后端必须能访问 Kafka 返回的 advertised listeners 地址。支持 `PLAINTEXT`、`SSL`、`SASL_PLAINTEXT` 和 `SASL_SSL`；SASL Mechanism 可填 `PLAIN`、`SCRAM-SHA-256` 或 `SCRAM-SHA-512`，同时填写用户名和密码。TLS 使用 CA PEM，双向 TLS 另需成对提供客户端证书 PEM 和客户端私钥 PEM。
+
+| Security Protocol | 连接配置 |
+| --- | --- |
+| `PLAINTEXT` | 无 SASL 或 TLS；仅适合受信任网络 |
+| `SSL` | TLS；按 broker 信任链提供 CA，双向认证时同时提供客户端证书和私钥 |
+| `SASL_PLAINTEXT` | SASL mechanism、用户名、密码；传输不加密 |
+| `SASL_SSL` | SASL mechanism、用户名、密码，加 TLS 配置 |
+
+不支持 OAuth/OIDC、Kerberos 或任意 librdkafka 参数透传。TLS 客户端证书和私钥必须成对填写；不要把 SASL 字段配置到非 SASL 协议。
 
 密码、CA、客户端证书和私钥以 AES-256-GCM 加密存入 SQLite，API 只返回“已配置”标志，不回显内容。编辑时敏感字段留空或省略表示保留；API 显式传入 `clearPassword: true` 可清空密码。请求体上限为 256 KiB，超限返回 413；连接错误及校验错误使用安全错误消息与 Request ID。
 
@@ -49,7 +74,8 @@ Bootstrap Servers 填写逗号分隔的 `host:port`。后端必须能访问 Kafk
 - Low watermark 是最早保留的位置，High watermark 是下一条将写入的位置；非空分区的最大消息 Offset 为 `high - 1`，空分区显示 `—`。
 - `high - low` 是 Offset 范围估算，不等于实际消息数（压缩、删除、事务记录都会影响）。各 Partition Offset 相互独立，Topic 汇总不能当成统一序列。
 - Committed Offset 是消费组提交的下一条待消费位置，Lag 为 `max(high - committed, 0)`。未提交、不可用和采集失败显示未知，不能当成 0；部分失败保留旧显示值并标记陈旧。
-- 自定义 Group / Topic 规则覆盖集群默认规则。正常为 `Lag ≤ 正常上限`；高 Lag 为达到高 Lag 起始值，中间为积压。超限需连续达到设定时长；隐藏页面、连接中断、重建会话或切换集群会重置连续计时。
+- 自定义 Group / Topic 规则覆盖集群默认规则，并在对应行显示自定义标记。默认正常为 `0–999`，积压为 `1000–4999`，高 Lag 为 `≥5000`，持续超限时间为 `30 秒`。自定义时必须满足 `0 ≤ 正常上限 < 高 Lag 起始值`，持续时间可为 0。
+- Lag 超过正常上限后，从首个有效超限样本开始计时；持续达到设定时长才显示积压或高 Lag，之前状态仍为正常。恢复正常会清零，隐藏页面、连接中断、采集异常、未提交、重建会话、规则变化或切换集群也会重置。Flink checkpoint 引起的短暂锯齿形 Lag 因此不会立刻变成告警状态；页面未打开期间不能推断持续超限。
 - 图表仅保留当前页面内存中最近一小时样本；刷新页面清空历史。采样间隔可选 3 / 5 / 10 秒。
 
 ## 短租约与资源释放
@@ -65,6 +91,7 @@ cargo test --workspace
 npm --prefix frontend run test -- --run
 npm --prefix frontend run build
 node --test scripts/e2e-preview.test.mjs
+node --test tests/release_scripts.test.mjs
 npm --prefix frontend exec -- playwright install chromium
 npm --prefix frontend run test:e2e
 git diff --check
@@ -118,3 +145,19 @@ kafka-dashboard/
 运行机器不需要 Node.js、Rust、系统 librdkafka 或系统 OpenSSL。Linux 二进制使用 musl，静态链接 librdkafka、SQLite 和 vendored OpenSSL；macOS 保留操作系统原生库依赖（如 libSystem），并非完全静态。Linux 包不携带宿主机 CA 信任库，私有 TLS 请在集群设置显式配置 CA PEM。网络/DNS、可写存储和操作系统执行许可仍需可用。
 
 验证命令需在构建主机执行，使用 `curl`、`file`、`shasum`、`sqlite3`、`otool`、`openssl` 和 Docker。它校验完整文件清单、哈希、架构和静态链接边界，在临时副本运行 macOS 程序与 Linux/amd64 最小容器，验证版本、SQLite 迁移、健康接口、页面/资源、SPA fallback 和 SIGTERM 退出；验证后清理临时进程和容器，不向发行目录写入数据库。
+
+## 故障排查
+
+| 现象 | 检查方法 |
+| --- | --- |
+| 启动提示主密钥无效或读取旧凭据失败 | 确认 Base64 解码后为 32 字节，并使用该数据库最初的密钥；不要通过重新生成密钥修复已有密文 |
+| 无法初始化数据库 | 检查 SQLite URL、父目录是否存在以及运行账户读写权限；移动发行包时保留 `data/` 与原密钥 |
+| 连接超时或 DNS 错误 | 从后端所在机器检查 Bootstrap Servers 和所有 advertised listeners 是否可达，核对 DNS、防火墙与连接超时配置 |
+| SASL/TLS 失败 | 核对四类协议、SASL mechanism、账户权限和证书信任链；双向 TLS 证书/私钥须配对；Linux 发行包不含宿主 CA 信任库 |
+| 数据未知、陈旧或缺少消费组 | 查看页面安全错误及 Request ID，检查只读账户的元数据/消费组权限；未提交 Offset 不等于 Lag 为 0；部分失败不会覆盖旧值为 0 |
+| 状态一直正常或计时重置 | 检查默认/自定义阈值、持续时间及页面可见性；仅连续有效超限采样累积计时 |
+| 页面 404 或 `/api` 请求失败 | 源码运行先启动 Vite；生产检查 `KAFKA_DASHBOARD_WEB_DIR` 中的 `index.html`，开发检查代理目的地；未知 `/api` 返回 JSON 404 是预期行为 |
+| E2E 无法启动 | 检查 Docker 是否运行、Compose v2 是否支持 `--wait`、Chromium 是否已安装，并允许测试进程监听本地临时端口 |
+| 发行验证失败 | 在 Apple Silicon macOS 上运行，确认 Docker 可运行 Linux/amd64；哈希不匹配时重新构建或重新复制完整发行包 |
+
+提交故障信息时只提供安全错误、Request ID、版本与复现步骤；不要附真实数据库、环境变量转储、PEM 或包含请求体的 trace。

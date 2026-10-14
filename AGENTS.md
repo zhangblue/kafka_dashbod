@@ -1,0 +1,60 @@
+# Kafka Lens：代理开发约定
+
+所有命令默认从仓库根目录执行。先阅读 `README.md` 和与任务相关的源码、测试；设计与计划位于 `docs/superpowers/`。保留用户已有变更，不把无关改动纳入提交。
+
+## 架构与职责
+
+- `backend/src/domain/`：Offset、Lag、配置和快照的领域类型与纯计算；未知值必须显式表达，不能降为 0。
+- `backend/src/api/`：Axum `/api` JSON 接口、校验与统一安全错误；`static_assets/` 负责生产静态资源。API 路径（包括未知 API）不得回退为 HTML，SPA fallback 只适用于允许的页面请求；保留静态文件路径、符号链接与目录能力的安全边界。
+- `backend/src/db/`、`backend/migrations/`：SQLite 配置仓储与迁移。只持久化集群配置、加密凭据及 Lag 规则，不存储指标历史。
+- `backend/src/crypto.rs`：主密钥解析与 AES-256-GCM 凭据加密；不得绕过仓储加密保存秘密。
+- `backend/src/kafka/`：只读 librdkafka 适配和有界采集。普通应用禁止生产消息、创建 Topic、提交或重置消费位置。
+- `backend/src/sessions/`：按需客户端和 15 秒短租约。快照续租，同一会话采集互斥；5 秒清理过期会话。关闭、删除集群、取消任务及进程退出必须等待在途创建/采集/释放，不能把阻塞原生工作遗留到后台。
+- `frontend/src/api/`：唯一 HTTP 客户端、共享类型；`frontend/src/features/`：设置、概览、Topics、Consumer Groups、Lag 规则、会话及内存历史；`frontend/src/components/`：公共展示组件。
+- `backend/tests/`、前端 `*.test.ts(x)`：领域、仓储、API、进程、交互测试；`frontend/e2e/` 与 `scripts/`：一次性 Kafka + 浏览器验收；`tests/`：发行脚本回归。
+- `packaging/`：启动器和发行模板；`tools/`：唯一构建/验证入口；`dist/`：生成的双平台发行包。
+
+## 行为约束
+
+保存配置不保持 Kafka 连接。只有打开仪表盘或需要采样的规则页面才创建会话；页面隐藏停止轮询，离开页面、切换或删除集群主动释放，短租约兜底。历史仅在当前页面内存中保留一小时；刷新间隔仅 3/5/10 秒。
+
+Low 是保留起点，High 是下一写入位置，非空分区最大消息 Offset 为 High - 1，范围估算为 High - Low，不能称为精确消息数。Lag 为 max(High - committed, 0)；未提交、未知、部分失败与陈旧数据必须保留区别。自定义规则按 Group + Topic 覆盖默认；持续超限计时仅累积连续可见有效采样，隐藏、断开、换会话或规则变化时重置。
+
+## 安全与生成文件
+
+主密钥由 `KAFKA_DASHBOARD_MASTER_KEY` 提供，标准 Base64 解码后必须恰好 32 字节；没有开发默认密钥。API 只返回凭据配置标志，不回显秘密。不要把原生 Kafka 错误、请求体、连接密码、PEM、主密钥或数据库内容写入日志、截图、测试附件或错误响应。保留 256 KiB 请求上限、Request ID 和脱敏错误。
+
+服务没有内置认证；默认只监听回环地址，部署需要内网或认证反向代理及 HTTPS。只使用明确授权的一次性 broker 运行写入 fixture；普通集群始终只读。
+
+禁止提交 `dist/`、`frontend/dist/`、`target/`、`node_modules/`、SQLite 文件及 sidecar、`.env`、私钥、真实证书、日志、Playwright 报告/trace。`packaging/.env.example` 只含占位符，可以提交。锁文件 `Cargo.lock`、`frontend/package-lock.json` 必须保留。生成产物从源码重建，不手改发布文件；`.superpowers/` 是本地工作记录，不属于交付源码。
+
+## 开发与验证
+
+后端启动前按 README 安全设置主密钥，然后运行 `cargo run -p backend --bin kafka-dashboard`。前端使用 `npm --prefix frontend ci`、`npm --prefix frontend run dev -- --host 127.0.0.1`。生产静态目录由 `KAFKA_DASHBOARD_WEB_DIR` 配置；开发代理地址用 `KAFKA_DASHBOARD_API_TARGET`。
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+npm --prefix frontend run test -- --run
+npm --prefix frontend run build
+node --test scripts/e2e-preview.test.mjs
+node --test tests/release_scripts.test.mjs
+npm --prefix frontend run test:e2e
+./tools/build-release.sh
+./tools/verify-release.sh dist/kafka-dashboard
+git diff --check
+```
+
+功能和缺陷修改遵循 TDD：先写有意义的失败测试，确认失败原因，再做最小实现并重跑相关回归。纯文档修改无需虚构测试。单元测试不依赖真实 Kafka；broker 测试默认 ignored，由明确的一次性环境执行。E2E 启动/清理由脚本统一管理，不复用未知健康服务。打包及双平台验证需要 Apple Silicon macOS 和可运行 Linux/amd64 的 Docker；不要并发打包。
+
+提交前自审差异、运行与影响范围相称的验证和秘密扫描，记录实际结果与限制，禁止把未运行、被跳过或失败的检查报告为通过。提交应保持单一目的并包含所需源码、测试和文档；不要自动推送、强推或覆盖远端历史，遵循当前用户授权的交付流程。
+
+## Context7 文档流程
+
+涉及库、框架、SDK、API、CLI 工具或云服务的语法、配置、版本迁移、专属调试及安装问题时，必须查询 Context7 当前文档，即使熟悉该技术也不凭记忆回答。优先于网页搜索。纯重构、从头编写普通脚本、业务逻辑调试、代码审查及通用编程概念不触发此要求。
+
+1. 首先调用 `resolve-library-id`，传入库名和要查的问题；仅当用户已给出准确 `/org/project` ID 时可以跳过解析。
+2. 按精确名称、描述相关性、代码片段数量、来源信誉（优先官方及 High/Medium）和 benchmark score 选择匹配项。结果不合适时更换名称或问题表述；用户指定版本时使用对应版本 ID。
+3. 使用所选 ID 调用 `query-docs`，每次围绕单一概念提出具体问题。路由、认证、缓存等独立概念分别查询；只有研究它们之间的交互时才组合查询。
+4. 根据实际取回的文档实现或回答，必要时标明版本与来源。禁止向文档查询发送秘密、个人数据或专有源码。
