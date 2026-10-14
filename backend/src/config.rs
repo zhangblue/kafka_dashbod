@@ -46,6 +46,9 @@ impl Config {
             if !root.is_dir() || !index.is_file() || !index.starts_with(&root) {
                 return Err(ConfigError::InvalidWebDirectory);
             }
+            // Apply the serving layer's no-symlink index policy before opening SQLite.
+            crate::api::static_assets::StaticRoot::new(&root)
+                .map_err(|_| ConfigError::InvalidWebDirectory)?;
             config.web_dir = Some(root);
         }
         Ok(config)

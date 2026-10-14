@@ -17,7 +17,7 @@ async fn connection_endpoint_rejects_invalid_security_and_unknown_clusters() {
 
     let mut input = cluster("invalid-security");
     input["securityProtocol"] = json!("SASL_SSL");
-    input["saslMechanism"] = json!("GSSAPI");
+    input["saslMechanism"] = json!("PLAIN");
     input["username"] = json!("reader");
     input["password"] = json!("test-password");
     let created = request(&ctx.app, "POST", "/api/clusters", Some(input)).await;
@@ -26,6 +26,13 @@ async fn connection_endpoint_rejects_invalid_security_and_unknown_clusters() {
         .as_str()
         .unwrap()
         .to_owned();
+    // Older stored settings may predate validation at save time. The connection
+    // boundary must still reject unsupported mechanisms without exposing values.
+    sqlx::query("UPDATE clusters SET sasl_mechanism = 'GSSAPI' WHERE id = ?")
+        .bind(&id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
     let response = request(&ctx.app, "POST", &format!("/api/clusters/{id}/test"), None).await;
     assert_eq!(response.status(), 422);
     let text = response_text(response).await;

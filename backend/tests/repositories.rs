@@ -21,6 +21,14 @@ fn cluster_input(name: &str) -> ClusterInput {
     input
 }
 
+fn cluster_edit(name: &str) -> ClusterInput {
+    let mut input = ClusterInput::plaintext(name, "broker:9092");
+    input.security_protocol = SecurityProtocol::SaslSsl;
+    input.sasl_mechanism = Some("SCRAM-SHA-256".into());
+    input.username = Some("fixture-user".into());
+    input
+}
+
 async fn repositories() -> (sqlx::SqlitePool, ClusterRepository, LagRuleRepository) {
     let pool = db::connect("sqlite::memory:").await.unwrap();
     let clusters = ClusterRepository::new(pool.clone(), SecretCipher::from_key([7; 32]));
@@ -117,7 +125,7 @@ async fn cluster_updates_delete_and_duplicate_names_preserve_repository_contract
             .await
             .is_err()
     );
-    let mut replacement = ClusterInput::plaintext("replacement", "broker:9092");
+    let mut replacement = cluster_edit("replacement");
     replacement.default_normal_lag_max = 20;
     replacement.default_high_lag_min = 200;
     clusters
@@ -166,7 +174,7 @@ async fn cluster_update_preserves_omitted_and_empty_secrets_and_merges_partial_e
         .create(&cluster_input("fixture-cluster"))
         .await
         .unwrap();
-    let mut edit = ClusterInput::plaintext("fixture-cluster", "broker:9092");
+    let mut edit = cluster_edit("fixture-cluster");
     clusters.update(&created.id, &edit).await.unwrap().unwrap();
     let omitted = clusters
         .decrypted_config(&created.id)

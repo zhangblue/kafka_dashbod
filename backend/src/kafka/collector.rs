@@ -41,6 +41,7 @@ pub struct TopicMetadata {
 
 pub struct GroupMetadata {
     pub group_id: String,
+    pub assigned_topics: Vec<String>,
 }
 
 pub struct CommittedOffset {
@@ -239,6 +240,13 @@ pub async fn collect(
             committed.insert(offset.partition, value);
         }
         for topic in &topic_snapshots {
+            if !group.assigned_topics.contains(&topic.topic)
+                && !committed
+                    .iter()
+                    .any(|(partition, offset)| partition.topic == topic.topic && offset.is_some())
+            {
+                continue;
+            }
             let rows = topic
                 .partitions
                 .iter()
@@ -301,6 +309,65 @@ fn native_error(error: KafkaError) -> ProbeError {
         }
         _ => ProbeError::Query,
     }
+}
+
+// Kafka ConsumerProtocolAssignment versions 0–3 use the same non-flexible schema.
+// Newer versions preserve the prefix; lengths are checked before any allocation.
+fn assignment_topics(mut bytes: &[u8]) -> Result<Vec<String>, ProbeError> {
+    fn take<'a>(bytes: &mut &'a [u8], count: usize) -> Result<&'a [u8], ProbeError> {
+        let (value, rest) = bytes.split_at_checked(count).ok_or(ProbeError::Query)?;
+        *bytes = rest;
+        Ok(value)
+    }
+    fn short(bytes: &mut &[u8]) -> Result<i16, ProbeError> {
+        Ok(i16::from_be_bytes(
+            take(bytes, 2)?.try_into().map_err(|_| ProbeError::Query)?,
+        ))
+    }
+    fn integer(bytes: &mut &[u8]) -> Result<i32, ProbeError> {
+        Ok(i32::from_be_bytes(
+            take(bytes, 4)?.try_into().map_err(|_| ProbeError::Query)?,
+        ))
+    }
+    if short(&mut bytes)? < 0 {
+        return Err(ProbeError::Query);
+    }
+    let count = usize::try_from(integer(&mut bytes)?).map_err(|_| ProbeError::Query)?;
+    if count > bytes.len() / 6 {
+        return Err(ProbeError::Query);
+    }
+    let mut topics = Vec::new();
+    for _ in 0..count {
+        let length = usize::try_from(short(&mut bytes)?).map_err(|_| ProbeError::Query)?;
+        let topic =
+            std::str::from_utf8(take(&mut bytes, length)?).map_err(|_| ProbeError::Query)?;
+        let partitions = usize::try_from(integer(&mut bytes)?).map_err(|_| ProbeError::Query)?;
+        let array = take(
+            &mut bytes,
+            partitions.checked_mul(4).ok_or(ProbeError::Query)?,
+        )?;
+        if array
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|value| i32::from_be_bytes(*value) < 0)
+        {
+            return Err(ProbeError::Query);
+        }
+        if partitions > 0 && !topic.is_empty() {
+            topics.push(topic.to_owned());
+        }
+    }
+    match integer(&mut bytes)? {
+        -1 => {}
+        value if value >= 0 => {
+            take(&mut bytes, value as usize)?;
+        }
+        _ => return Err(ProbeError::Query),
+    }
+    topics.sort();
+    topics.dedup();
+    Ok(topics)
 }
 
 impl NativeProbe {
@@ -417,7 +484,58 @@ fn discover_groups(
                 native_error(KafkaError::GroupListFetch(entry.err.into())).failure("groups", &name),
             );
         }
-        groups.push(GroupMetadata { group_id: name });
+        let mut assigned_topics = Vec::new();
+        // Only the consumer protocol has the topic/partition assignment wire schema.
+        let consumer = !entry.protocol_type.is_null()
+            // SAFETY: strings are NUL-terminated and owned by this live native list.
+            && unsafe { std::ffi::CStr::from_ptr(entry.protocol_type) }.to_bytes() == b"consumer";
+        if consumer && entry.member_cnt > 0 {
+            let count = entry.member_cnt as usize;
+            if entry.members.is_null()
+                || count
+                    > isize::MAX as usize
+                        / std::mem::size_of::<bindings::rd_kafka_group_member_info>()
+            {
+                failures
+                    .lock()
+                    .expect("failures poisoned")
+                    .push(ProbeError::Query.failure("groups", &name));
+            } else {
+                // SAFETY: native list owns member_cnt aligned member entries until List drops.
+                for member in unsafe { std::slice::from_raw_parts(entry.members, count) } {
+                    if member.member_assignment_size == 0 {
+                        continue;
+                    }
+                    let size = usize::try_from(member.member_assignment_size)
+                        .ok()
+                        .filter(|size| *size <= isize::MAX as usize);
+                    let topics = if let Some(size) =
+                        size.filter(|_| !member.member_assignment.is_null())
+                    {
+                        // SAFETY: librdkafka owns size initialized assignment bytes in this list.
+                        let bytes = unsafe {
+                            std::slice::from_raw_parts(member.member_assignment.cast::<u8>(), size)
+                        };
+                        assignment_topics(bytes)
+                    } else {
+                        Err(ProbeError::Query)
+                    };
+                    match topics {
+                        Ok(topics) => assigned_topics.extend(topics),
+                        Err(error) => failures
+                            .lock()
+                            .expect("failures poisoned")
+                            .push(error.failure("groups", &name)),
+                    }
+                }
+            }
+        }
+        assigned_topics.sort();
+        assigned_topics.dedup();
+        groups.push(GroupMetadata {
+            group_id: name,
+            assigned_topics,
+        });
     }
     Ok(groups)
 }
@@ -539,6 +657,22 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    // Consumer assignment includes topic/partition arrays, not subscriptions or user data.
+    #[test]
+    fn parses_assignment_topics_and_rejects_truncated_or_invalid_lengths() {
+        let assignment = b"\x00\x03\x00\x00\x00\x02\x00\x06orders\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x02\x00\x05empty\x00\x00\x00\x00\xff\xff\xff\xff";
+        assert_eq!(assignment_topics(assignment).unwrap(), ["orders"]);
+        for end in 0..assignment.len() {
+            assert!(
+                assignment_topics(&assignment[..end]).is_err(),
+                "accepted truncated assignment {end}"
+            );
+        }
+        assert!(assignment_topics(b"\x00\x00\x7f\xff\xff\xff").is_err());
+        assert!(assignment_topics(b"\x00\x00\xff\xff\xff\xff").is_err());
+        assert!(assignment_topics(b"\xff\xff\x00\x00\x00\x00\xff\xff\xff\xff").is_err());
+    }
+
     struct FakeProbe {
         active: AtomicUsize,
         peak: AtomicUsize,
@@ -547,6 +681,8 @@ mod tests {
         topics_fails: bool,
         all_watermarks_fail: bool,
         multiple_groups: bool,
+        assigned_topics: Vec<String>,
+        no_offsets: bool,
     }
 
     #[async_trait::async_trait]
@@ -593,10 +729,12 @@ mod tests {
             // No active members are required to discover an inactive group.
             let mut groups = vec![GroupMetadata {
                 group_id: "inactive".into(),
+                assigned_topics: self.assigned_topics.clone(),
             }];
             if self.multiple_groups {
                 groups.push(GroupMetadata {
                     group_id: "live".into(),
+                    assigned_topics: Vec::new(),
                 });
             }
             Ok(groups)
@@ -630,7 +768,9 @@ mod tests {
                 .iter()
                 .map(|p| CommittedOffset {
                     partition: p.clone(),
-                    offset: if p.topic == "orders" && p.partition == 0 {
+                    offset: if self.no_offsets {
+                        Some(-1)
+                    } else if p.topic == "orders" && p.partition == 0 {
                         Some(if group == "inactive" { 90_031 } else { 98_240 })
                     } else if p.topic == "orders" && p.partition == 2 {
                         Some(77)
@@ -652,7 +792,64 @@ mod tests {
             topics_fails: false,
             all_watermarks_fail: false,
             multiple_groups: false,
+            assigned_topics: Vec::new(),
+            no_offsets: false,
         }
+    }
+
+    // Unrelated topics cannot produce artificial uncommitted/abnormal group rows.
+    #[tokio::test]
+    async fn committed_topics_exclude_unrelated_topics_but_keep_every_associated_partition() {
+        let snapshot = collect(
+            &probe(Duration::ZERO),
+            "cluster",
+            CollectionOptions::default(),
+        )
+        .await;
+        assert_eq!(snapshot.consumer_groups.len(), 1);
+        assert_eq!(snapshot.consumer_groups[0].topic, "orders");
+        assert_eq!(snapshot.consumer_groups[0].partitions.len(), 3);
+        assert_eq!(
+            snapshot.consumer_groups[0].partitions[1].committed_offset,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn unassociated_group_with_failed_offsets_keeps_only_its_identity() {
+        let mut probe = probe(Duration::ZERO);
+        probe.committed_fails = true;
+        let snapshot = collect(&probe, "cluster", CollectionOptions::default()).await;
+        assert_eq!(snapshot.consumer_group_ids, ["inactive"]);
+        assert!(snapshot.consumer_groups.is_empty());
+        assert!(
+            snapshot
+                .partial_failures
+                .iter()
+                .any(|failure| failure.scope == "committed")
+        );
+    }
+
+    #[tokio::test]
+    async fn active_assignments_keep_uncommitted_topic_and_negative_offsets_do_not_associate_topics()
+     {
+        let mut probe = probe(Duration::ZERO);
+        probe.assigned_topics = vec!["orders".into()];
+        probe.no_offsets = true;
+        let snapshot = collect(&probe, "cluster", CollectionOptions::default()).await;
+        assert_eq!(snapshot.consumer_groups.len(), 1);
+        assert_eq!(snapshot.consumer_groups[0].topic, "orders");
+        assert_eq!(snapshot.consumer_groups[0].partitions.len(), 3);
+        assert!(
+            snapshot.consumer_groups[0]
+                .partitions
+                .iter()
+                .all(|partition| partition.committed_offset.is_none())
+        );
+        probe.assigned_topics.clear();
+        let snapshot = collect(&probe, "cluster", CollectionOptions::default()).await;
+        assert!(snapshot.consumer_groups.is_empty());
+        assert_eq!(snapshot.consumer_group_ids, ["inactive"]);
     }
 
     // Dropping a failed partition, treating uncommitted as zero, or missing inactive groups breaks this.
@@ -743,9 +940,8 @@ mod tests {
         probe.committed_fails = true;
         let snapshot = collect(&probe, "cluster", CollectionOptions::default()).await;
         assert_eq!(snapshot.topics.len(), 2);
-        assert_eq!(snapshot.consumer_groups.len(), 2);
-        assert_eq!(snapshot.consumer_groups[0].group_id, "inactive");
-        assert_eq!(snapshot.consumer_groups[0].unknown_partition_count, 3);
+        assert!(snapshot.consumer_groups.is_empty());
+        assert_eq!(snapshot.consumer_group_ids, ["inactive"]);
         assert!(
             snapshot
                 .partial_failures

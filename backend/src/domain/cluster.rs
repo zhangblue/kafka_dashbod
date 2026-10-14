@@ -33,6 +33,7 @@ pub struct ClusterInput {
     pub ca_pem: Option<String>,
     pub client_certificate_pem: Option<String>,
     pub client_key_pem: Option<String>,
+    pub client_key_passphrase: Option<String>,
     #[serde(default = "default_timeout")]
     pub connection_timeout_ms: i64,
     #[serde(default = "default_normal")]
@@ -68,6 +69,7 @@ impl ClusterInput {
             ca_pem: None,
             client_certificate_pem: None,
             client_key_pem: None,
+            client_key_passphrase: None,
             connection_timeout_ms: default_timeout(),
             default_normal_lag_max: default_normal(),
             default_high_lag_min: default_high(),
@@ -82,6 +84,16 @@ impl std::fmt::Debug for ClusterInput {
     }
 }
 
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SecretClears {
+    pub clear_password: bool,
+    pub clear_ca_pem: bool,
+    pub clear_client_certificate_pem: bool,
+    pub clear_client_key_pem: bool,
+    pub clear_client_key_passphrase: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterDto {
@@ -91,6 +103,11 @@ pub struct ClusterDto {
     pub security_protocol: SecurityProtocol,
     pub sasl_mechanism: Option<String>,
     pub username: Option<String>,
+    pub password_configured: bool,
+    pub ca_pem_configured: bool,
+    pub client_certificate_pem_configured: bool,
+    pub client_key_pem_configured: bool,
+    pub client_key_passphrase_configured: bool,
     pub connection_timeout_ms: i64,
     pub default_normal_lag_max: i64,
     pub default_high_lag_min: i64,
@@ -109,6 +126,7 @@ pub struct DecryptedClusterConfig {
     pub ca_pem: Option<String>,
     pub client_certificate_pem: Option<String>,
     pub client_key_pem: Option<String>,
+    pub client_key_passphrase: Option<String>,
     pub connection_timeout: Duration,
 }
 
@@ -123,6 +141,7 @@ impl DecryptedClusterConfig {
             ca_pem: None,
             client_certificate_pem: None,
             client_key_pem: None,
+            client_key_passphrase: None,
             connection_timeout: Duration::from_secs(10),
         }
     }

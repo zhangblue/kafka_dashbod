@@ -83,7 +83,14 @@ fn routes<F: SessionClientFactory>(web_root: Option<static_assets::StaticRoot>) 
     let router = Router::new()
         .route("/api/health", get(health::health))
         .route("/api/clusters", get(clusters::list).post(clusters::create))
-        .route("/api/clusters/{id}/test", post(clusters::test_connection))
+        .route(
+            "/api/clusters/test",
+            post(clusters::test_draft_connection::<F>),
+        )
+        .route(
+            "/api/clusters/{id}/test",
+            post(clusters::test_connection::<F>),
+        )
         .route(
             "/api/clusters/{id}",
             get(clusters::get)

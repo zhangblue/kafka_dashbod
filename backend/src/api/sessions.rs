@@ -39,7 +39,11 @@ pub async fn delete<F: SessionClientFactory>(
     Extension(sessions): Extension<SessionManager<F>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    sessions.close(&id).await?;
+    let cluster_id = sessions.cluster_id(&id).await;
+    sessions
+        .close(&id)
+        .await
+        .map_err(|error| ApiError::from(error).with_cluster_id(cluster_id))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -47,7 +51,10 @@ pub async fn snapshot<F: SessionClientFactory>(
     Extension(sessions): Extension<SessionManager<F>>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::domain::snapshot::ClusterSnapshot>, ApiError> {
-    Ok(Json(sessions.snapshot(&id).await?))
+    let cluster_id = sessions.cluster_id(&id).await;
+    Ok(Json(sessions.snapshot(&id).await.map_err(|error| {
+        ApiError::from(error).with_cluster_id(cluster_id)
+    })?))
 }
 
 impl From<SessionError> for ApiError {

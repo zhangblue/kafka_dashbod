@@ -26,13 +26,18 @@ use serde_json::json;
 use support::*;
 use tower::ServiceExt;
 
+fn secure_edit(name: &str) -> serde_json::Value {
+    json!({"name":name,"bootstrapServers":"broker:9093","securityProtocol":"SASL_SSL","saslMechanism":"PLAIN","username":"reader"})
+}
+
 // Any response built from private connection settings instead of the public DTO leaks secrets.
 #[tokio::test]
 async fn create_read_list_update_and_delete_cluster_never_expose_secrets() {
     let ctx = test_app().await;
-    let mut input = cluster("prod");
+    let mut input = secure_edit("prod");
     input["password"] = json!("fixture-password");
     input["clientKeyPem"] = json!("fixture-private-key");
+    input["clientCertificatePem"] = json!("fixture-certificate");
     input["caPem"] = json!("fixture-ca");
     let response = request(&ctx.app, "POST", "/api/clusters", Some(input)).await;
     assert_eq!(response.status(), 201);
@@ -47,7 +52,7 @@ async fn create_read_list_update_and_delete_cluster_never_expose_secrets() {
                 &ctx.app,
                 "PUT",
                 &format!("/api/clusters/{id}"),
-                Some(cluster("renamed")),
+                Some(secure_edit("renamed")),
             )
             .await,
         )
@@ -58,8 +63,8 @@ async fn create_read_list_update_and_delete_cluster_never_expose_secrets() {
             "fixture-password",
             "fixture-private-key",
             "fixture-ca",
-            "password",
-            "clientKeyPem",
+            "\"password\":",
+            "\"clientKeyPem\":",
             "encryptedSecrets",
         ] {
             assert!(
@@ -84,17 +89,18 @@ async fn create_read_list_update_and_delete_cluster_never_expose_secrets() {
 #[tokio::test]
 async fn edits_preserve_secrets_until_explicit_password_clear() {
     let ctx = test_app().await;
-    let mut input = cluster("prod");
+    let mut input = secure_edit("prod");
     input["password"] = json!("fixture-password");
     input["clientKeyPem"] = json!("fixture-private-key");
+    input["clientCertificatePem"] = json!("fixture-certificate");
     let id =
         response_json(request(&ctx.app, "POST", "/api/clusters", Some(input)).await).await["id"]
             .as_str()
             .unwrap()
             .to_owned();
     for value in [
-        cluster("prod"),
-        json!({"name":"prod","bootstrapServers":"broker:9092","securityProtocol":"PLAINTEXT","password":"","clientKeyPem":""}),
+        secure_edit("prod"),
+        json!({"name":"prod","bootstrapServers":"broker:9093","securityProtocol":"SASL_SSL","saslMechanism":"PLAIN","username":"reader","password":"","clientKeyPem":""}),
     ] {
         assert_eq!(
             request(&ctx.app, "PUT", &format!("/api/clusters/{id}"), Some(value))
@@ -110,6 +116,7 @@ async fn edits_preserve_secrets_until_explicit_password_clear() {
         );
     }
     let mut edit = cluster("prod");
+    edit["securityProtocol"] = json!("SSL");
     edit["clearPassword"] = json!(true);
     assert_eq!(
         request(&ctx.app, "PUT", &format!("/api/clusters/{id}"), Some(edit))

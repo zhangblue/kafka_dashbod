@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use axum::{
     Json,
     body::Body,
-    extract::{Request, rejection::JsonRejection},
+    extract::{MatchedPath, Request, rejection::JsonRejection},
     http::{
         HeaderValue, StatusCode,
         header::{CONTENT_LENGTH, CONTENT_TYPE},
@@ -24,6 +24,8 @@ pub struct ErrorBody {
     pub details: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(skip)]
+    cluster_id: Option<Box<str>>,
 }
 
 pub struct ApiError {
@@ -40,6 +42,7 @@ impl ApiError {
                 message: message.into(),
                 details: None,
                 request_id: None,
+                cluster_id: None,
             },
         }
     }
@@ -52,6 +55,11 @@ impl ApiError {
         );
         error.body.details = Some(details);
         error
+    }
+
+    pub fn with_cluster_id(mut self, cluster_id: Option<String>) -> Self {
+        self.body.cluster_id = cluster_id.map(String::into_boxed_str);
+        self
     }
 
     pub fn cluster_not_found() -> Self {
@@ -107,8 +115,6 @@ impl From<RepositoryError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        // Never log SQL errors, request payloads, or decrypted configuration.
-        tracing::warn!(code = self.body.code, "API request failed");
         let mut response = (self.status, Json(self.body.clone())).into_response();
         response.extensions_mut().insert(self.body);
         response
@@ -116,6 +122,19 @@ impl IntoResponse for ApiError {
 }
 
 pub async fn request_id(request: Request, next: Next) -> Response {
+    // Use only registered route templates; never log full URIs or query strings.
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or("unmatched");
+    let operation = format!("{} {route}", request.method());
+    let cluster_id = route
+        .starts_with("/api/clusters/{id}")
+        .then(|| request.uri().path().split('/').nth(3))
+        .flatten()
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .map(|id| id.to_string());
     let id = request
         .headers()
         .get("x-request-id")
@@ -153,6 +172,13 @@ pub async fn request_id(request: Request, next: Next) -> Response {
     });
     if let Some(mut error) = error {
         error.request_id = id.to_str().ok().map(str::to_owned);
+        tracing::warn!(
+            code = error.code,
+            request_id = %error.request_id.as_deref().unwrap_or("unknown"),
+            cluster_id = %error.cluster_id.as_deref().or(cluster_id.as_deref()).unwrap_or("unavailable"),
+            operation,
+            "API request failed"
+        );
         *response.body_mut() =
             Body::from(serde_json::to_vec(&error).expect("ErrorBody is serializable"));
         response.headers_mut().remove(CONTENT_LENGTH);

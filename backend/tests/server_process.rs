@@ -15,6 +15,35 @@ impl Drop for Server {
     }
 }
 
+// A symlink index must fail with the setting name before opening the database.
+#[test]
+fn symlink_index_reports_web_dir_before_database_initialization() {
+    let web = tempfile::tempdir().unwrap();
+    let database = web.path().join("must-not-be-created.db");
+    std::fs::write(web.path().join("page.html"), "<main>test</main>").unwrap();
+    std::os::unix::fs::symlink("page.html", web.path().join("index.html")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
+        .env(
+            "KAFKA_DASHBOARD_MASTER_KEY",
+            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        )
+        .env("KAFKA_DASHBOARD_WEB_DIR", web.path())
+        .env(
+            "DATABASE_URL",
+            format!("sqlite://{}?mode=rwc", database.display()),
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("KAFKA_DASHBOARD_WEB_DIR"), "{stderr}");
+    assert!(!stderr.contains("database"), "{stderr}");
+    assert!(
+        !database.exists(),
+        "invalid web assets must fail before SQLite creation"
+    );
+}
+
 // Catches ignoring the configured address, and abrupt or hanging SIGTERM shutdown.
 #[test]
 fn configured_listener_serves_health_and_sigterm_exits_successfully() {

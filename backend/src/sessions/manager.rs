@@ -20,7 +20,8 @@ use tokio::{
 use crate::{
     domain::cluster::DecryptedClusterConfig,
     kafka::{
-        client::ConnectionError, config::build_client_properties,
+        client::{ConnectionError, ConnectionTestResult},
+        config::build_client_properties,
         group_consumers::GroupConsumerCache,
     },
 };
@@ -45,6 +46,17 @@ pub trait SessionClientFactory: Clone + Send + Sync + 'static {
         &self,
         config: DecryptedClusterConfig,
     ) -> impl Future<Output = Result<Self::Client, SessionError>> + Send;
+
+    fn test_connection(
+        &self,
+        config: DecryptedClusterConfig,
+    ) -> impl Future<Output = Result<ConnectionTestResult, SessionError>> + Send {
+        async {
+            crate::kafka::client::test_connection(config)
+                .await
+                .map_err(SessionError::from)
+        }
+    }
 
     fn snapshot(
         &self,
@@ -160,7 +172,7 @@ struct Sessions<C> {
 
 /// A completion record lives in the manager until its owned task has released resources.
 struct Operation {
-    cluster_id: String,
+    cluster_id: Option<String>,
     closing_session_id: Option<String>,
     expired: bool,
     cancelled: Arc<AtomicBool>,
@@ -170,7 +182,7 @@ struct Operation {
 impl<C> Sessions<C> {
     fn register_operation(
         &mut self,
-        cluster_id: String,
+        cluster_id: Option<String>,
         closing_session_id: Option<String>,
         expired: bool,
     ) -> (
@@ -215,6 +227,33 @@ impl<F: SessionClientFactory> Clone for SessionManager<F> {
 }
 
 impl<F: SessionClientFactory> SessionManager<F> {
+    pub async fn test_connection(
+        &self,
+        cluster_id: Option<String>,
+        config: DecryptedClusterConfig,
+    ) -> Result<ConnectionTestResult, SessionError> {
+        let mut state = self.state.lock().await;
+        if state.shutting_down {
+            return Err(SessionError::ShuttingDown);
+        }
+        let (operation_id, done, _, _) = state.register_operation(cluster_id, None, false);
+        let shared = self.state.clone();
+        let factory = self.factory.clone();
+        let (reply, result) = oneshot::channel();
+        // The manager owns this task, including native work and destructor completion.
+        // Dropping the HTTP response receiver never drops the factory future.
+        tokio::spawn(async move {
+            let outcome = factory.test_connection(config).await;
+            shared.lock().await.operations.remove(&operation_id);
+            done.send_replace(true);
+            let _ = reply.send(outcome);
+        });
+        drop(state);
+        result
+            .await
+            .map_err(|_| SessionError::Connection(ConnectionError::Timeout))?
+    }
+
     pub async fn snapshot(
         &self,
         id: &str,
@@ -265,6 +304,22 @@ impl<F: SessionClientFactory> SessionManager<F> {
         self.lease.as_secs()
     }
 
+    /// Read correlation metadata without renewing leases or taking ownership of clients.
+    pub async fn cluster_id(&self, id: &str) -> Option<String> {
+        let state = self.state.lock().await;
+        state
+            .entries
+            .get(id)
+            .map(|entry| entry.session.cluster_id.clone())
+            .or_else(|| {
+                state
+                    .operations
+                    .values()
+                    .find(|operation| operation.closing_session_id.as_deref() == Some(id))
+                    .and_then(|operation| operation.cluster_id.clone())
+            })
+    }
+
     /// Serializes API cluster lookup/create with close/delete to prevent orphan sessions.
     pub async fn cluster_operation(&self) -> MutexGuard<'_, ()> {
         self.cluster_gate.lock().await
@@ -281,7 +336,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
             return Err(SessionError::ShuttingDown);
         }
         let (operation_id, done, _, cancelled) =
-            state.register_operation(cluster_id.clone(), None, false);
+            state.register_operation(Some(cluster_id.clone()), None, false);
         let (reply, result) = oneshot::channel();
         let shared = self.state.clone();
         let factory = self.factory.clone();
@@ -378,14 +433,33 @@ impl<F: SessionClientFactory> SessionManager<F> {
 
     pub async fn close(&self, id: &str) -> Result<(), SessionError> {
         let mut state = self.state.lock().await;
-        let completion = if let Some(entry) = state.entries.remove(id) {
-            Self::start_cleanup(&self.state, &mut state, id.to_owned(), entry.session, false)
+        let (completion, expired) = if let Some(entry) = state.entries.remove(id) {
+            let expired = Instant::now().duration_since(entry.renewed_at) >= self.lease;
+            (
+                Self::start_cleanup(
+                    &self.state,
+                    &mut state,
+                    id.to_owned(),
+                    entry.session,
+                    expired,
+                ),
+                expired,
+            )
         } else {
-            Self::pending_close(&state, id).ok_or(SessionError::Expired)?
+            let operation = state
+                .operations
+                .values()
+                .find(|operation| operation.closing_session_id.as_deref() == Some(id))
+                .ok_or(SessionError::Expired)?;
+            (operation.completion.clone(), operation.expired)
         };
         drop(state);
         Self::wait(completion).await;
-        Ok(())
+        if expired {
+            Err(SessionError::Expired)
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn close_for_cluster(&self, cluster_id: &str) {
@@ -394,7 +468,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
             let mut completions: Vec<_> = state
                 .operations
                 .values()
-                .filter(|operation| operation.cluster_id == cluster_id)
+                .filter(|operation| operation.cluster_id.as_deref() == Some(cluster_id))
                 .map(|operation| {
                     operation.cancelled.store(true, Ordering::Release);
                     operation.completion.clone()
@@ -408,12 +482,13 @@ impl<F: SessionClientFactory> SessionManager<F> {
                 .collect();
             for id in ids {
                 let entry = state.entries.remove(&id).expect("entry exists");
+                let expired = Instant::now().duration_since(entry.renewed_at) >= self.lease;
                 completions.push(Self::start_cleanup(
                     &self.state,
                     &mut state,
                     id,
                     entry.session,
-                    false,
+                    expired,
                 ));
             }
             completions
@@ -428,7 +503,8 @@ impl<F: SessionClientFactory> SessionManager<F> {
             let mut state = self.state.lock().await;
             state.shutting_down = true;
             for (id, entry) in std::mem::take(&mut state.entries) {
-                Self::start_cleanup(&self.state, &mut state, id, entry.session, false);
+                let expired = Instant::now().duration_since(entry.renewed_at) >= self.lease;
+                Self::start_cleanup(&self.state, &mut state, id, entry.session, expired);
             }
             state
                 .operations
@@ -495,7 +571,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
     ) -> watch::Receiver<bool> {
         entry.closed.store(true, Ordering::Release);
         let (operation_id, done, completion, _) =
-            state.register_operation(entry.cluster_id.clone(), Some(id), expired);
+            state.register_operation(Some(entry.cluster_id.clone()), Some(id), expired);
         let shared = shared.clone();
         // The operation stays tracked while waiting for a collector's client lock and
         // while native destruction runs. Request cancellation cannot abort this task.
@@ -574,6 +650,76 @@ mod tests {
         assert!(matches!(manager.get(&id).await, Err(SessionError::Expired)));
         assert!(held.clients.lock().await.is_none());
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    // DELETE must report an expired lease even before the five-second reaper runs.
+    #[tokio::test(start_paused = true)]
+    async fn deleting_expired_unreaped_session_reports_expired_after_release() {
+        let (manager, drops) = manager();
+        let id = manager
+            .create("cluster-a", DecryptedClusterConfig::plaintext("kafka:9092"))
+            .await
+            .unwrap();
+        manager
+            .state
+            .lock()
+            .await
+            .entries
+            .get_mut(&id)
+            .unwrap()
+            .renewed_at = Instant::now() - LEASE_DURATION;
+        assert!(matches!(
+            manager.close(&id).await,
+            Err(SessionError::Expired)
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    // Cluster/global cleanup must not erase lease expiry while native release is pending.
+    #[tokio::test]
+    async fn deleting_expired_session_during_cluster_or_global_cleanup_reports_expired() {
+        for global in [false, true] {
+            let (manager, drops) = manager();
+            // Consume the reaper's initial tick before making this lease stale.
+            tokio::task::yield_now().await;
+            let id = manager
+                .create("cluster-a", DecryptedClusterConfig::plaintext("kafka:9092"))
+                .await
+                .unwrap();
+            let held = manager.get(&id).await.unwrap();
+            let guard = held.clients.lock().await;
+            manager
+                .state
+                .lock()
+                .await
+                .entries
+                .get_mut(&id)
+                .unwrap()
+                .renewed_at = Instant::now() - LEASE_DURATION;
+            let closing = tokio::spawn({
+                let manager = manager.clone();
+                async move {
+                    if global {
+                        manager.close_all().await;
+                    } else {
+                        manager.close_for_cluster("cluster-a").await;
+                    }
+                }
+            });
+            while !held.closed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+            let mut deleting = Box::pin(manager.close(&id));
+            assert!(poll_once(deleting.as_mut()).await.is_none());
+            drop(guard);
+            let outcome = deleting.await;
+            closing.await.unwrap();
+            assert!(
+                matches!(outcome, Err(SessionError::Expired)),
+                "global={global}: {outcome:?}"
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
     }
 
     // Renewal must extend only a live lease; stale sessions cannot resurrect.
@@ -684,6 +830,115 @@ mod tests {
         assert!(first.try_collect().is_ok());
         manager.close(&a).await.unwrap();
         assert!(matches!(first.try_collect(), Err(SessionError::Expired)));
+    }
+
+    #[derive(Clone)]
+    struct BlockingTestFactory {
+        started: Arc<tokio::sync::Notify>,
+        dropping: Arc<tokio::sync::Notify>,
+        dropped: Arc<tokio::sync::Notify>,
+        release_work: Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
+        release_drop: Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
+    }
+
+    impl SessionClientFactory for BlockingTestFactory {
+        type Client = ();
+        async fn create(&self, _: DecryptedClusterConfig) -> Result<(), SessionError> {
+            Ok(())
+        }
+        async fn test_connection(
+            &self,
+            _: DecryptedClusterConfig,
+        ) -> Result<ConnectionTestResult, SessionError> {
+            let factory = self.clone();
+            let work = self.release_work.lock().unwrap().take().unwrap();
+            let release_drop = self.release_drop.lock().unwrap().take().unwrap();
+            tokio::task::spawn_blocking(move || {
+                struct ClientDrop(
+                    Arc<tokio::sync::Notify>,
+                    Arc<tokio::sync::Notify>,
+                    std::sync::mpsc::Receiver<()>,
+                );
+                impl Drop for ClientDrop {
+                    fn drop(&mut self) {
+                        self.0.notify_one();
+                        self.2.recv().unwrap();
+                        self.1.notify_one();
+                    }
+                }
+                let client = ClientDrop(factory.dropping, factory.dropped, release_drop);
+                factory.started.notify_one();
+                work.recv().unwrap();
+                drop(client);
+                Ok(ConnectionTestResult {
+                    broker_count: 1,
+                    topic_count: 2,
+                    elapsed_ms: 3,
+                })
+            })
+            .await
+            .unwrap()
+        }
+    }
+
+    // Both HTTP cancellation and slow native destruction must stay visible to close operations.
+    #[tokio::test]
+    async fn connection_tests_remain_owned_until_native_work_and_destructor_finish() {
+        for global in [false, true] {
+            for cancel in [false, true] {
+                let (work_tx, work_rx) = std::sync::mpsc::channel();
+                let (drop_tx, drop_rx) = std::sync::mpsc::channel();
+                let factory = BlockingTestFactory {
+                    started: Arc::new(tokio::sync::Notify::new()),
+                    dropping: Arc::new(tokio::sync::Notify::new()),
+                    dropped: Arc::new(tokio::sync::Notify::new()),
+                    release_work: Arc::new(std::sync::Mutex::new(Some(work_rx))),
+                    release_drop: Arc::new(std::sync::Mutex::new(Some(drop_rx))),
+                };
+                let manager = SessionManager::new(LEASE_DURATION, factory.clone());
+                let request = tokio::spawn({
+                    let manager = manager.clone();
+                    async move {
+                        manager
+                            .test_connection(
+                                (!global).then(|| "cluster-a".into()),
+                                DecryptedClusterConfig::plaintext("kafka:9092"),
+                            )
+                            .await
+                    }
+                });
+                factory.started.notified().await;
+                if cancel {
+                    request.abort();
+                }
+                let mut closing = Box::pin(async {
+                    if global {
+                        manager.close_all().await;
+                    } else {
+                        manager.close_for_cluster("cluster-a").await;
+                    }
+                });
+                let returned_before_work = poll_once(closing.as_mut()).await.is_some();
+                work_tx.send(()).unwrap();
+                factory.dropping.notified().await;
+                let returned_before_drop =
+                    !returned_before_work && poll_once(closing.as_mut()).await.is_some();
+                drop_tx.send(()).unwrap();
+                factory.dropped.notified().await;
+                if !returned_before_work && !returned_before_drop {
+                    closing.await;
+                }
+                let _ = request.await;
+                assert!(
+                    !returned_before_work,
+                    "close lost temporary connection test: global={global} cancel={cancel}"
+                );
+                assert!(
+                    !returned_before_drop,
+                    "close returned during native destruction"
+                );
+            }
+        }
     }
 
     #[derive(Clone)]

@@ -49,6 +49,7 @@ pub fn build_client_properties(
             input.ca_pem.as_deref(),
             input.client_certificate_pem.as_deref(),
             input.client_key_pem.as_deref(),
+            input.client_key_passphrase.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -75,8 +76,10 @@ pub fn build_client_properties(
     if (!tls
         && (input.ca_pem.is_some()
             || input.client_certificate_pem.is_some()
-            || input.client_key_pem.is_some()))
+            || input.client_key_pem.is_some()
+            || input.client_key_passphrase.is_some()))
         || (input.client_certificate_pem.is_some() != input.client_key_pem.is_some())
+        || (input.client_key_passphrase.is_some() && input.client_key_pem.is_none())
         || [
             input.ca_pem.as_deref(),
             input.client_certificate_pem.as_deref(),
@@ -126,6 +129,7 @@ pub fn build_client_properties(
             ("ssl.ca.pem", &input.ca_pem),
             ("ssl.certificate.pem", &input.client_certificate_pem),
             ("ssl.key.pem", &input.client_key_pem),
+            ("ssl.key.password", &input.client_key_passphrase),
         ] {
             if let Some(value) = value {
                 config.set(key, value);
@@ -181,6 +185,7 @@ ZiyyKG9Z8lI=
             ca_pem: Some(TEST_CA.into()),
             client_certificate_pem: None,
             client_key_pem: None,
+            client_key_passphrase: None,
             connection_timeout: Duration::from_secs(10),
         }
     }
