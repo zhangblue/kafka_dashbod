@@ -103,6 +103,35 @@ it('gaps only the affected partition on local failure and every selected partiti
   ] }), true)
 })
 
+it('gaps metadata-failed partition history while keeping its healthy adjacent partition numeric', async () => {
+  const user = userEvent.setup()
+  const first: ClusterSnapshot = { ...snapshot, consumerGroupIds: ['worker'],
+    topics: [{ topic: 'orders', low: 0, latestMessageOffset: 9, retainedOffsetSpan: 20, incomplete: false,
+      partitions: [
+        { partition: 0, low: 0, high: 10, latestMessageOffset: 9, retainedOffsetSpan: 10 },
+        { partition: 1, low: 0, high: 10, latestMessageOffset: 9, retainedOffsetSpan: 10 },
+      ] }],
+    consumerGroups: [{ ...row('worker', 'orders', 11), partitions: [
+      { partition: 0, high: 10, committedOffset: 5, lag: 5 }, { partition: 1, high: 10, committedOffset: 4, lag: 6 },
+    ] }] }
+  const metadataFailure: ClusterSnapshot = { ...first, collectedAt: '2026-10-15T00:00:05Z',
+    topics: first.topics.map(topic => ({ ...topic, incomplete: true })),
+    consumerGroups: first.consumerGroups.map(group => ({ ...group, incomplete: true })),
+    partialFailures: [{ scope: 'metadata', resource: 'orders:1', code: 'KAFKA_CONNECTION_ERROR', message: 'Metadata unavailable' }] }
+  const { update } = show(metadataFailure)
+  update({ history: [{ at: 1000, snapshot: first }, { at: 2000, snapshot: metadataFailure }] })
+  await user.click(screen.getByRole('checkbox', { name: 'orders / 总 Lag' }))
+  await user.click(screen.getByRole('checkbox', { name: 'orders / Partition 0' }))
+  await user.click(screen.getByRole('checkbox', { name: 'orders / Partition 1' }))
+  const history = screen.getByRole('table', { name: 'worker Lag 历史数据' })
+  expect(within(history).getAllByRole('row').slice(1).map(item => within(item).getAllByRole('cell').slice(1).map(cell => cell.textContent)))
+    .toEqual([['5', '6'], ['5', '未知 / 不完整']])
+  expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({ series: [
+    expect.objectContaining({ name: 'orders / Partition 0', data: [[1000, 5], [2000, 5]], connectNulls: false }),
+    expect.objectContaining({ name: 'orders / Partition 1', data: [[1000, 6], [2000, null]], connectNulls: false }),
+  ] }), true)
+})
+
 it('shows nonempty maximum offsets and dashes for empty or unknown watermarks', () => {
   const value: ClusterSnapshot = { ...snapshot, topics: [{ topic: 'orders', low: 0, latestMessageOffset: 9, retainedOffsetSpan: 10, incomplete: true,
     partitions: [{ partition: 0, low: 0, high: 10, latestMessageOffset: 9, retainedOffsetSpan: 10 },

@@ -29,7 +29,7 @@ export function hasCollectionFailure(row: ConsumerGroupTopicSnapshot, snapshot: 
     const resource = failure.resource
     if (failure.scope === 'committed') return resource === row.groupId
       || row.partitions.some(p => resource === `${row.groupId}/${row.topic}:${p.partition}`)
-    if (failure.scope === 'watermark') return row.partitions.some(p => resource === `${row.topic}:${p.partition}`)
+    if (failure.scope === 'watermark' || failure.scope === 'metadata') return row.partitions.some(p => resource === `${row.topic}:${p.partition}`)
     if (failure.scope === 'topics') return resource === snapshot.clusterId || resource === 'cluster' || resource === row.topic
       || row.partitions.some(p => resource === `${row.topic}:${p.partition}`)
     if (failure.scope === 'groups') return resource === snapshot.clusterId || resource === 'cluster' || resource === 'unknown' || resource === row.groupId
