@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import App from './App'
 import { clustersApi, lagRulesApi, sessionsApi } from '../api/client'
 import { clusterFixture, rulesFixture, snapshotFixture } from '../test/handlers'
+import type { ClusterSnapshot } from '../api/types'
 
 // Canvas rendering is covered by the chart lifecycle test; jsdom has no canvas context.
 vi.mock('echarts/core', () => ({ init: () => ({ setOption() {}, resize() {}, dispose() {} }), use() {} }))
@@ -91,4 +92,72 @@ it('preserves lag duration and trend across Topics navigation without replaying 
   fireEvent.click(screen.getByRole('link', { name: 'Consumer Groups' }))
   expect(within(dataRow()).getByText('积压')).toBeInTheDocument()
   expect(within(dataRow()).getByLabelText('Lag 下降')).toBeInTheDocument()
+})
+
+it('retains failed resource display values across overview, topics and groups while using raw samples for totals and timing', async () => {
+  const complete: ClusterSnapshot = { clusterId: 'cluster-a', collectedAt: new Date().toISOString(), partialFailures: [], consumerGroupIds: ['worker'],
+    topics: [{ topic: 'orders', low: 0, latestMessageOffset: 99, retainedOffsetSpan: 200, incomplete: false, partitions: [
+      { partition: 0, low: 0, high: 100, latestMessageOffset: 99, retainedOffsetSpan: 100 },
+      { partition: 1, low: 0, high: 100, latestMessageOffset: 99, retainedOffsetSpan: 100 },
+    ] }], consumerGroups: [{ groupId: 'worker', topic: 'orders', lag: 100, incomplete: false, unknownPartitionCount: 0, partitions: [
+      { partition: 0, high: 100, committedOffset: 50, lag: 50 }, { partition: 1, high: 100, committedOffset: 50, lag: 50 },
+    ] }],
+  }
+  let sample = complete
+  vi.spyOn(clustersApi, 'list').mockResolvedValue([clusterFixture])
+  vi.spyOn(lagRulesApi, 'get').mockResolvedValue({ defaults: { normalMax: 10, highMin: 80, overLimitSeconds: 30 }, overrides: [] })
+  vi.spyOn(sessionsApi, 'create').mockResolvedValue({ sessionId: 'display', leaseSeconds: 30 })
+  vi.spyOn(sessionsApi, 'close').mockResolvedValue(undefined)
+  vi.spyOn(sessionsApi, 'snapshot').mockImplementation(async () => sample)
+  render(<App />)
+  await screen.findByText('暂无异常 Consumer Groups。')
+  const collect = async (next: ClusterSnapshot) => {
+    sample = next
+    fireEvent.click(screen.getByRole('button', { name: '手动刷新' }))
+    await waitFor(() => expect(screen.getByLabelText('最后更新时间')).toHaveAttribute('datetime', next.collectedAt))
+    await waitFor(() => expect(screen.getByRole('button', { name: '手动刷新' })).toBeEnabled())
+  }
+  const at = (seconds: number) => new Date(Date.parse(complete.collectedAt) + seconds * 1000).toISOString()
+  await collect({ ...complete, collectedAt: at(10), partialFailures: [{ scope: 'committed', resource: 'worker/orders:0', code: 'KAFKA_TIMEOUT', message: 'timeout' }],
+    consumerGroups: [{ ...complete.consumerGroups[0], lag: 20, incomplete: true, unknownPartitionCount: 1, partitions: [
+      { partition: 0, high: 100, committedOffset: null, lag: null }, { partition: 1, high: 100, committedOffset: 80, lag: 20 },
+    ] }] })
+  expect(screen.getByRole('region', { name: '总 Lag' })).toHaveTextContent('20 已知 Lag')
+  const overviewRow = screen.getByRole('row', { name: /worker \/ orders/ })
+  expect(overviewRow).toHaveTextContent('70')
+  expect(overviewRow).toHaveTextContent('采集异常')
+  expect(overviewRow).toHaveTextContent('数据已陈旧')
+  expect(within(overviewRow).getByRole('time')).toHaveAttribute('datetime', complete.collectedAt)
+  const chartRows = within(screen.getByRole('table', { name: '最近 1 小时总 Lag 数据' })).getAllByRole('row')
+  expect(chartRows.at(-1)).toHaveTextContent('未知 / 不完整')
+  fireEvent.click(screen.getByRole('link', { name: 'worker / orders' }))
+  expect(screen.getByRole('table', { name: 'worker / orders Partitions' })).toHaveTextContent('50')
+  expect(screen.getByRole('row', { name: /收起 worker orders/ })).toHaveTextContent('70')
+
+  await collect({ ...complete, collectedAt: at(20), partialFailures: [{ scope: 'watermark', resource: 'orders:0', code: 'KAFKA_TIMEOUT', message: 'timeout' }],
+    topics: [{ ...complete.topics[0], low: 10, latestMessageOffset: 119, retainedOffsetSpan: 110, incomplete: true, partitions: [
+      { partition: 0, low: null, high: null, latestMessageOffset: null, retainedOffsetSpan: null },
+      { partition: 1, low: 10, high: 120, latestMessageOffset: 119, retainedOffsetSpan: 110 },
+    ] }], consumerGroups: [{ ...complete.consumerGroups[0], lag: 30, incomplete: true, unknownPartitionCount: 1, partitions: [
+      { partition: 0, high: null, committedOffset: 60, lag: null }, { partition: 1, high: 120, committedOffset: 90, lag: 30 },
+    ] }] })
+  fireEvent.click(screen.getByRole('link', { name: 'Topics' }))
+  fireEvent.click(screen.getByRole('button', { name: '展开 orders' }))
+  const partitionRows = within(screen.getByRole('table', { name: 'orders Partitions' })).getAllByRole('row')
+  expect(partitionRows[1]).toHaveTextContent('100')
+  expect(partitionRows[1]).toHaveTextContent('数据已陈旧')
+  expect(partitionRows[2]).toHaveTextContent('120')
+  expect(partitionRows[2]).not.toHaveTextContent('数据已陈旧')
+
+  await collect({ ...complete, collectedAt: at(30), consumerGroupIds: [], consumerGroups: [],
+    partialFailures: [{ scope: 'groups', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'timeout' }] })
+  fireEvent.click(screen.getByRole('link', { name: '概览' }))
+  expect(screen.getByRole('link', { name: 'worker / orders' })).toBeInTheDocument()
+  expect(screen.getByRole('region', { name: 'Consumer Group 数' })).toHaveTextContent('1')
+  expect(screen.getByRole('region', { name: '总 Lag' })).toHaveTextContent('—')
+  fireEvent.click(screen.getByRole('link', { name: 'Consumer Groups' }))
+  expect(screen.getByRole('row', { name: /worker orders/ })).toHaveTextContent('采集异常')
+  await collect({ ...complete, collectedAt: at(60) })
+  expect(screen.getByRole('row', { name: /worker orders/ })).toHaveTextContent('正常')
+  expect(screen.getByRole('row', { name: /worker orders/ })).not.toHaveTextContent('数据已陈旧')
 })

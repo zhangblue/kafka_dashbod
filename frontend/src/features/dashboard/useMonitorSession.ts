@@ -3,6 +3,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, sessionsApi } from '../../api/client'
 import type { ClusterSnapshot, CreatedSession } from '../../api/types'
 import { appendSample, type SnapshotSample } from './history'
+import { snapshotUnavailable } from '../lag-rules/snapshotAvailability'
+import { retainDisplaySnapshot, type DisplaySnapshot, type MonitorDisplay } from './displaySnapshot'
 
 export type RefreshSeconds = 3 | 5 | 10
 type Lease = CreatedSession & { expiresAt: number }
@@ -38,7 +40,7 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
   const [attempt, setAttempt] = useState(0)
   const [continuity, setContinuity] = useState(0)
   const [failure, setFailure] = useState<{ runtime: object; error: unknown } | null>(null)
-  const [data, setData] = useState<{ runtime: object; sessionId: string; snapshot: ClusterSnapshot; history: SnapshotSample[] } | null>(null)
+  const [data, setData] = useState<{ runtime: object; sessionId: string; snapshot: ClusterSnapshot; display: DisplaySnapshot; history: SnapshotSample[] } | null>(null)
   const runtime = useMemo(() => ({ id: ++nextRuntimeId, clusterId, enabled, active: false, pageHidden: false,
     foreground: document.visibilityState === 'visible', lease: undefined as Lease | undefined,
     creating: undefined as Promise<Lease> | undefined }), [clusterId, enabled])
@@ -148,8 +150,10 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
           snapshot = await collect(lease)
         }
         if (!usable()) throw aborted()
+        if (snapshotUnavailable(snapshot)) throw new ApiError(503, { code: 'KAFKA_UNAVAILABLE', message: '集群数据采集失败，请重新连接。' })
         lease.expiresAt = Date.now() + lease.leaseSeconds * 1000
-        setData(previous => ({ runtime, sessionId: lease.sessionId, snapshot, history: appendSample(previous?.runtime === runtime ? previous.history : [],
+        setData(previous => ({ runtime, sessionId: lease.sessionId, snapshot,
+          display: retainDisplaySnapshot(snapshot, previous?.runtime === runtime ? previous.display : undefined), history: appendSample(previous?.runtime === runtime ? previous.history : [],
           { at: Date.parse(snapshot.collectedAt), snapshot }) }))
         return snapshot
       } catch (error) {
@@ -168,9 +172,11 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
   const status: MonitorStatus = !clusterId || !enabled ? 'idle' : error ? 'error'
     : !visible || !pageActive ? 'paused' : sessionReady ? 'connected' : 'connecting'
   return {
-    // May be the last successful snapshot while paused, reconnecting, or failed.
-    // Consumers must gate timers on status and deduplicate by collectedAt.
+    // Raw sampling data owns totals, history and timing. It may be the last accepted
+    // snapshot while paused/reconnecting/failed; displaySnapshot is presentation only.
     snapshot, history, status, error, isFetching: query.isFetching,
+    ...({ displaySnapshot: data?.runtime === runtime ? data.display.snapshot : null,
+      staleResources: data?.runtime === runtime ? data.display.staleResources : {} } as MonitorDisplay),
     continuityKey: `${clusterId ?? ''}:${continuity}`,
     refresh: async () => { if (running) await query.refetch({ cancelRefetch: false }) },
     reconnect: () => { if (visible && enabled && pageActive) { close(); setFailure(null); setAttempt(value => value + 1) } },

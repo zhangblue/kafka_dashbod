@@ -2,6 +2,8 @@ import { Fragment, useId, useState } from 'react'
 import type { PartitionWatermark, TopicSnapshot } from '../../api/types'
 import { MetricHelp } from '../../components/MetricHelp'
 import { useDashboard } from '../dashboard/useDashboard'
+import { StaleNotice } from '../../components/StaleNotice'
+import { topicDisplayKey, topicPartitionDisplayKey } from '../dashboard/displaySnapshot'
 
 const format = (value: number | null) => value === null ? '—' : value.toLocaleString('en-US')
 const latest = (partition: PartitionWatermark) => partition.low === null || partition.high === null
@@ -18,7 +20,7 @@ function summary(topic: TopicSnapshot) {
   }
 }
 
-function PartitionTable({ topic }: { topic: TopicSnapshot }) {
+function PartitionTable({ topic, staleResources }: { topic: TopicSnapshot; staleResources: Record<string, string> | undefined }) {
   return <table aria-label={`${topic.topic} Partitions`}>
     <thead><tr>
       <th scope="col">Partition</th>
@@ -27,7 +29,7 @@ function PartitionTable({ topic }: { topic: TopicSnapshot }) {
       <th scope="col">最大消息 Offset <MetricHelp label={`${topic.topic} Partition 最大消息 Offset`}>非空分区为 high - 1；空分区（high = low）或水位未知时显示 —。Offset 不保证连续存在。</MetricHelp></th>
     </tr></thead>
     <tbody>{topic.partitions.map(partition => <tr key={partition.partition}>
-      <td>{partition.partition}</td><td>{format(partition.low)}</td><td>{format(partition.high)}</td><td>{format(latest(partition))}</td>
+      <td>{partition.partition}</td><td>{format(partition.low)}</td><td>{format(partition.high)}</td><td>{format(latest(partition))}{staleResources?.[topicPartitionDisplayKey(topic.topic, partition.partition)] && <StaleNotice at={staleResources[topicPartitionDisplayKey(topic.topic, partition.partition)]} />}</td>
     </tr>)}</tbody>
   </table>
 }
@@ -37,13 +39,13 @@ export function TopicsPage() {
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const id = useId()
-  const snapshot = monitor.snapshot
+  const snapshot = monitor.displaySnapshot ?? monitor.snapshot
   const topics = snapshot?.topics.filter(topic => topic.topic.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) ?? []
   return <section aria-label="Topics 内容">
     <h2>Topics</h2>
     <label>搜索 Topic <input type="search" value={search} onChange={event => setSearch(event.target.value)} /></label>
     <p>Topic 汇总仅供概览，不同 Partition 的 Offset 不能视为统一序列；以展开后的 Partition 水位为准。</p>
-    {!!snapshot?.partialFailures.length && <p role="status">部分数据采集失败，当前仅展示已发现的 Topic 和分区；未知值显示 —。</p>}
+    {!!snapshot?.partialFailures.length && <p role="status">部分数据采集失败；保留的上次采集值标为陈旧，其余未知值显示 —。</p>}
     {!snapshot ? <p>尚未采集 Topic 数据。</p> : <>
       <table aria-label="Topics 汇总"><thead><tr>
         <th scope="col">Topic</th>
@@ -53,7 +55,8 @@ export function TopicsPage() {
         <th scope="col">保留消息估算 <MetricHelp label="保留消息估算">各分区 high - low 的总和，仅为 Offset 范围估算；压缩、删除和事务记录会造成与实际可读消息数的差异。空分区贡献 0，数据不完整时显示 —。</MetricHelp></th>
         <th scope="col">数据状态</th>
       </tr></thead><tbody>{topics.map((topic, index) => {
-        const values = summary(topic)
+        const staleAt = monitor.staleResources?.[topicDisplayKey(topic.topic)]
+        const values = summary(staleAt ? { ...topic, incomplete: false } : topic)
         const open = expanded.has(topic.topic)
         const detailsId = `${id}-partitions-${index}`
         return <Fragment key={topic.topic}>
@@ -61,8 +64,8 @@ export function TopicsPage() {
             onClick={() => setExpanded(previous => { const next = new Set(previous); if (open) next.delete(topic.topic); else next.add(topic.topic); return next })}>
             {open ? '收起' : '展开'}</button> <span>{topic.topic}</span></td>
           <td>{topic.partitions.length}</td><td>{format(values.low)}</td><td>{format(values.max)}</td><td>{format(values.span)}</td>
-          <td>{values.incomplete ? '不完整：部分分区采集失败，展开查看已知值' : '完整'}</td></tr>
-          {open && <tr><td colSpan={6} id={detailsId}><PartitionTable topic={topic} /></td></tr>}
+          <td>{staleAt ? <StaleNotice at={staleAt} /> : values.incomplete ? '不完整：部分分区采集失败，展开查看已知值' : '完整'}</td></tr>
+          {open && <tr><td colSpan={6} id={detailsId}><PartitionTable topic={topic} staleResources={monitor.staleResources} /></td></tr>}
         </Fragment>
       })}</tbody></table>
       {!topics.length && <p>{snapshot.topics.length ? '没有匹配的 Topic。' : '暂无 Topic。'}</p>}

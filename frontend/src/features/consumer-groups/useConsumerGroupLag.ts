@@ -9,6 +9,8 @@ export interface ConsumerGroupLagRow {
   resolved: ReturnType<typeof resolveLagRule>
   state: LagState
   trend: TrackedLag['trend'] | undefined
+  displayRow?: ConsumerGroupTopicSnapshot
+  staleAt?: string
 }
 
 export const ConsumerGroupLagContext = createContext<{

@@ -177,6 +177,26 @@ it('keeps unknown partition values and partial failures unchanged in history', a
   expect(result.current.history[0].snapshot.partialFailures).toEqual(partial.partialFailures)
 })
 
+it('treats a collector HTTP 200 full-failure response as disconnected without replacing successful data or history', async () => {
+  const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
+  await flush()
+  const successful = result.current.snapshot
+  vi.mocked(sessionsApi.snapshot).mockResolvedValue({ clusterId: 'cluster-a', collectedAt: new Date(1000).toISOString(),
+    topics: [], consumerGroupIds: [], consumerGroups: [], partialFailures: [
+      { scope: 'topics', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'timeout' },
+      { scope: 'groups', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'timeout' },
+    ] })
+  await act(async () => { await result.current.refresh() }); await flush()
+  expect(result.current.status).toBe('error')
+  expect(result.current.snapshot).toEqual(successful)
+  expect(result.current.history).toHaveLength(1)
+  expect(closed).toContain('a-1')
+  vi.mocked(sessionsApi.snapshot).mockResolvedValue({ ...snapshotFixture, collectedAt: new Date(2000).toISOString() })
+  await act(async () => { result.current.reconnect() }); await flush()
+  expect(result.current.status).toBe('connected')
+  expect(result.current.history.map(sample => sample.at)).toEqual([0, 2000])
+})
+
 it('stops non-expiry errors, blocks hidden manual refresh, and reconnects explicitly', async () => {
   vi.mocked(sessionsApi.snapshot).mockRejectedValueOnce(new ApiError(503, { code: 'KAFKA_ERROR', message: 'unavailable' }))
   const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })

@@ -83,3 +83,22 @@ it('retains the last snapshot after disconnection and reconnects with a new sess
   await screen.findByText('已连接')
   expect(created).toEqual(['cluster-a', 'cluster-a'])
 })
+
+it('shows disconnection and reconnect for an HTTP 200 empty collector snapshot with cluster discovery failures', async () => {
+  vi.mocked(sessionsApi.snapshot).mockResolvedValueOnce(snapshotFixture).mockResolvedValueOnce({
+    clusterId: 'cluster-a', collectedAt: '2026-10-15T00:00:05Z', topics: [], consumerGroupIds: [], consumerGroups: [],
+    partialFailures: [
+      { scope: 'topics', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'timeout' },
+      { scope: 'groups', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'timeout' },
+    ],
+  }).mockResolvedValue(snapshotFixture)
+  renderLayout()
+  await screen.findByText('当前：生产 Kafka，样本：1')
+  fireEvent.click(screen.getByRole('button', { name: '手动刷新' }))
+  await screen.findByText('连接已断开，显示最后一次快照')
+  expect(screen.getByText('当前：生产 Kafka，样本：1')).toBeInTheDocument()
+  expect(screen.getByLabelText('最后更新时间')).toHaveAttribute('datetime', snapshotFixture.collectedAt)
+  fireEvent.click(screen.getByRole('button', { name: '重新连接' }))
+  await screen.findByText('已连接')
+  expect(created).toEqual(['cluster-a', 'cluster-a'])
+})

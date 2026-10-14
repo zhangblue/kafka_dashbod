@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import type { ClusterSnapshot } from '../../api/types'
 import { StatusBadge } from '../../components/StatusBadge'
+import { StaleNotice } from '../../components/StaleNotice'
 import { ApiErrorNotice } from '../clusters/ClusterForm'
 import { LagLineChart } from '../charts/LagLineChart'
 import { useConsumerGroupLag } from '../consumer-groups/useConsumerGroupLag'
@@ -30,6 +31,7 @@ export function OverviewPage() {
     return { at: sample.at, lag: value.incomplete ? null : value.known }
   }), [monitor.history])
   const snapshot = monitor.snapshot
+  const display = monitor.displaySnapshot ?? snapshot
   if (!cluster) return <section aria-label="概览内容"><h2>概览</h2><p>请选择集群。</p></section>
   if (!snapshot) return <section aria-label="概览内容"><h2>概览</h2>
     {monitor.status === 'connecting' || monitor.isFetching || lag.isPending
@@ -39,12 +41,12 @@ export function OverviewPage() {
   const stale = monitor.status === 'error' || now - Date.parse(snapshot.collectedAt) > refreshSeconds * 2000
   const total = totalLag(snapshot)
   const abnormal = lag.rows.filter(row => row.state.status !== 'normal')
-    .sort((a, b) => b.row.lag - a.row.lag || a.key.localeCompare(b.key))
+    .sort((a, b) => (b.displayRow ?? b.row).lag - (a.displayRow ?? a.row).lag || a.key.localeCompare(b.key))
   return <section aria-label="概览内容"><h2>概览</h2>
     {stale && <p role="status">数据已陈旧</p>}
     <div className="overview-metrics">
-      <section aria-label="Topic 数"><h3>Topic 数</h3><p>{snapshot.topics.length.toLocaleString('en-US')}{snapshot.partialFailures.some(failure => failure.scope === 'topics') ? '（不完整）' : ''}</p></section>
-      <section aria-label="Consumer Group 数"><h3>Consumer Group 数</h3><p>{new Set(snapshot.consumerGroupIds).size.toLocaleString('en-US')}{snapshot.partialFailures.some(failure => failure.scope === 'groups') ? '（不完整）' : ''}</p></section>
+      <section aria-label="Topic 数"><h3>Topic 数</h3><p>{display!.topics.length.toLocaleString('en-US')}{snapshot.partialFailures.some(failure => failure.scope === 'topics') ? '（不完整，含陈旧展示值）' : ''}</p></section>
+      <section aria-label="Consumer Group 数"><h3>Consumer Group 数</h3><p>{new Set(display!.consumerGroupIds).size.toLocaleString('en-US')}{snapshot.partialFailures.some(failure => failure.scope === 'groups') ? '（不完整，含陈旧展示值）' : ''}</p></section>
       <section aria-label="总 Lag"><h3>总 Lag</h3><p>{total.available ? total.known.toLocaleString('en-US') : '—'}{total.incomplete ? ' 已知 Lag（不完整，未知值未计入）' : ''}</p></section>
       <section aria-label="异常 Consumer Group 数"><h3>异常 Consumer Group 数</h3><p>{lag.ready ? new Set(abnormal.map(item => item.row.groupId)).size : '—'}{snapshot.partialFailures.some(failure => failure.scope === 'groups') ? '（不完整）' : ''}</p></section>
     </div>
@@ -54,10 +56,10 @@ export function OverviewPage() {
     <ApiErrorNotice error={lag.error} />
     {lag.ready && (abnormal.length ? <table aria-label="异常 Consumer Groups"><thead><tr>
       <th scope="col">Consumer Group / Topic</th><th scope="col">状态</th><th scope="col">Lag</th><th scope="col">数据状态</th>
-    </tr></thead><tbody>{abnormal.map(({ row, key, health, state }) => <tr key={key}>
+    </tr></thead><tbody>{abnormal.map(({ row, displayRow = row, staleAt, key, health, state }) => <tr key={key}>
       <td><Link to={`/consumer-groups?${new URLSearchParams({ groupId: row.groupId, topic: row.topic })}`}>{row.groupId} / {row.topic}</Link></td>
-      <td><StatusBadge status={state.status} /></td><td>{row.lag.toLocaleString('en-US')}{row.unknownPartitionCount ? ` + ${row.unknownPartitionCount} 未知` : ''}{health.collectionError ? '（不完整）' : ''}</td>
-      <td>{stale || health.collectionError ? '⚠ 数据已陈旧' : '已更新'}</td>
+      <td><StatusBadge status={state.status} /></td><td>{displayRow.lag.toLocaleString('en-US')}{row.unknownPartitionCount ? ` + ${row.unknownPartitionCount} 未知` : ''}{health.collectionError ? '（不完整）' : ''}</td>
+      <td>{stale || health.collectionError ? <StaleNotice at={staleAt} /> : '已更新'}</td>
     </tr>)}</tbody></table> : <p>暂无异常 Consumer Groups。</p>)}
   </section>
 }

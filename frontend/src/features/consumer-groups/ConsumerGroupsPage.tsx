@@ -3,6 +3,8 @@ import { useSearchParams } from 'react-router'
 import type { ConsumerGroupTopicSnapshot } from '../../api/types'
 import { MetricHelp } from '../../components/MetricHelp'
 import { StatusBadge } from '../../components/StatusBadge'
+import { StaleNotice } from '../../components/StaleNotice'
+import { groupPartitionDisplayKey } from '../dashboard/displaySnapshot'
 import { ApiErrorNotice } from '../clusters/ClusterForm'
 import { useDashboard } from '../dashboard/useDashboard'
 import type { MonitorSession } from '../dashboard/useMonitorSession'
@@ -11,14 +13,14 @@ import { useConsumerGroupLag, type ConsumerGroupLagRow } from './useConsumerGrou
 
 const format = (value: number | null) => value === null ? '—' : value.toLocaleString('en-US')
 
-function PartitionTable({ row }: { row: ConsumerGroupTopicSnapshot }) {
+function PartitionTable({ row, staleResources }: { row: ConsumerGroupTopicSnapshot; staleResources: Record<string, string> | undefined }) {
   return <table aria-label={`${row.groupId} / ${row.topic} Partitions`}><thead><tr>
     <th scope="col">Partition</th>
     <th scope="col">High watermark <MetricHelp label={`${row.groupId} / ${row.topic} High watermark`}>下一条消息将写入的位置，不是最后一条消息的 Offset。采集失败时显示 —。</MetricHelp></th>
     <th scope="col">Committed Offset <MetricHelp label={`${row.groupId} / ${row.topic} Committed Offset`}>消费组提交的下一条待消费位置；未提交或采集失败时显示 —，不能当作 0。</MetricHelp></th>
     <th scope="col">Lag <MetricHelp label={`${row.groupId} / ${row.topic} Partition Lag`}>max(high - committedOffset, 0)。任一位置未知时显示 —，并不计入已知 Lag。</MetricHelp></th>
   </tr></thead><tbody>{row.partitions.map(partition => <tr key={partition.partition}>
-    <td>{partition.partition}</td><td>{format(partition.high)}</td><td>{format(partition.committedOffset === null || partition.committedOffset < 0 ? null : partition.committedOffset)}</td><td>{format(partition.lag)}</td>
+    <td>{partition.partition}</td><td>{format(partition.high)}</td><td>{format(partition.committedOffset === null || partition.committedOffset < 0 ? null : partition.committedOffset)}</td><td>{format(partition.lag)}{staleResources?.[groupPartitionDisplayKey(row.groupId, row.topic, partition.partition)] && <StaleNotice at={staleResources[groupPartitionDisplayKey(row.groupId, row.topic, partition.partition)]} />}</td>
   </tr>)}</tbody></table>
 }
 
@@ -34,7 +36,7 @@ function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId:
   const { snapshot, status } = monitor
   const rows = evaluatedRows.filter(({ row, state }) => (filter === 'all' || state.status === filter)
     && `${row.groupId}\n${row.topic}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))
-    .sort((a, b) => b.row.lag - a.row.lag || a.key.localeCompare(b.key))
+    .sort((a, b) => (b.displayRow ?? b.row).lag - (a.displayRow ?? a.row).lag || a.key.localeCompare(b.key))
   return <>
     <label>搜索 Consumer Group 或 Topic <input type="search" value={search} onChange={event => setSearch(event.target.value)} /></label>
     <label>状态筛选 <select value={filter} onChange={event => setFilter(event.target.value as LagStatus | 'all')}>
@@ -50,19 +52,19 @@ function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId:
         <th scope="col">未提交分区 <MetricHelp label="未提交分区">没有有效提交位置的分区数量。采集失败也可能使提交位置未知，此时以采集异常状态为准，不能据此断定从未提交。</MetricHelp></th>
         <th scope="col">总 Lag <MetricHelp label="总 Lag">已知分区 max(high - committedOffset, 0) 的总和；未知分区以“已知 Lag + N 未知”显示，元数据缺失另标不完整。Lag 是 Offset 差值估算，未知不能当作 0。</MetricHelp></th>
         <th scope="col">趋势 <MetricHelp label="趋势">仅比较最近两个连续成功且数据完整的样本：↑ 上升、↓ 下降、→ 持平；样本不足或中断显示 —。趋势不参与状态判定。</MetricHelp></th>
-      </tr></thead><tbody>{rows.map(({ row, key, health, resolved, state, trend }, index) => {
+      </tr></thead><tbody>{rows.map(({ row, displayRow = row, staleAt, key, health, resolved, state, trend }, index) => {
         const open = expanded.has(key)
         const detailsId = `${id}-partitions-${index}`
         return <Fragment key={key}><tr>
           <td><button type="button" aria-label={`${open ? '收起' : '展开'} ${row.groupId} / ${row.topic}`} aria-expanded={open} aria-controls={open ? detailsId : undefined}
             onClick={() => setExpanded(previous => { const next = new Set(previous); if (open) next.delete(key); else next.add(key); return next })}>{open ? '收起' : '展开'}</button> <span>{row.groupId}</span></td>
-          <td>{row.topic}</td><td><StatusBadge status={state.status} />{resolved.custom && <span> <MetricHelp trigger="自定义规则" label={`自定义规则 ${row.groupId} / ${row.topic}`}>
+          <td>{row.topic}</td><td><StatusBadge status={state.status} />{staleAt && <StaleNotice at={staleAt} />}{resolved.custom && <span> <MetricHelp trigger="自定义规则" label={`自定义规则 ${row.groupId} / ${row.topic}`}>
             正常上限：{format(resolved.rule.normalMax)}；高 Lag 起始值：{format(resolved.rule.highMin)}；持续超限时间：{resolved.rule.overLimitSeconds} 秒。
           </MetricHelp></span>}</td>
           <td>{health.validCount}</td><td>{health.uncommittedCount}</td>
-          <td>{format(row.lag)}{row.unknownPartitionCount > 0 ? ` + ${row.unknownPartitionCount} 未知` : ''}{health.collectionError ? '（不完整）' : ''}</td>
+          <td>{format(displayRow.lag)}{row.unknownPartitionCount > 0 ? ` + ${row.unknownPartitionCount} 未知` : ''}{health.collectionError ? '（不完整）' : ''}</td>
           <td>{trend ? <span aria-label={`Lag ${trend === 'up' ? '上升' : trend === 'down' ? '下降' : '持平'}`}>{trend === 'up' ? '↑' : trend === 'down' ? '↓' : '→'}</span> : '—'}</td>
-        </tr>{open && <tr><td colSpan={7} id={detailsId}><PartitionTable row={row} /></td></tr>}</Fragment>
+        </tr>{open && <tr><td colSpan={7} id={detailsId}><PartitionTable row={displayRow} staleResources={monitor.staleResources} /></td></tr>}</Fragment>
       })}</tbody></table>
       {!rows.length && <p>{snapshot.consumerGroups.length ? '没有匹配的 Consumer Group / Topic。' : '暂无 Consumer Group / Topic 数据。'}</p>}
     </>}
