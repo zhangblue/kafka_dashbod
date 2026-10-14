@@ -1,0 +1,220 @@
+# Kafka Dashboard 设计规格
+
+## 1. 目标
+
+构建一个前后端分离的只读 Kafka 监控仪表盘。用户可以配置多个 Kafka 集群，并在每个集群的独立仪表盘中查看 Topic Offset、Consumer Group 已提交 Offset、Lag 当前值及最近一小时趋势。
+
+第一版面向单用户或内网共享部署，不提供账号和权限系统。系统只在用户打开某个集群仪表盘时连接该 Kafka 集群；页面不再使用时及时断开，不在服务端持续采集或保存监控历史。
+
+## 2. 范围
+
+### 2.1 第一版包含
+
+- 多 Kafka 集群配置、编辑、删除和连接测试。
+- `PLAINTEXT`、TLS、`SASL/PLAIN`、`SASL/SCRAM` 连接方式。
+- 集群概览、Topic 列表、Consumer Group 列表与详情。
+- Topic 汇总及逐 Partition low/high watermark。
+- 所有消费组，包括当前没有活跃成员但仍保留已提交 Offset 的消费组。
+- Consumer Group 在 Topic/Partition 维度的 committed offset 和 Lag。
+- 可选择的 3 秒、5 秒、10 秒刷新频率。
+- 浏览器内最近一小时 Lag 折线图。
+- 短租约监控会话，仅在仪表盘使用期间维持 Kafka 连接。
+- 集群认证信息加密持久化至 SQLite。
+
+### 2.2 第一版不包含
+
+- 消息内容浏览、搜索或生产消息。
+- Topic 创建、修改或删除。
+- Consumer Group Offset 重置。
+- 用户登录、角色和权限管理。
+- 服务端历史指标存储与跨浏览器历史恢复。
+- AWS MSK IAM、Confluent Cloud OAuth 等云厂商专用认证方式。
+
+## 3. 技术架构
+
+### 3.1 前端
+
+- React + TypeScript + Vite。
+- TanStack Query 管理服务端状态、动态轮询和页面可见性行为。
+- Apache ECharts 展示 Lag 趋势。
+- 浏览器内存环形缓冲保存当前页面运行期间最近一小时采样；刷新页面后历史清空。
+
+### 3.2 后端
+
+- Rust + Axum 提供 REST API。
+- rust-rdkafka 连接 Kafka，并获取 metadata、partition watermarks、consumer groups 和 committed offsets。
+- SQLx + SQLite 持久化集群配置。
+- 监控会话管理器负责创建、复用、续租和释放 Kafka 客户端。
+
+### 3.3 部署边界
+
+前后端独立构建。开发环境分别启动；生产环境可由反向代理托管前端静态文件并将 `/api` 转发给 Rust 服务。后端默认仅监听本机地址。内网暴露时由部署方通过反向代理提供 HTTPS 和访问控制。
+
+## 4. Kafka 连接生命周期
+
+1. 用户进入某个集群的仪表盘，前端调用创建会话 API。
+2. 后端解密目标集群认证配置，创建 rust-rdkafka 客户端，并返回随机会话 ID。
+3. 前端按 3、5 或 10 秒间隔请求快照；每次成功到达的快照请求同时更新会话租约。
+4. 同一浏览器页面同一时刻只监控当前选中的集群。切换集群前先删除旧会话。
+5. 页面正常离开时发送关闭会话请求。页面异常关闭、断网或请求丢失时，后端在约 15 秒无续租后自动释放 Kafka 客户端。
+6. 页面进入后台时暂停轮询；重新可见时立即采集一次。暂停超过租约后，恢复页面时透明地创建新会话。
+7. 应用优雅退出时关闭全部活动会话。
+
+会话只存在于后端内存，不在 SQLite 中持久化。每个会话绑定单一集群，并具有独立的并发控制，避免重叠采集。
+
+## 5. 数据模型
+
+### 5.1 ClusterConfig
+
+- `id`
+- `name`
+- `bootstrap_servers`
+- `security_protocol`
+- `sasl_mechanism`
+- `username`
+- `encrypted_password`
+- CA、客户端证书及其加密口令配置
+- 连接超时
+- 创建和更新时间
+
+敏感值写入数据库前使用环境变量 `KAFKA_DASHBOARD_MASTER_KEY` 提供的主密钥，通过带随机 nonce 的 AEAD 算法加密。读取配置的 API 不返回密码或私钥明文；编辑时空密码表示保留原值。
+
+### 5.2 MonitorSession
+
+- 随机会话 ID
+- 集群 ID
+- Kafka 客户端句柄
+- 创建时间
+- 最后续租时间
+- 当前采集锁或等价的防重入状态
+
+### 5.3 ClusterSnapshot
+
+- 服务端采集时间
+- 集群基本状态
+- Topic 和 Partition watermarks
+- Consumer Group 状态
+- Group/Topic/Partition committed offsets 与 Lag
+- 部分采集失败列表
+
+## 6. Offset 与 Lag 语义
+
+- 分区最小 Offset 使用 Kafka low watermark。
+- Kafka high watermark 表示下一条消息的位置。页面中的“最大消息 Offset”显示 `high - 1`；空分区显示 `—`。
+- Partition Lag 计算为 `max(high - committed_offset, 0)`。
+- 从未提交 Offset 的分区显示“未提交”，Lag 显示 `—`，不当作 0。
+- Topic 汇总行显示 Partition 数、所有分区 low watermark 的最小值、所有非空分区最大消息 Offset 的最大值，以及 `sum(high - low)` 得到的保留消息数估算。Offset 本质上只在 Partition 内有意义，因此汇总值用于概览，展开后的逐 Partition 值才是权威数据。
+- Consumer Group + Topic 汇总 Lag 为具有有效 committed offset 的 Partition Lag 之和；同时显示未提交 Partition 数。展开后展示逐 Partition committed offset、high watermark、最大消息 Offset 和 Lag。
+
+## 7. API 设计
+
+### 7.1 集群配置
+
+- `GET /api/clusters`：列出脱敏后的集群配置。
+- `POST /api/clusters`：新增集群。
+- `PUT /api/clusters/:id`：更新集群。
+- `DELETE /api/clusters/:id`：删除集群；删除前终止该集群的活动会话。
+- `POST /api/clusters/:id/test`：临时连接并测试认证，完成后立即释放连接。
+
+### 7.2 监控会话
+
+- `POST /api/clusters/:id/sessions`：创建监控会话。
+- `GET /api/sessions/:id/snapshot`：采集完整快照并续租。
+- `DELETE /api/sessions/:id`：主动关闭会话。
+- `GET /api/health`：服务存活检查。
+
+错误响应使用统一结构，包含稳定错误码、用户可读消息、可选字段级详情和 request ID。API 区分配置错误、认证失败、DNS/网络失败、TLS 失败、Kafka 超时、会话过期和内部错误。
+
+## 8. 采集策略
+
+- 单轮快照获取 Topic metadata 和各 Partition watermarks，再读取全部 Consumer Group 及其 committed offsets。
+- 对 Kafka 操作设置明确超时，并使用有上限的并发，避免大集群造成无界任务或请求堆积。
+- 同一会话不允许两轮快照重叠；上一轮仍在执行时，后续请求返回明确的“采集中”结果或共享进行中的结果。
+- 单个 Topic、Partition 或消费组失败不使整个快照失败。响应标记为部分成功，包含失败项及原因。
+- 前端对部分失败项保留上一轮值并标记为陈旧；集群整体不可达时保留最后一次快照并显示断开状态。
+
+## 9. 页面与交互
+
+### 9.1 全局布局
+
+采用“总览 + 分析工作台”布局。左侧导航包含“概览”“Topics”“Consumer Groups”“集群设置”。顶部栏包含当前集群选择器、连接状态、最后更新时间、3/5/10 秒刷新频率和手动刷新。
+
+### 9.2 概览页
+
+- Topic 数、消费组数、总 Lag、异常消费组数指标卡片。
+- 最近一小时总 Lag 折线图。
+- 按 Lag 降序展示异常消费组，支持跳转详情。
+
+“异常消费组”在第一版定义为总 Lag 大于 0 或包含采集错误/未提交 Partition 的消费组，不引入可配置告警阈值。
+
+### 9.3 Topics 页
+
+- 按名称搜索 Topic。
+- Topic 汇总行展示 Partition 数、汇总最小/最大 Offset、保留消息数估算。
+- 展开后展示逐 Partition low watermark、high watermark 和最大消息 Offset。
+
+### 9.4 Consumer Groups 页
+
+- 按消费组名称和 Topic 搜索。
+- 默认按总 Lag 降序。
+- 汇总行展示消费组状态、Topic、有效 Partition 数、未提交 Partition 数和总 Lag。
+- 展开后展示每个 Partition 的 committed offset、high watermark、最大消息 Offset 和 Lag。
+
+### 9.5 消费组详情
+
+- 选择一个或多个 Topic/Partition 查看 Lag 折线图。
+- 每次快照按服务端采集时间写入环形缓冲，并持续淘汰一小时前的采样。
+- 改变刷新频率不清空已有历史。
+
+### 9.6 集群设置
+
+- 新增、编辑、删除集群。
+- 保存前可测试连接。
+- 密码和私钥不回显；编辑时允许保持原敏感字段。
+
+## 10. 状态与错误体验
+
+- 首次采集显示骨架屏。
+- 普通刷新保留已有内容，避免页面闪烁。
+- 行级失败显示警告和错误摘要；悬停或展开查看详细原因。
+- 数据超过两倍当前刷新周期仍未更新时标记为陈旧。
+- 会话过期时前端自动创建新会话并重试一次；持续失败后停止自动重试并提供手动重连。
+- 后端日志包含 request ID、集群 ID 和操作类型，但不得记录密码、私钥或完整连接参数。
+
+## 11. 安全约束
+
+- 使用 AEAD 加密敏感配置，每条密文使用独立随机 nonce。
+- 主密钥只从环境变量读取，不写入数据库、配置文件或日志。
+- 限制请求体大小、快照并发数和 Kafka 操作超时。
+- 对展示文本进行正常的 React 转义，不渲染来自 Kafka 元数据的任意 HTML。
+- 默认本机监听；远程访问需要部署方配置 HTTPS 和访问控制。
+
+## 12. 测试策略
+
+### 12.1 后端
+
+- 单元测试：配置校验、加密与解密、Lag 计算、空分区、未提交 Offset、租约续期与过期、错误映射。
+- API 测试：集群 CRUD、敏感字段脱敏、会话创建/续租/删除、会话过期恢复、部分成功响应。
+- Kafka 集成测试：使用测试容器验证 PLAINTEXT、Topic watermarks、消费组 committed offsets 和 Lag。TLS/SASL 配置转换通过单元测试覆盖，并在可用环境中保留可选集成测试。
+
+### 12.2 前端
+
+- 单元测试：最近一小时环形缓冲、Lag 汇总、刷新频率切换、陈旧状态判断。
+- 组件测试：Topic 展开表格、消费组筛选与排序、错误和空状态、图表序列选择。
+- 行为测试：页面隐藏时暂停、重新可见时恢复、切换集群和卸载页面时释放会话。
+
+### 12.3 端到端
+
+覆盖新增集群、测试连接、进入仪表盘、查看 Topic 和消费组、切换刷新频率、查看趋势、切换集群以及退出后释放会话。
+
+## 13. 验收标准
+
+- 可以保存和切换多个 Kafka 集群，并支持约定的 PLAINTEXT、TLS、SASL/PLAIN、SASL/SCRAM 配置。
+- 页面只在仪表盘可见并使用时维持 Kafka 连接；关闭、切换或租约到期后释放连接。
+- 3 秒、5 秒、10 秒刷新频率均可工作，且不会产生重叠采集。
+- 所有 Topic 均可搜索、汇总和展开查看 Partition Offset。
+- 所有仍可由 Kafka 查询到的消费组均可查看 committed offset 与 Lag，包括无活跃成员的组。
+- Lag 与最大消息 Offset 符合本文定义，空分区和未提交 Offset 展示明确。
+- 最近一小时趋势只保存在浏览器内存，连续运行超过一小时后不会保留超期样本。
+- Kafka 局部错误不会清空健康数据，界面能区分部分失败、断开和陈旧状态。
+- 敏感认证字段不会通过读取 API 或日志泄露，数据库中不保存明文密码。
