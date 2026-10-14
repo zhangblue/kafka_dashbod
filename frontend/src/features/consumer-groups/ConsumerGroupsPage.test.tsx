@@ -19,12 +19,12 @@ const snapshot: ClusterSnapshot = { ...snapshotFixture, consumerGroups: [row('lo
 const rules: LagRuleSet = { defaults: { normalMax: 999, highMin: 5000, overLimitSeconds: 0 },
   overrides: [{ groupId: 'flink-orders', topic: 'orders', normalMax: 12000, highMin: 30000, overLimitSeconds: 120 }] }
 
-function show(value: ClusterSnapshot | null = snapshot, ruleSet = rules) {
+function show(value: ClusterSnapshot | null = snapshot, ruleSet = rules, entry = '/') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
   client.setQueryData(['lag-rules', clusterFixture.id], ruleSet)
   const context: DashboardContext = { cluster: clusterFixture, monitor: { snapshot: value, history: [], status: 'connected',
     error: null, isFetching: false, continuityKey: 'a', refresh: async () => {}, reconnect: () => {} } }
-  const tree = () => <QueryClientProvider client={client}><MemoryRouter><Routes><Route element={
+  const tree = () => <QueryClientProvider client={client}><MemoryRouter initialEntries={[entry]}><Routes><Route element={
     <ConsumerGroupLagProvider clusterId={context.cluster!.id} monitor={context.monitor}><Outlet context={{ ...context }} /></ConsumerGroupLagProvider>}>
     <Route index element={<ConsumerGroupsPage />} />
   </Route></Routes></MemoryRouter></QueryClientProvider>
@@ -49,6 +49,18 @@ it('sorts by numeric lag descending and filters by group, topic and evaluated st
   expect(screen.queryByText('flink-orders')).not.toBeInTheDocument()
   await user.selectOptions(screen.getByRole('combobox'), 'uncommitted')
   expect(screen.getByText('new-worker')).toBeInTheDocument()
+})
+
+it('opens the exact group and topic partition details from an overview link', () => {
+  show(snapshot, rules, '/?groupId=new-worker&topic=new')
+  expect(screen.getByRole('table', { name: 'new-worker / new Partitions' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '收起 new-worker / new' })).toHaveAttribute('aria-expanded', 'true')
+})
+
+it('keeps the linked detail open when its first snapshot arrives after the route', () => {
+  const { update } = show(null, rules, '/?groupId=new-worker&topic=new')
+  update({ snapshot })
+  expect(screen.getByRole('table', { name: 'new-worker / new Partitions' })).toBeInTheDocument()
 })
 
 it('shows known lag plus unknown partitions and expands committed offsets without coercing null', async () => {

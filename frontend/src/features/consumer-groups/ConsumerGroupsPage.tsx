@@ -1,11 +1,12 @@
 import { Fragment, useId, useState } from 'react'
+import { useSearchParams } from 'react-router'
 import type { ConsumerGroupTopicSnapshot } from '../../api/types'
 import { MetricHelp } from '../../components/MetricHelp'
 import { StatusBadge } from '../../components/StatusBadge'
 import { ApiErrorNotice } from '../clusters/ClusterForm'
 import { useDashboard } from '../dashboard/useDashboard'
 import type { MonitorSession } from '../dashboard/useMonitorSession'
-import { statusLabels, type LagStatus } from './status'
+import { lagRowKey, statusLabels, type LagStatus } from './status'
 import { useConsumerGroupLag, type ConsumerGroupLagRow } from './useConsumerGroupLag'
 
 const format = (value: number | null) => value === null ? '—' : value.toLocaleString('en-US')
@@ -21,10 +22,14 @@ function PartitionTable({ row }: { row: ConsumerGroupTopicSnapshot }) {
   </tr>)}</tbody></table>
 }
 
-function ConsumerGroupsTable({ monitor, evaluatedRows }: { monitor: MonitorSession; evaluatedRows: ConsumerGroupLagRow[] }) {
+function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId: string; monitor: MonitorSession; evaluatedRows: ConsumerGroupLagRow[] }) {
+  const [params] = useSearchParams()
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<LagStatus | 'all'>('all')
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [expanded, setExpanded] = useState<Set<string>>(() => {
+    const groupId = params.get('groupId'), topic = params.get('topic')
+    return new Set(groupId && topic ? [lagRowKey(clusterId, groupId, topic)] : [])
+  })
   const id = useId()
   const { snapshot, status } = monitor
   const rows = evaluatedRows.filter(({ row, state }) => (filter === 'all' || state.status === filter)
@@ -71,7 +76,7 @@ export function ConsumerGroupsPage() {
     {!cluster ? <p>请选择集群。</p> : <>
       {lag.isPending && <p role="status">正在加载 Lag 规则…</p>}
       <ApiErrorNotice error={lag.error} />
-      {lag.ready && <ConsumerGroupsTable key={cluster.id} monitor={monitor} evaluatedRows={lag.rows} />}
+      {lag.ready && <ConsumerGroupsTable key={cluster.id} clusterId={cluster.id} monitor={monitor} evaluatedRows={lag.rows} />}
     </>}
   </section>
 }

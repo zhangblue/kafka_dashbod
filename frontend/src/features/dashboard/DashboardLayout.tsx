@@ -12,7 +12,7 @@ export type { DashboardContext } from './useDashboard'
 
 function Monitor({ cluster, refreshSeconds }: { cluster: ClusterDto | null; refreshSeconds: RefreshSeconds }) {
   const monitor = useMonitorSession(cluster?.id ?? null, refreshSeconds)
-  const labels = { idle: '未连接', connecting: '正在连接…', connected: '已连接', paused: '已暂停（页面不可见）', error: '连接失败' }
+  const labels = { idle: '未连接', connecting: '正在连接…', connected: '已连接', paused: '已暂停（页面不可见）', error: '连接已断开，显示最后一次快照' }
   return <>
     <p role="status">{labels[monitor.status]}</p>
     <p>最后更新时间：{monitor.snapshot
@@ -23,7 +23,7 @@ function Monitor({ cluster, refreshSeconds }: { cluster: ClusterDto | null; refr
     <ApiErrorNotice error={monitor.error} />
     {Boolean(monitor.snapshot?.partialFailures.length) && <p role="alert">部分数据采集失败；未知值和不完整数据已保留。</p>}
     <ConsumerGroupLagProvider clusterId={cluster?.id ?? null} monitor={monitor}>
-      <Outlet context={{ cluster, monitor } satisfies DashboardContext} />
+      <Outlet context={{ cluster, monitor, refreshSeconds } satisfies DashboardContext} />
     </ConsumerGroupLagProvider>
   </>
 }

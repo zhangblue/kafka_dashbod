@@ -4,6 +4,9 @@ import App from './App'
 import { clustersApi, lagRulesApi, sessionsApi } from '../api/client'
 import { clusterFixture, rulesFixture, snapshotFixture } from '../test/handlers'
 
+// Canvas rendering is covered by the chart lifecycle test; jsdom has no canvas context.
+vi.mock('echarts/core', () => ({ init: () => ({ setOption() {}, resize() {}, dispose() {} }), use() {} }))
+
 afterEach(() => { vi.restoreAllMocks(); window.history.replaceState({}, '', '/') })
 
 it('renders the dashboard navigation', () => {
@@ -11,7 +14,7 @@ it('renders the dashboard navigation', () => {
   render(<App />)
   expect(screen.getByText('Kafka Lens')).toBeInTheDocument()
   expect(screen.getByRole('navigation')).toBeInTheDocument()
-  expect(screen.getByText('概览')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: '概览' })).toBeInTheDocument()
   expect(screen.getByText('Topics')).toBeInTheDocument()
   expect(screen.getByText('Consumer Groups')).toBeInTheDocument()
   expect(screen.getByText('集群设置')).toBeInTheDocument()

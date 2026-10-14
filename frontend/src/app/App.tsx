@@ -5,6 +5,7 @@ import { DashboardLayout } from '../features/dashboard/DashboardLayout'
 import { ClustersPage } from '../features/clusters/ClustersPage'
 import { TopicsPage } from '../features/topics/TopicsPage'
 import { ConsumerGroupsPage } from '../features/consumer-groups/ConsumerGroupsPage'
+import { OverviewPage } from '../features/overview/OverviewPage'
 
 function App() {
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
@@ -22,7 +23,7 @@ function App() {
       </nav>
       <Routes>
         <Route element={<DashboardLayout />}>
-          <Route index element={<section aria-label="概览内容" />} />
+          <Route index element={<OverviewPage />} />
           <Route path="topics" element={<TopicsPage />} />
           <Route path="consumer-groups" element={<ConsumerGroupsPage />} />
         </Route>

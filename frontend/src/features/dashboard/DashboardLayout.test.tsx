@@ -65,3 +65,21 @@ it('preserves partial snapshots and explicit unknowns in the outlet history', as
   expect(screen.getByText('当前：生产 Kafka，样本：1')).toBeInTheDocument()
   expect(screen.getByText('已连接')).toBeInTheDocument()
 })
+
+it('retains the last snapshot after disconnection and reconnects with a new session', async () => {
+  let requests = 0
+  vi.mocked(sessionsApi.snapshot).mockImplementation(async () => {
+    requests++
+    if (requests === 2) throw new Error('Broker unavailable')
+    return snapshotFixture
+  })
+  renderLayout()
+  await screen.findByText('当前：生产 Kafka，样本：1')
+  fireEvent.click(screen.getByRole('button', { name: '手动刷新' }))
+  expect(await screen.findByText('连接已断开，显示最后一次快照')).toBeInTheDocument()
+  expect(screen.getByText('当前：生产 Kafka，样本：1')).toBeInTheDocument()
+  expect(screen.getByLabelText('最后更新时间')).toHaveAttribute('datetime', snapshotFixture.collectedAt)
+  fireEvent.click(screen.getByRole('button', { name: '重新连接' }))
+  await screen.findByText('已连接')
+  expect(created).toEqual(['cluster-a', 'cluster-a'])
+})

@@ -22,3 +22,19 @@ nav ul {
   padding: 0;
   list-style: none;
 }
+
+.overview-metrics, .overview-skeleton {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.overview-metrics > section, .overview-skeleton > div {
+  padding: 1rem;
+  min-height: 80px;
+  border: 1px solid #d9dfe8;
+  border-radius: 8px;
+  background: white;
+}
+
+.overview-skeleton > div { background: #e7ebf0; }
