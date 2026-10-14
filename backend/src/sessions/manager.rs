@@ -9,10 +9,7 @@ use std::{
 };
 
 use rdkafka::{
-    admin::AdminClient,
-    client::ClientContext,
-    config::RDKafkaLogLevel,
-    consumer::{BaseConsumer, ConsumerContext},
+    admin::AdminClient, client::ClientContext, config::RDKafkaLogLevel, consumer::ConsumerContext,
     error::KafkaError,
 };
 use tokio::{
@@ -22,7 +19,10 @@ use tokio::{
 
 use crate::{
     domain::cluster::DecryptedClusterConfig,
-    kafka::{client::ConnectionError, config::build_client_properties},
+    kafka::{
+        client::ConnectionError, config::build_client_properties,
+        group_consumers::GroupConsumerCache,
+    },
 };
 
 pub const LEASE_DURATION: Duration = Duration::from_secs(15);
@@ -45,6 +45,15 @@ pub trait SessionClientFactory: Clone + Send + Sync + 'static {
         &self,
         config: DecryptedClusterConfig,
     ) -> impl Future<Output = Result<Self::Client, SessionError>> + Send;
+
+    fn snapshot(
+        &self,
+        _client: &mut Self::Client,
+        _cluster_id: &str,
+    ) -> impl Future<Output = Result<crate::domain::snapshot::ClusterSnapshot, SessionError>> + Send
+    {
+        async { Err(SessionError::Connection(ConnectionError::InvalidConfig)) }
+    }
 }
 
 /// Suppress native messages, which may contain decrypted credentials.
@@ -57,9 +66,9 @@ impl ClientContext for SessionContext {
 impl ConsumerContext for SessionContext {}
 
 pub struct KafkaSessionClient {
-    pub admin: AdminClient<SessionContext>,
+    pub admin: Arc<AdminClient<SessionContext>>,
     // Populated lazily by snapshot collection, never subscribed or auto-committing.
-    pub group_consumers: HashMap<String, BaseConsumer<SessionContext>>,
+    pub group_consumers: GroupConsumerCache,
     pub config: DecryptedClusterConfig,
 }
 
@@ -78,13 +87,30 @@ impl SessionClientFactory for KafkaSessionClientFactory {
                 .create_with_context(SessionContext)
                 .map_err(|_| ConnectionError::InvalidConfig)?;
             Ok(KafkaSessionClient {
-                admin,
-                group_consumers: HashMap::new(),
+                admin: Arc::new(admin),
+                group_consumers: GroupConsumerCache::default(),
                 config,
             })
         })
         .await
         .map_err(|_| ConnectionError::Timeout)?
+    }
+
+    async fn snapshot(
+        &self,
+        client: &mut Self::Client,
+        cluster_id: &str,
+    ) -> Result<crate::domain::snapshot::ClusterSnapshot, SessionError> {
+        use crate::kafka::collector::{CollectionOptions, NativeProbe, collect};
+        let options = CollectionOptions {
+            operation_timeout: client.config.connection_timeout,
+            ..CollectionOptions::default()
+        };
+        let probe = NativeProbe::new(client, options);
+        let snapshot = collect(&probe, cluster_id, options).await;
+        // Timed-out native calls cannot be cancelled: retain session locks until they exit.
+        probe.finish().await;
+        Ok(snapshot)
     }
 }
 
@@ -189,6 +215,23 @@ impl<F: SessionClientFactory> Clone for SessionManager<F> {
 }
 
 impl<F: SessionClientFactory> SessionManager<F> {
+    pub async fn snapshot(
+        &self,
+        id: &str,
+    ) -> Result<crate::domain::snapshot::ClusterSnapshot, SessionError> {
+        let session = self.get_and_renew(id).await?;
+        let factory = self.factory.clone();
+        // The owned task retains the collection/client locks even if HTTP is cancelled.
+        tokio::spawn(async move {
+            let _collection = session.try_collect()?;
+            let mut clients = session.clients.lock().await;
+            let client = clients.as_mut().ok_or(SessionError::Expired)?;
+            factory.snapshot(client, &session.cluster_id).await
+        })
+        .await
+        .map_err(|_| SessionError::Connection(ConnectionError::Timeout))?
+    }
+
     pub fn new(lease: Duration, factory: F) -> Self {
         let state = Arc::new(Mutex::new(Sessions {
             entries: HashMap::<String, LeasedEntry<F::Client>>::new(),

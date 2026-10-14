@@ -74,6 +74,7 @@ fn routes<F: SessionClientFactory>() -> Router {
         )
         .route("/api/clusters/{id}/sessions", post(sessions::create::<F>))
         .route("/api/sessions/{id}", delete(sessions::delete::<F>))
+        .route("/api/sessions/{id}/snapshot", get(sessions::snapshot::<F>))
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
         .layer(middleware::from_fn(error::request_id))

@@ -43,6 +43,13 @@ pub async fn delete<F: SessionClientFactory>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn snapshot<F: SessionClientFactory>(
+    Extension(sessions): Extension<SessionManager<F>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::domain::snapshot::ClusterSnapshot>, ApiError> {
+    Ok(Json(sessions.snapshot(&id).await?))
+}
+
 impl From<SessionError> for ApiError {
     fn from(error: SessionError) -> Self {
         let (status, code) = match error {

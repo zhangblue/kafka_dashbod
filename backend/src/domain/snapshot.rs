@@ -111,7 +111,9 @@ impl ConsumerGroupTopicSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartialFailure {
+    pub scope: String,
     pub resource: String,
+    pub code: String,
     pub message: String,
 }
 
@@ -210,7 +212,9 @@ mod tests {
                 vec![GroupPartitionSnapshot::new(0, 5, None)],
             )],
             partial_failures: vec![PartialFailure {
+                scope: "watermark".into(),
                 resource: "orders:1".into(),
+                code: "KAFKA_TIMEOUT".into(),
                 message: "watermark timeout".into(),
             }],
         };
@@ -232,7 +236,7 @@ mod tests {
                     "partitions": [{ "partition": 0, "high": 5,
                         "committedOffset": null, "lag": null }]
                 }],
-                "partialFailures": [{ "resource": "orders:1", "message": "watermark timeout" }]
+                "partialFailures": [{ "scope": "watermark", "resource": "orders:1", "code": "KAFKA_TIMEOUT", "message": "watermark timeout" }]
             })
         );
         assert_eq!(
