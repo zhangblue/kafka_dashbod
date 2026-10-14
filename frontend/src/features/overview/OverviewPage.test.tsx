@@ -8,6 +8,7 @@ import { clusterFixture } from '../../test/handlers'
 import { ConsumerGroupLagProvider } from '../consumer-groups/ConsumerGroupLagProvider'
 import type { DashboardContext } from '../dashboard/useDashboard'
 import { OverviewPage } from './OverviewPage'
+import { retainDisplaySnapshot } from '../dashboard/displaySnapshot'
 
 vi.mock('echarts/core', () => ({ init: () => ({ setOption() {}, resize() {}, dispose() {} }), use() {} }))
 beforeEach(() => {
@@ -105,4 +106,18 @@ it('distinguishes fresh uncommitted data from stale collection failures', async 
   await screen.findByRole('table', { name: '异常 Consumer Groups' })
   expect(screen.getByRole('region', { name: '总 Lag' })).toHaveTextContent('不完整')
   expect(screen.queryByLabelText('图表数据已陈旧')).not.toBeInTheDocument()
+})
+
+it.each(['topics', 'groups'])('does not count confirmed-absent group/topic rows as abnormal when %s discovery fails', async scope => {
+  const previous = fixture()
+  previous.consumerGroups = [row('worker', 6000)]; previous.consumerGroupIds = ['worker']; previous.partialFailures = []
+  const raw: ClusterSnapshot = { ...previous, topics: [], consumerGroupIds: [], consumerGroups: [],
+    partialFailures: [{ scope, resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'timeout' }] }
+  const display = retainDisplaySnapshot(raw, retainDisplaySnapshot(previous))
+  const view = mount(raw)
+  view.update({ displaySnapshot: display.snapshot, staleResources: display.staleResources })
+  await screen.findByText('暂无异常 Consumer Groups。')
+  expect(screen.queryByRole('link', { name: 'worker / orders' })).not.toBeInTheDocument()
+  expect(screen.getByRole('region', { name: '异常 Consumer Group 数' })).toHaveTextContent('0')
+  expect(screen.getByRole('region', { name: 'Consumer Group 数' })).toHaveTextContent(scope === 'groups' ? '1' : '0')
 })

@@ -48,8 +48,16 @@ export function retainDisplaySnapshot(current: ClusterSnapshot, previous?: Displ
     if (topicFailed(topic.topic) && !partitions.length) retain(topicDisplayKey(topic.topic))
     return { ...topic, partitions }
   })
+  const currentGroups = new Set(current.consumerGroupIds)
+  const currentTopics = new Set(current.topics.map(topic => topic.topic))
   const consumerGroups = merge(current.consumerGroups, before.consumerGroups,
-    row => groupDisplayKey(row.groupId, row.topic), row => groupFailed(row.groupId) || topicFailed(row.topic)).map(row => {
+    row => groupDisplayKey(row.groupId, row.topic), row => {
+      const groupUnknown = groupFailed(row.groupId), topicUnknown = topicFailed(row.topic)
+      // Failure in one discovery dimension cannot revive a resource deleted in the other.
+      return (groupUnknown || topicUnknown)
+        && (currentGroups.has(row.groupId) || groupUnknown)
+        && (currentTopics.has(row.topic) || topicUnknown)
+    }).map(row => {
     const old = before.consumerGroups.find(value => value.groupId === row.groupId && value.topic === row.topic)
     if (!old) return row
     const partitions = merge(row.partitions, old.partitions, partition => partition.partition,

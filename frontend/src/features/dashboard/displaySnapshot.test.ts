@@ -21,12 +21,42 @@ it.each(['topics', 'groups'])('retains rows lost to %s discovery and preserves t
     partialFailures: [failure(scope, 'a')] }
   const display = retainDisplaySnapshot(raw, prior)
   expect(display.snapshot.consumerGroups[0].lag).toBe(100)
+  expect(display.snapshot.consumerGroupIds).toEqual(['worker'])
   expect(display.staleResources[groupDisplayKey('worker', 'orders')]).toBe(complete.collectedAt)
   if (scope === 'topics') expect(display.staleResources[topicDisplayKey('orders')]).toBe(complete.collectedAt)
   const again = retainDisplaySnapshot({ ...raw, collectedAt: '2026-10-15T00:00:10Z' }, display)
   expect(again.staleResources[groupDisplayKey('worker', 'orders')]).toBe(complete.collectedAt)
   expect(raw.consumerGroups).toEqual([])
   expect(retainDisplaySnapshot(complete, display).staleResources).toEqual({})
+})
+
+it.each(['topics', 'groups'])('drops old group/topic rows when %s fails but the other discovery successfully confirms absence', scope => {
+  const raw: ClusterSnapshot = { ...complete, collectedAt: '2026-10-15T00:00:05Z', topics: [], consumerGroupIds: [], consumerGroups: [],
+    partialFailures: [failure(scope, 'a')] }
+  const display = retainDisplaySnapshot(raw, retainDisplaySnapshot(complete))
+  expect(display.snapshot.consumerGroups).toEqual([])
+  expect(display.staleResources[groupDisplayKey('worker', 'orders')]).toBeUndefined()
+  // IDs are independent discovery identities: no topics does not prove a group was deleted.
+  expect(display.snapshot.consumerGroupIds).toEqual(scope === 'groups' ? ['worker'] : [])
+})
+
+it.each(['topics', 'groups'])('retains only rows whose other dimension still exists during %s discovery failure', scope => {
+  const prior: ClusterSnapshot = { ...complete, consumerGroupIds: ['worker', 'deleted-group'],
+    topics: [...complete.topics, { ...complete.topics[0], topic: 'deleted-topic' }],
+    consumerGroups: [...complete.consumerGroups,
+      { ...complete.consumerGroups[0], groupId: 'deleted-group' },
+      { ...complete.consumerGroups[0], topic: 'deleted-topic' }],
+  }
+  const raw: ClusterSnapshot = { ...complete, collectedAt: '2026-10-15T00:00:05Z', consumerGroups: [],
+    topics: scope === 'topics' ? [] : complete.topics, consumerGroupIds: scope === 'groups' ? [] : complete.consumerGroupIds,
+    partialFailures: [failure(scope, 'a')] }
+  const display = retainDisplaySnapshot(raw, retainDisplaySnapshot(prior))
+  const pairs = display.snapshot.consumerGroups.map(row => [row.groupId, row.topic])
+  expect(pairs).toEqual(scope === 'topics'
+    ? [['worker', 'orders'], ['worker', 'deleted-topic']]
+    : [['worker', 'orders'], ['deleted-group', 'orders']])
+  expect(display.snapshot.consumerGroupIds).toEqual(scope === 'topics' ? ['worker'] : ['worker', 'deleted-group'])
+  expect(display.snapshot.consumerGroups.every(row => display.snapshot.consumerGroupIds.includes(row.groupId))).toBe(true)
 })
 
 it('retains failed committed positions while preserving healthy current partitions and raw unknowns', () => {
