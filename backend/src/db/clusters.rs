@@ -159,6 +159,16 @@ impl ClusterRepository {
         id: &str,
         input: &ClusterInput,
     ) -> Result<Option<ClusterDto>, RepositoryError> {
+        self.update_with_password_clear(id, input, false).await
+    }
+
+    /// Explicit password removal shares the same transaction as every other setting.
+    pub async fn update_with_password_clear(
+        &self,
+        id: &str,
+        input: &ClusterInput,
+        clear_password: bool,
+    ) -> Result<Option<ClusterDto>, RepositoryError> {
         let mut tx = self.pool.begin().await?;
         let previous: Option<Option<Vec<u8>>> =
             sqlx::query_scalar("SELECT encrypted_secrets FROM clusters WHERE id = ?")
@@ -170,7 +180,11 @@ impl ClusterRepository {
         };
         let previous = self.decrypt_secrets(previous)?;
         let merged = ClusterSecrets {
-            password: merge_secret(previous.password, &input.password),
+            password: if clear_password {
+                None
+            } else {
+                merge_secret(previous.password, &input.password)
+            },
             ca_pem: merge_secret(previous.ca_pem, &input.ca_pem),
             client_certificate_pem: merge_secret(
                 previous.client_certificate_pem,

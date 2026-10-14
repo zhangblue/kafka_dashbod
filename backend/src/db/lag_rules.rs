@@ -22,6 +22,43 @@ impl LagRuleRepository {
         cluster_id: &str,
         rules: &[LagRuleInput],
     ) -> Result<Vec<LagRule>, RepositoryError> {
+        self.replace_transaction(cluster_id, None, rules).await
+    }
+
+    /// Read default thresholds and overrides from a single consistent transaction.
+    pub async fn settings(
+        &self,
+        cluster_id: &str,
+    ) -> Result<((i64, i64, i64), Vec<LagRule>), RepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        let defaults = sqlx::query_as("SELECT default_normal_lag_max, default_high_lag_min, default_over_limit_seconds FROM clusters WHERE id = ?")
+            .bind(cluster_id).fetch_optional(&mut *tx).await?.ok_or(RepositoryError::ClusterNotFound)?;
+        let rules = sqlx::query_as("SELECT id, cluster_id, group_id, topic, normal_lag_max, high_lag_min, over_limit_seconds FROM lag_rules WHERE cluster_id = ? ORDER BY group_id, topic")
+            .bind(cluster_id).fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        Ok((defaults, rules))
+    }
+
+    /// Atomically update cluster defaults and fully replace all overrides.
+    pub async fn replace_settings(
+        &self,
+        cluster_id: &str,
+        defaults: (i64, i64, i64),
+        rules: &[LagRuleInput],
+    ) -> Result<Vec<LagRule>, RepositoryError> {
+        if defaults.0 < 0 || defaults.1 <= defaults.0 || defaults.2 < 0 {
+            return Err(RepositoryError::InvalidInput);
+        }
+        self.replace_transaction(cluster_id, Some(defaults), rules)
+            .await
+    }
+
+    async fn replace_transaction(
+        &self,
+        cluster_id: &str,
+        defaults: Option<(i64, i64, i64)>,
+        rules: &[LagRuleInput],
+    ) -> Result<Vec<LagRule>, RepositoryError> {
         let mut tx = self.pool.begin().await?;
         let mut unique = HashSet::new();
         for rule in rules {
@@ -41,6 +78,10 @@ impl LagRuleRepository {
             .await?;
         if !exists {
             return Err(RepositoryError::ClusterNotFound);
+        }
+        if let Some((normal, high, duration)) = defaults {
+            sqlx::query("UPDATE clusters SET default_normal_lag_max = ?, default_high_lag_min = ?, default_over_limit_seconds = ?, updated_at = ? WHERE id = ?")
+                .bind(normal).bind(high).bind(duration).bind(chrono::Utc::now().to_rfc3339()).bind(cluster_id).execute(&mut *tx).await?;
         }
         sqlx::query("DELETE FROM lag_rules WHERE cluster_id = ?")
             .bind(cluster_id)
