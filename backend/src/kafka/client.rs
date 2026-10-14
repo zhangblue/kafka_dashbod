@@ -76,6 +76,15 @@ fn map_error(error: &KafkaError) -> ConnectionError {
         .unwrap_or(ConnectionError::Timeout)
 }
 
+fn combine_failure(current: ConnectionError, code: RDKafkaErrorCode) -> ConnectionError {
+    let category = map_code(code);
+    if current == ConnectionError::Timeout || category == ConnectionError::Auth {
+        category
+    } else {
+        current
+    }
+}
+
 /// AdminClient's polling thread services its admin response queue only. Drain the main
 /// queue's typed error events so authentication/TLS/DNS causes survive a metadata timeout.
 /// No error text or native log contents cross this boundary.
@@ -94,10 +103,7 @@ fn connection_failure(client: &AdminClient<SafeContext>, error: &KafkaError) -> 
                 break;
             }
             if bindings::rd_kafka_event_type(event) == bindings::RD_KAFKA_EVENT_ERROR {
-                let category = map_code(bindings::rd_kafka_event_error(event).into());
-                if result == ConnectionError::Timeout || category == ConnectionError::Auth {
-                    result = category;
-                }
+                result = combine_failure(result, bindings::rd_kafka_event_error(event).into());
             }
             bindings::rd_kafka_event_destroy(event);
         }
@@ -385,6 +391,44 @@ mod tests {
         ] {
             let error = map_error(&KafkaError::MetadataFetch(native));
             assert_eq!(error.code(), expected);
+        }
+    }
+
+    // Preserve a concrete typed failure when generic transport/timeout events
+    // follow it; a real network timeout must not be relabelled as DNS failure.
+    #[test]
+    fn classifies_typed_failure_sequences_without_native_error_text() {
+        use RDKafkaErrorCode::*;
+        for (status, events, expected) in [
+            (
+                OperationTimedOut,
+                vec![Resolve, AllBrokersDown],
+                ConnectionError::Dns,
+            ),
+            (
+                OperationTimedOut,
+                vec![BrokerTransportFailure, Resolve, OperationTimedOut],
+                ConnectionError::Dns,
+            ),
+            (
+                Authentication,
+                vec![AllBrokersDown, OperationTimedOut],
+                ConnectionError::Auth,
+            ),
+            (
+                OperationTimedOut,
+                vec![SaslAuthenticationFailed, AllBrokersDown],
+                ConnectionError::Auth,
+            ),
+            (
+                OperationTimedOut,
+                vec![BrokerTransportFailure, AllBrokersDown],
+                ConnectionError::Timeout,
+            ),
+            (OperationTimedOut, vec![], ConnectionError::Timeout),
+        ] {
+            let category = events.into_iter().fold(map_code(status), combine_failure);
+            assert_eq!(category, expected);
         }
     }
 

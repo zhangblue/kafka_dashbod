@@ -48,7 +48,9 @@ async fn unavailable_broker_returns_bounded_safe_timeout() {
 
 #[tokio::test]
 async fn dns_errors_are_not_reported_as_timeouts() {
-    let mut config = DecryptedClusterConfig::plaintext("no-such-kafka-broker.invalid:9092");
+    // A label longer than the DNS limit fails local getaddrinfo validation.
+    // A merely absent `.invalid` name may resolve under a DNS wildcard/proxy.
+    let mut config = DecryptedClusterConfig::plaintext(format!("{}.invalid:9092", "a".repeat(64)));
     config.connection_timeout = Duration::from_millis(300);
     let error = test_connection(config).await.unwrap_err();
     assert_eq!(error.code(), "KAFKA_DNS_FAILED");
