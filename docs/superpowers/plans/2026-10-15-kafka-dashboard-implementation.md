@@ -4,9 +4,9 @@
 
 **目标：** 构建一个 React + Rust 的只读 Kafka 仪表盘，只在页面使用期间连接 Kafka，并展示 Topic Offset、Consumer Group Lag、最近一小时趋势及可配置状态判定规则。
 
-**架构：** React 前端通过 REST 创建短租约监控会话，以 3/5/10 秒间隔拉取快照，并在浏览器内维护最近一小时样本和持续超限计时。Axum 后端使用 rust-rdkafka 采集 metadata、watermarks、consumer groups 和 committed offsets，使用 SQLx + SQLite 保存集群及 Lag 规则，并用 AES-256-GCM 加密认证字段。
+**架构：** React 前端通过 REST 创建短租约监控会话，以 3/5/10 秒间隔拉取快照，并在浏览器内维护最近一小时样本和持续超限计时。Axum 后端使用 rust-rdkafka 采集 metadata、watermarks、consumer groups 和 committed offsets，使用 SQLx + SQLite 保存集群及 Lag 规则，并用 AES-256-GCM 加密认证字段。生产环境由同一 Rust 进程提供 API 和 Vite 静态资源，发行目录同时携带 macOS ARM64 与 Linux x86_64 二进制。
 
-**技术栈：** Rust、Axum、Tokio、rust-rdkafka 0.39、SQLx/SQLite、AES-GCM、React、TypeScript、Vite、TanStack Query 5、Apache ECharts、Vitest、Testing Library、Playwright、Docker Compose Kafka 测试容器。
+**技术栈：** Rust、Axum、Tokio、rust-rdkafka 0.39、SQLx/SQLite、AES-GCM、React、TypeScript、Vite、TanStack Query 5、Apache ECharts、Vitest、Testing Library、Playwright、Docker Compose Kafka 测试容器、Docker Buildx、musl。
 
 ---
 
@@ -18,6 +18,14 @@
 - `.gitattributes`：固定 SQL migration 为 LF，保证 SQLx migration hash 稳定。
 - `docker-compose.test.yml`：本地与 CI 使用的单节点 KRaft Kafka 测试容器。
 - `README.md`：开发、配置、测试和生产部署说明。
+- `AGENTS.md`：架构边界、开发命令、TDD、Context7 和安全约束。
+- `packaging/Dockerfile.linux-amd64`：在 Linux/amd64 构建静态 musl 后端。
+- `packaging/start.sh`：发行包平台识别和单进程启动入口。
+- `packaging/.env.example`：不含秘密的运行环境变量示例。
+- `packaging/README.txt`：发行目录内的离线运行说明。
+- `tools/build-release.sh`：唯一的跨平台发行包构建入口。
+- `tools/verify-release.sh`：架构、校验和、健康检查和静态资源验证。
+- `tests/release_scripts.test.mjs`：启动脚本和发行目录的行为测试。
 
 ### 后端
 
@@ -44,6 +52,7 @@
 - `backend/src/api/clusters.rs`：集群 CRUD 和连接测试。
 - `backend/src/api/lag_rules.rs`：默认阈值及覆盖规则 API。
 - `backend/src/api/sessions.rs`：会话和快照 API。
+- `backend/src/api/static_assets.rs`：生产静态资源、SPA fallback 和 API 404 边界。
 - `backend/migrations/0001_initial.sql`：clusters 与 lag_status_rules 表。
 - `backend/tests/`：API、会话和 Kafka 集成测试。
 
@@ -103,7 +112,7 @@ members = ["backend"]
 resolver = "2"
 ```
 
-在 `backend/Cargo.toml` 增加 `[lib] name = "kafka_dashboard"`，使集成测试能导入应用。使用 `cargo add` 添加 `axum`、`tokio --features full,test-util`、`serde --features derive`、`serde_json`、`tower-http --features cors,trace,request-id,limit`、`tracing`、`tracing-subscriber`、`uuid --features v4,serde`、`thiserror`；dev dependency 添加 `tower --features util` 和 `http-body-util`。配置 Vitest 的 `jsdom` 环境、Testing Library setup file 以及 `test` script。将 `target/`、`frontend/node_modules/`、`frontend/dist/`、`*.db` 加入 `.gitignore`；`.gitattributes` 写入 `*.sql text eol=lf`。
+在 `backend/Cargo.toml` 保持 package 名为 `backend`，增加 `[lib] name = "kafka_dashboard"` 供集成测试导入，并增加 `[[bin]] name = "kafka-dashboard"` 生成发行二进制。使用 `cargo add` 添加 `axum`、`tokio --features full,test-util`、`serde --features derive`、`serde_json`、`tower-http --features cors,trace,request-id,limit`、`tracing`、`tracing-subscriber`、`uuid --features v4,serde`、`thiserror`；dev dependency 添加 `tower --features util` 和 `http-body-util`。配置 Vitest 的 `jsdom` 环境、Testing Library setup file 以及 `test` script。将 `target/`、`frontend/node_modules/`、`frontend/dist/`、`*.db` 加入 `.gitignore`；`.gitattributes` 写入 `*.sql text eol=lf`。
 
 - [ ] **步骤 2：先写失败的 health API 测试**
 
@@ -457,7 +466,7 @@ git commit -m "feat: add cluster and lag rule APIs"
 先添加 Kafka 依赖：
 
 ```bash
-cargo add -p backend rdkafka --features cmake-build,ssl,sasl,tracing
+cargo add -p backend rdkafka --no-default-features --features cmake-build,ssl-vendored,tokio,tracing
 ```
 
 ```rust
@@ -471,6 +480,8 @@ fn maps_scram_ssl_without_leaking_secret() {
 ```
 
 分别覆盖 PLAINTEXT、SSL、SASL_PLAINTEXT、SASL_SSL、PLAIN、SCRAM-SHA-256 和 SCRAM-SHA-512；不支持的组合必须在创建 librdkafka client 前失败。
+
+`ssl-vendored` 为 TLS 与 SASL/SCRAM 静态编译 OpenSSL；不启用 `sasl`/`gssapi`，因为第一版不支持 Kerberos，SASL/PLAIN 与 SASL/SCRAM 由 librdkafka 配合 OpenSSL 提供。关闭默认 `libz` feature 可避免 Linux 发行包动态依赖系统 zlib；本项目只读取 metadata 与 offset，不消费压缩消息体。
 
 `fixture_cluster()` 在测试模块中返回完整配置，且生产 DTO 不派生 `Debug`：
 
@@ -983,6 +994,215 @@ git add backend/tests frontend/e2e frontend/playwright.config.ts scripts README.
 git commit -m "test: verify kafka dashboard end to end"
 ```
 
+## 任务 14：实现前后端一体化生产运行
+
+**文件：**
+- 创建：`backend/src/api/static_assets.rs`
+- 创建：`backend/tests/static_assets_api.rs`
+- 修改：`backend/src/api/mod.rs`
+- 修改：`backend/src/config.rs`
+- 修改：`backend/src/main.rs`
+- 修改：`backend/Cargo.toml`
+
+- [ ] **步骤 1：编写静态资源与 SPA fallback 失败测试**
+
+添加 `tempfile` dev dependency。测试目录写入 `index.html` 与 `assets/app.js`，再通过测试应用断言真实文件、前端路由回退和 API 404 严格分离：
+
+```rust
+#[tokio::test]
+async fn serves_assets_and_falls_back_to_index_without_hiding_api_404() {
+    let web = tempfile::tempdir().unwrap();
+    std::fs::create_dir(web.path().join("assets")).unwrap();
+    std::fs::write(web.path().join("index.html"), "<main>dashboard</main>").unwrap();
+    std::fs::write(web.path().join("assets/app.js"), "console.log('ok')").unwrap();
+    let app = app_for_test_with_web_root(web.path()).await;
+
+    assert_body(app.clone(), "/assets/app.js", "console.log('ok')").await;
+    assert_body(app.clone(), "/clusters/demo/topics", "<main>dashboard</main>").await;
+    assert_eq!(get(app, "/api/not-found").await.status(), StatusCode::NOT_FOUND);
+}
+```
+
+- [ ] **步骤 2：运行测试确认失败**
+
+运行：`cargo test -p backend --test static_assets_api`
+
+预期：FAIL，`app_for_test_with_web_root` 与静态资源路由尚不存在。
+
+- [ ] **步骤 3：实现生产静态资源服务**
+
+使用 `tower-http` 的 `ServeDir` 与 `ServeFile`。先挂载全部 `/api` 路由，再把静态服务作为 fallback；fallback 对缺失静态路径返回 `index.html`，但 `/api/*` 永远返回 JSON 404。`KAFKA_DASHBOARD_WEB_DIR` 显式设置时必须存在且含 `index.html`，否则启动失败；开发测试可不配置静态目录。
+
+`main.rs` 解析 `--version` 后直接输出 Cargo package version 并退出，使发行包可以无数据库、无密钥执行冒烟检查。
+
+- [ ] **步骤 4：运行后端回归测试**
+
+```bash
+cargo test -p backend --test static_assets_api
+cargo test --workspace
+cargo run -p backend --bin kafka-dashboard -- --version
+```
+
+预期：测试通过，版本命令输出非空版本号并以 0 退出。
+
+- [ ] **步骤 5：Commit**
+
+```bash
+git add backend/Cargo.toml backend/src/api backend/src/config.rs backend/src/main.rs backend/tests/static_assets_api.rs
+git commit -m "feat: serve dashboard assets from backend"
+```
+
+## 任务 15：生成并验证双平台单目录发行包
+
+**文件：**
+- 创建：`packaging/Dockerfile.linux-amd64`
+- 创建：`packaging/start.sh`
+- 创建：`packaging/.env.example`
+- 创建：`packaging/README.txt`
+- 创建：`tools/build-release.sh`
+- 创建：`tools/verify-release.sh`
+- 创建：`tests/release_scripts.test.mjs`
+- 修改：`.gitignore`
+- 修改：`README.md`
+
+- [ ] **步骤 1：编写启动脚本与目录契约失败测试**
+
+用 Node 内置测试运行临时发行目录，不引入额外测试依赖。每个用例在临时 `PATH` 前放置伪 `uname`，并放置记录 argv/env 的伪二进制：
+
+```js
+test('Darwin arm64 selects the mac binary and forwards arguments', async () => {
+  const fixture = await makeReleaseFixture({ os: 'Darwin', arch: 'arm64' });
+  const result = await fixture.run(['--bind', '127.0.0.1:9090']);
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /kafka-dashboard-darwin-arm64/);
+  assert.match(result.stdout, /127\.0\.0\.1:9090/);
+  assert.match(result.stdout, /KAFKA_DASHBOARD_WEB_DIR=.*\/web/);
+});
+```
+
+另测 Linux/x86_64 选择 Linux 二进制、缺少 `KAFKA_DASHBOARD_MASTER_KEY` 时拒绝启动、不支持的平台显示支持列表，以及 `data/` 自动创建。
+
+- [ ] **步骤 2：运行测试确认失败**
+
+运行：`node --test tests/release_scripts.test.mjs`
+
+预期：FAIL，`packaging/start.sh` 尚不存在。
+
+- [ ] **步骤 3：实现可移动的启动脚本和离线配置文件**
+
+`start.sh` 只使用 POSIX shell；通过脚本自身绝对目录定位 `bin/`、`web/` 和 `data/`，验证主密钥，设置默认 `DATABASE_URL=sqlite://<release>/data/kafka-dashboard.db?mode=rwc` 与 `KAFKA_DASHBOARD_WEB_DIR=<release>/web`，最后用 `exec` 启动对应二进制并原样传递 `"$@"`。`.env.example` 只包含占位值和注释，不由脚本自动加载。
+
+- [ ] **步骤 4：实现 Linux/amd64 静态构建 Dockerfile**
+
+固定 Rust 基础镜像大版本并明确 `--platform=linux/amd64`。安装 musl C 工具链、CMake、make、Perl 和 vendored OpenSSL 编译所需工具；使用 Cargo 锁文件执行：
+
+```dockerfile
+RUN cargo build --locked --release --target x86_64-unknown-linux-musl -p backend --bin kafka-dashboard
+FROM scratch AS artifact
+COPY --from=builder /src/target/x86_64-unknown-linux-musl/release/kafka-dashboard /kafka-dashboard-linux-amd64
+```
+
+最终 `artifact` stage 只导出一个二进制，不构建运行镜像。
+
+- [ ] **步骤 5：实现唯一打包入口**
+
+`tools/build-release.sh` 使用 `set -eu`，只允许在 Darwin/arm64 构建机运行，并按顺序执行：
+
+```bash
+npm --prefix frontend ci
+npm --prefix frontend run build
+cargo build --locked --release --target aarch64-apple-darwin -p backend --bin kafka-dashboard
+docker buildx build --platform linux/amd64 \
+  --file packaging/Dockerfile.linux-amd64 \
+  --output type=local,dest="$linux_output" .
+```
+
+脚本在 `mktemp -d` 中完成组装，复制两个二进制、`frontend/dist`、启动脚本、示例配置和离线说明，设置可执行位，使用 `shasum -a 256` 生成稳定排序的 `SHA256SUMS`，再原子替换 `dist/kafka-dashboard` 并创建 `dist/kafka-dashboard.tar.gz`。trap 只删除该次创建的明确临时目录。
+
+- [ ] **步骤 6：实现发行包验证脚本**
+
+`tools/verify-release.sh` 验证固定文件清单和 SHA-256；用 `file` 断言 Mach-O arm64 与 ELF x86-64；拒绝 `.env`、SQLite、源码和 `node_modules`；运行两个二进制的 `--version`（Linux 通过 `docker run --platform linux/amd64` 挂载执行）；分别启动 macOS 二进制和 Linux/amd64 容器，轮询 `/api/health`，验证 `/`、`/assets/*` 与 SPA fallback，然后发送 TERM 并确认进程退出。
+
+- [ ] **步骤 7：补充发行文档并运行验证**
+
+在 `README.md` 增加构建主机要求、单命令打包、目录结构、复制运行、支持平台和静态链接边界。执行：
+
+```bash
+node --test tests/release_scripts.test.mjs
+./tools/build-release.sh
+./tools/verify-release.sh dist/kafka-dashboard
+git diff --check
+```
+
+预期：所有命令退出码为 0，发行包在两个目标环境完成健康检查与静态页面验证。
+
+- [ ] **步骤 8：Commit**
+
+```bash
+git add packaging tools tests/release_scripts.test.mjs README.md .gitignore
+git commit -m "build: add dual-platform release package"
+```
+
+## 任务 16：完成代理文档、全量验证与 GitHub 交付
+
+**文件：**
+- 创建：`AGENTS.md`
+- 修改：`README.md`
+- 修改：`.gitignore`
+
+- [ ] **步骤 1：编写根目录 AGENTS.md**
+
+写明目录职责、API 与静态资源边界、Kafka 会话生命周期、数据库与密钥规则、前后端常用命令、测试分层、TDD 与提交纪律、禁止提交 `dist/`/数据库/秘密，以及以下 Context7 规则：遇到库、框架、SDK、API、CLI 或云服务问题时，先 `resolve-library-id`，再按单一概念调用 `query-docs`，优先使用官方高信誉文档。
+
+- [ ] **步骤 2：完成 README 交付检查**
+
+逐项确认 README 包含：功能与限制、截图位置、快速启动、环境变量、四类 Kafka 连接、Offset/Lag 字段解释、默认与自定义状态区间、持续超限、仅页面打开时连接、开发命令、测试、打包、目标平台、安全部署和故障排查。所有命令必须能从仓库根目录复制执行，不出现真实凭据。
+
+- [ ] **步骤 3：运行全量验证与秘密扫描**
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+npm --prefix frontend run test -- --run
+npm --prefix frontend run build
+npm --prefix frontend run test:e2e
+node --test tests/release_scripts.test.mjs
+./tools/build-release.sh
+./tools/verify-release.sh dist/kafka-dashboard
+git diff --check
+git grep -nE '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|password[[:space:]]*=[[:space:]]*[^<])' -- ':!docs/superpowers/plans/*'
+```
+
+预期：全部验证成功；秘密扫描无结果；`git status --short` 只显示本任务预期的 README、AGENTS 和 ignore 变更，`dist/` 不被跟踪。
+
+- [ ] **步骤 4：提交最终文档**
+
+```bash
+git add README.md AGENTS.md .gitignore
+git commit -m "docs: add project and agent guides"
+```
+
+- [ ] **步骤 5：配置并核对 GitHub 远端**
+
+运行 `git remote -v`。没有 `origin` 时执行：
+
+```bash
+git remote add origin https://github.com/zhangblue/kafka_dashbod.git
+git ls-remote --heads origin
+```
+
+预期：远端没有分支；若远端已有未知提交，停止并报告，不强推、不覆盖。若 `origin` 已存在，必须精确等于上述 URL，否则停止并报告。
+
+- [ ] **步骤 6：推送 main 并核验**
+
+```bash
+git push -u origin main
+git ls-remote --heads origin main
+```
+
+预期：远端 `refs/heads/main` 的 SHA 与本地 `git rev-parse HEAD` 完全一致，工作区干净。推送后报告仓库 URL、最终 commit、测试结果和发行包本地路径。
+
 ## 最终规格覆盖检查
 
 - 多集群与 SASL/TLS：任务 3–5、8。
@@ -992,4 +1212,7 @@ git commit -m "test: verify kafka dashboard end to end"
 - 3/5/10 秒刷新和最近一小时内存历史：任务 9、12。
 - 默认区间、自定义 group/topic 区间、持续超限与标记：任务 3、4、8、11。
 - Flink checkpoint 型锯齿 Lag：任务 11 的可见采样持续时间状态机。
-- 安全、错误、测试和部署：任务 3–5、12、13。
+- 安全、错误和核心测试：任务 3–5、12、13、16。
+- 前后端单进程生产运行与 SPA fallback：任务 14。
+- macOS ARM64 + Linux x86_64 单目录发行包：任务 15。
+- README、AGENTS、秘密扫描与 GitHub main 交付：任务 13、15、16。
