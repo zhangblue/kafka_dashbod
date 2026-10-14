@@ -1,5 +1,26 @@
 mod support;
 
+// A missing explicit body limit permits oversized configuration payloads.
+#[tokio::test]
+async fn oversized_configuration_returns_413_without_echoing_secrets() {
+    let ctx = support::test_app().await;
+    let response = support::request(
+        &ctx.app,
+        "POST",
+        "/api/clusters",
+        Some(serde_json::json!({
+            "name": "x".repeat(300_000), "password": "limit-fixture-secret"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), 413);
+    let text = support::response_text(response).await;
+    assert!(!text.contains("limit-fixture-secret"));
+    let error: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(error["code"], "PAYLOAD_TOO_LARGE");
+    assert!(error["requestId"].is_string());
+}
+
 use axum::{body::Body, http::Request};
 use serde_json::json;
 use support::*;

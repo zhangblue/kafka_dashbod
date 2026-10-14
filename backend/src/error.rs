@@ -62,7 +62,14 @@ impl ApiError {
         )
     }
 
-    pub fn from_json(_: JsonRejection) -> Self {
+    pub fn from_json(rejection: JsonRejection) -> Self {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            return Self::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "PAYLOAD_TOO_LARGE",
+                "Request body exceeds the 256 KiB limit",
+            );
+        }
         // Rejection messages can include user-provided values, including secrets.
         Self::validation(BTreeMap::from([(
             "body".into(),

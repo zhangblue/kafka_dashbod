@@ -12,7 +12,9 @@ use crate::{
     },
 };
 use axum::{
-    Extension, Router, middleware,
+    Extension, Router,
+    extract::DefaultBodyLimit,
+    middleware,
     routing::{delete, get, post},
 };
 
@@ -77,5 +79,6 @@ fn routes<F: SessionClientFactory>() -> Router {
         .route("/api/sessions/{id}/snapshot", get(sessions::snapshot::<F>))
         .fallback(error::not_found)
         .method_not_allowed_fallback(error::method_not_allowed)
+        .layer(DefaultBodyLimit::max(256 * 1024))
         .layer(middleware::from_fn(error::request_id))
 }

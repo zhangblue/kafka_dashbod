@@ -11,7 +11,8 @@ async fn main() -> std::io::Result<()> {
     let state_cleanup = sessions.clone();
     let app = kafka_dashboard::api::router_with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    let address = std::env::var("KAFKA_DASHBOARD_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into());
+    let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!(address = %listener.local_addr()?, "Kafka Lens listening");
 
     let result = axum::serve(listener, app)

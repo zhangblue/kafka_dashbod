@@ -4,4 +4,10 @@ target/
 frontend/node_modules/
 frontend/dist/
 *.db
+*.db-shm
+*.db-wal
+frontend/test-results/
+frontend/playwright-report/
+.env
+.env.*
 
