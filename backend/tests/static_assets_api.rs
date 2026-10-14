@@ -26,7 +26,7 @@ async fn app(web: &Path) -> Router {
         .await
         .unwrap();
     let state = AppState::new(pool, SecretCipher::from_base64_key(KEY).unwrap());
-    kafka_dashboard::api::router_with_state_and_web_root(state, Some(web.to_owned()))
+    kafka_dashboard::api::router_with_state_and_web_root(state, Some(web.to_owned())).unwrap()
 }
 
 async fn request(app: &Router, method: &str, path: &str) -> Response {
@@ -35,6 +35,7 @@ async fn request(app: &Router, method: &str, path: &str) -> Response {
             Request::builder()
                 .method(method)
                 .uri(path)
+                .header("accept", "text/html")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -163,12 +164,56 @@ async fn rejects_symlinks_outside_root_and_to_hidden_files() {
     std::fs::write(outside.path().join("secret"), "fixture-outside-secret").unwrap();
     std::os::unix::fs::symlink(outside.path(), web.path().join("escape")).unwrap();
     std::os::unix::fs::symlink(web.path().join(".env"), web.path().join("public.txt")).unwrap();
+    std::os::unix::fs::symlink(
+        web.path().join("assets/app.js"),
+        web.path().join("alias.js"),
+    )
+    .unwrap();
     let app = app(web.path()).await;
-    for path in ["/escape/secret", "/public.txt"] {
+    for path in ["/escape/secret", "/public.txt", "/alias.js"] {
         assert_eq!(
             request(&app, "GET", path).await.status(),
             StatusCode::NOT_FOUND
         );
+    }
+}
+
+// The secure opener must retain partial responses and browser cache validation.
+#[tokio::test]
+async fn range_and_conditional_get_keep_file_response_semantics() {
+    let web = web_root();
+    let app = app(web.path()).await;
+    let original = request(&app, "GET", "/assets/app.js").await;
+    let etag = original.headers()["etag"].clone();
+    let modified = original.headers()["last-modified"].clone();
+    for (name, value, status) in [
+        (
+            "range",
+            "bytes=0-6".parse().unwrap(),
+            StatusCode::PARTIAL_CONTENT,
+        ),
+        ("if-none-match", etag, StatusCode::NOT_MODIFIED),
+        ("if-modified-since", modified, StatusCode::NOT_MODIFIED),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .header(name, value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["cache-control"], "no-cache");
+        if status == StatusCode::PARTIAL_CONTENT {
+            assert_eq!(response.headers()["content-range"], "bytes 0-6/17");
+            assert_eq!(text(response).await, "console");
+        } else {
+            assert!(text(response).await.is_empty());
+        }
     }
 }
 

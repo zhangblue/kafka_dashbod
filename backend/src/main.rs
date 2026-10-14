@@ -17,7 +17,7 @@ async fn main() -> std::io::Result<()> {
     let state = kafka_dashboard::api::AppState::new(pool, config.cipher);
     let sessions = state.sessions.clone();
     let state_cleanup = sessions.clone();
-    let app = kafka_dashboard::api::router_with_state_and_web_root(state, config.web_dir);
+    let app = kafka_dashboard::api::router_with_state_and_web_root(state, config.web_dir)?;
 
     let address = std::env::var("KAFKA_DASHBOARD_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into());
     let listener = tokio::net::TcpListener::bind(address).await?;

@@ -150,6 +150,7 @@ dependencies = [
  "percent-encoding",
  "rand",
  "rdkafka",
+ "rustix",
  "serde",
  "serde_json",
  "sqlx",

@@ -52,14 +52,24 @@ impl<F: SessionClientFactory> AppState<F> {
 }
 
 pub fn router_with_state<F: SessionClientFactory>(state: AppState<F>) -> Router {
-    router_with_state_and_web_root(state, None)
+    state_router(state, None)
 }
 
 pub fn router_with_state_and_web_root<F: SessionClientFactory>(
     state: AppState<F>,
     web_root: Option<PathBuf>,
+) -> std::io::Result<Router> {
+    let root = web_root
+        .map(|path| static_assets::StaticRoot::new(&path))
+        .transpose()?;
+    Ok(state_router(state, root))
+}
+
+fn state_router<F: SessionClientFactory>(
+    state: AppState<F>,
+    root: Option<static_assets::StaticRoot>,
 ) -> Router {
-    routes::<F>(web_root)
+    routes::<F>(root)
         .layer(Extension(state.clusters))
         .layer(Extension(state.lag_rules))
         .layer(Extension(state.sessions))
@@ -69,7 +79,7 @@ pub fn router() -> Router {
     routes::<KafkaSessionClientFactory>(None)
 }
 
-fn routes<F: SessionClientFactory>(web_root: Option<PathBuf>) -> Router {
+fn routes<F: SessionClientFactory>(web_root: Option<static_assets::StaticRoot>) -> Router {
     let router = Router::new()
         .route("/api/health", get(health::health))
         .route("/api/clusters", get(clusters::list).post(clusters::create))
