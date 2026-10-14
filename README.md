@@ -84,4 +84,35 @@ docker compose -f docker-compose.test.yml -p kafka-lens-manual down --volumes --
 
 ## 部署边界
 
-当前服务没有内置用户登录或权限系统。生产环境应置于受保护的内网或带身份验证的反向代理之后；使用 HTTPS，对 `/api` 配置代理和访问控制，静态资源从 `frontend/dist` 提供，并将前端路由回退至 `index.html`。Vite preview 仅用于本地验收。后端默认只绑定回环地址；代理请求体限制应与 256 KiB 上限一致，超时需容纳 Kafka 采集。限制数据库及密钥的文件权限，Kafka 使用最小只读权限账户，优先选择 SASL_SSL / SSL。发布打包及更详细的部署流程另行维护。
+当前服务没有内置用户登录或权限系统。生产环境应置于受保护的内网或带身份验证的反向代理之后；使用 HTTPS，对 `/api` 配置代理和访问控制。发行包由后端直接提供静态资源和 SPA fallback。Vite preview 仅用于本地验收。后端默认只绑定回环地址；代理请求体限制应与 256 KiB 上限一致，超时需容纳 Kafka 采集。限制数据库及密钥的文件权限，Kafka 使用最小只读权限账户，优先选择 SASL_SSL / SSL。
+
+## 双平台离线发行包
+
+构建主机限定为 Apple Silicon macOS（Darwin/arm64），需要前述 Rust / C / Node 构建工具，以及能运行 `linux/amd64` 的 Docker Engine / Buildx。Rust 需安装 `aarch64-apple-darwin` target；Docker 构建阶段负责 Linux musl 工具链。首次构建需要网络下载 npm、Cargo 和容器镜像依赖。
+
+唯一打包入口：
+
+```bash
+./tools/build-release.sh
+./tools/verify-release.sh dist/kafka-dashboard
+```
+
+构建按锁文件安装依赖，先完成前端、macOS 和 Linux 编译，在临时目录组装、校验和压缩后通过同文件系统重命名发布；失败会恢复已有发行包。不要并发运行打包命令，也不要直接覆盖正在使用的发行目录。`dist/` 不进入 Git。产物为 `dist/kafka-dashboard.tar.gz` 及以下目录：
+
+```text
+kafka-dashboard/
+├── bin/
+│   ├── kafka-dashboard-darwin-arm64
+│   └── kafka-dashboard-linux-amd64
+├── web/                 # 已构建的前端页面和 assets
+├── start.sh
+├── .env.example         # 占位示例，不自动加载
+├── README.txt           # 离线运行说明
+└── SHA256SUMS
+```
+
+复制整个目录或解压归档到目标机器的可写位置，核验 `shasum -a 256 -c SHA256SUMS`（Linux 也可用 `sha256sum -c SHA256SUMS`），在 shell 或服务管理器中安全设置此前说明的 `KAFKA_DASHBOARD_MASTER_KEY`，运行 `./start.sh`。支持 **macOS arm64 和 Linux x86_64**；启动器自动选择二进制，默认访问地址为 `http://127.0.0.1:3000`，用 `KAFKA_DASHBOARD_BIND` 修改。启动器按自身位置定位 `web/`，创建私有权限的 `data/` 并使用 `data/kafka-dashboard.db`，可整体搬移；`DATABASE_URL` 和 `KAFKA_DASHBOARD_WEB_DIR` 可覆盖默认路径。参数原样透传，实际服务配置通过环境变量提供。
+
+运行机器不需要 Node.js、Rust、系统 librdkafka 或系统 OpenSSL。Linux 二进制使用 musl，静态链接 librdkafka、SQLite 和 vendored OpenSSL；macOS 保留操作系统原生库依赖（如 libSystem），并非完全静态。Linux 包不携带宿主机 CA 信任库，私有 TLS 请在集群设置显式配置 CA PEM。网络/DNS、可写存储和操作系统执行许可仍需可用。
+
+验证命令需在构建主机执行，使用 `curl`、`file`、`shasum`、`sqlite3`、`otool`、`openssl` 和 Docker。它校验完整文件清单、哈希、架构和静态链接边界，在临时副本运行 macOS 程序与 Linux/amd64 最小容器，验证版本、SQLite 迁移、健康接口、页面/资源、SPA fallback 和 SIGTERM 退出；验证后清理临时进程和容器，不向发行目录写入数据库。

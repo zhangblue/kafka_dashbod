@@ -1,0 +1,11 @@
+**
+!Cargo.toml
+!Cargo.lock
+!backend/
+!backend/**
+**/.env
+**/.env.*
+**/*.db
+**/*.db-*
+**/target
+**/node_modules

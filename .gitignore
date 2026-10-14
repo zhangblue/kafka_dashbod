@@ -10,4 +10,6 @@ frontend/test-results/
 frontend/playwright-report/
 .env
 .env.*
+!packaging/.env.example
+/dist/
 
