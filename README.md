@@ -64,12 +64,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 npm --prefix frontend run test -- --run
 npm --prefix frontend run build
+node --test scripts/e2e-preview.test.mjs
 npm --prefix frontend exec -- playwright install chromium
 npm --prefix frontend run test:e2e
 git diff --check
 ```
 
-E2E 一键脚本使用独立 Compose project 和动态本地端口，启动 Apache Kafka 3.9.1 KRaft；Rust fixture 只向本次临时容器创建 `dashboard-e2e-orders` 的两个分区、在分区 0 写入 10 条消息，并为 `dashboard-e2e-reader` 提交位置 4 / 0，预期 Lag 为 6 / 0。脚本自动使用临时 SQLite、随机主密钥、后端和前端进程。正常结束、失败或收到 INT / TERM 均清理进程、容器、卷和临时文件。不要手动把 fixture 指向已有 Kafka；普通 `cargo test` 默认跳过需要 broker 的测试。
+E2E 一键脚本使用独立 Compose project 和动态本地端口，启动 Apache Kafka 3.9.1 KRaft；Rust fixture 只向本次临时容器创建 `dashboard-e2e-orders` 的两个分区、在分区 0 写入 10 条消息，并为 `dashboard-e2e-reader` 提交位置 4 / 0，预期 Lag 为 6 / 0。脚本自动使用临时 SQLite、随机主密钥、后端和前端进程。Vite 直接绑定端口 0，脚本从子进程实际监听地址获取端口，并核验 PID 存活及本次运行标识，防止误用其他健康服务。正常结束、失败或收到 INT / TERM 均清理进程、容器、卷和临时文件。不要手动把 fixture 指向已有 Kafka；普通 `cargo test` 默认跳过需要 broker 的测试。
 
 浏览器验收覆盖集群 CRUD、测试连接、真实水位/Lag、规则保存与自定义标记、刷新频率、切换和离开时释放会话；另验证 API / 运行日志不泄漏测试秘密、超大请求、历史淘汰和隐藏时无轮询。历史测试只加速响应中的采集时间，指标仍来自 Kafka；headless 环境通过浏览器 visibility 事件模拟隐藏。Rust 测试额外覆盖采集互斥、删除释放和 SIGTERM。Playwright 默认关闭 trace / screenshot，避免持久化请求中的敏感字段。
 

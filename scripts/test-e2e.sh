@@ -68,6 +68,7 @@ free_port() {
 export KAFKA_TEST_PORT="$(free_port)"
 export E2E_KAFKA_BROKERS="127.0.0.1:$KAFKA_TEST_PORT"
 export E2E_KAFKA_WRITE_PERMIT=disposable-compose
+export E2E_RUN_ID="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
 export E2E_FIXTURE_SECRET="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
 export KAFKA_DASHBOARD_MASTER_KEY="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))')"
 export DATABASE_URL="sqlite://$run_dir/dashboard.db"
@@ -84,24 +85,29 @@ cargo build -p backend --bin kafka-dashboard
 backend_pid=$!
 ready=false
 for ((attempt=0; attempt<200; attempt++)); do
-  address="$(sed -nE 's/.*address=([^ ]+).*/\1/p' "$run_dir/backend.log" | head -1)"
-  if [[ -n "$address" ]] && curl --silent --fail "http://$address/api/health" >/dev/null; then ready=true; break; fi
   kill -0 "$backend_pid" 2>/dev/null || { printf '%s\n' 'Backend failed to start (logs suppressed)'; exit 1; }
+  address="$(sed -nE 's/.*address=([^ ]+).*/\1/p' "$run_dir/backend.log" | head -1)"
+  if [[ -n "$address" ]] && curl --silent --fail "http://$address/api/health" >/dev/null; then
+    kill -0 "$backend_pid" 2>/dev/null || { printf '%s\n' 'Backend exited during readiness'; exit 1; }
+    ready=true; break
+  fi
   sleep 0.1
 done
 [[ "$ready" == true ]] || { printf '%s\n' 'Backend readiness timed out'; exit 1; }
 export KAFKA_DASHBOARD_API_TARGET="http://$address"
-export E2E_BASE_URL="http://127.0.0.1:$(free_port)"
 npm --prefix frontend run build
-node frontend/node_modules/vite/bin/vite.js preview frontend --host 127.0.0.1 --port "${E2E_BASE_URL##*:}" --strictPort >"$run_dir/frontend.log" 2>&1 &
+node scripts/e2e-preview.mjs start "$run_dir/preview.json" >"$run_dir/frontend.log" 2>&1 &
 frontend_pid=$!
 ready=false
 for ((attempt=0; attempt<200; attempt++)); do
-  if curl --silent --fail "$E2E_BASE_URL/api/health" >/dev/null; then ready=true; break; fi
   kill -0 "$frontend_pid" 2>/dev/null || { printf '%s\n' 'Frontend failed to start (logs suppressed)'; exit 1; }
+  if [[ -f "$run_dir/preview.json" ]]; then ready=true; break; fi
   sleep 0.1
 done
 [[ "$ready" == true ]] || { printf '%s\n' 'Frontend readiness timed out'; exit 1; }
+E2E_BASE_URL="$(node scripts/e2e-preview.mjs verify "$run_dir/preview.json" "$frontend_pid")"
+export E2E_BASE_URL
+kill -0 "$backend_pid" 2>/dev/null || { printf '%s\n' 'Backend exited before browser tests'; exit 1; }
 (cd frontend && node node_modules/@playwright/test/cli.js test "$@")
 # Assert SIGTERM returns a successful process status before general trap cleanup.
 stop_process "$backend_pid"

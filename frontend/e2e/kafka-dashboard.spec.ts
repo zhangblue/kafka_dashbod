@@ -61,6 +61,7 @@ test('cluster CRUD, connection, partitions, lag rules and session lifecycle', as
   await page.getByRole('link', { name: 'Consumer Groups', exact: true }).click()
   await page.getByRole('button', { name: `展开 ${group} / ${topic}`, exact: true }).click()
   await expect(page.getByRole('table', { name: `${group} / ${topic} Partitions`, exact: true }).locator('tbody tr').first().getByRole('cell')).toHaveText(['0', '10', '4', '6'])
+  await expect(page.getByRole('table', { name: `${group} / ${topic} Partitions`, exact: true }).locator('tbody tr').nth(1).getByRole('cell')).toHaveText(['1', '0', '0', '0'])
   await expect(page.getByRole('button', { name: `自定义规则 ${group} / ${topic}` })).toBeVisible()
   let sessionId = ''
   for (const seconds of ['3', '5', '10']) {

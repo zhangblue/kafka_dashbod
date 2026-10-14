@@ -77,6 +77,10 @@ pub async fn seed() {
         Offset::Offset(4)
     );
     assert_eq!(
+        committed.find_partition(topic, 1).unwrap().offset(),
+        Offset::Offset(0)
+    );
+    assert_eq!(
         consumer
             .fetch_watermarks(topic, 0, Duration::from_secs(10))
             .unwrap(),
