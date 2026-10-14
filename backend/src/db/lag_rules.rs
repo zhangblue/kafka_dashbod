@@ -29,7 +29,7 @@ impl LagRuleRepository {
                 || rule.topic.trim().is_empty()
                 || rule.normal_lag_max < 0
                 || rule.high_lag_min <= rule.normal_lag_max
-                || rule.over_limit_seconds <= 0
+                || rule.over_limit_seconds < 0
                 || !unique.insert((&rule.group_id, &rule.topic))
             {
                 return Err(RepositoryError::InvalidInput);

@@ -129,14 +129,15 @@ async fn cluster_updates_delete_and_duplicate_names_preserve_repository_contract
     assert_eq!(updated.name, "replacement");
     assert_eq!(updated.default_normal_lag_max, 20);
     assert_eq!(updated.created_at, created.created_at);
-    assert!(
+    assert_eq!(
         clusters
             .decrypted_config(&created.id)
             .await
             .unwrap()
             .unwrap()
             .password
-            .is_none()
+            .as_deref(),
+        Some("fixture-password")
     );
     assert!(
         clusters
@@ -155,6 +156,135 @@ async fn cluster_updates_delete_and_duplicate_names_preserve_repository_contract
             .unwrap()
             .is_none()
     );
+}
+
+// Omitted/blank edits must retain every credential; nonempty edits replace only their field.
+#[tokio::test]
+async fn cluster_update_preserves_omitted_and_empty_secrets_and_merges_partial_edits() {
+    let (_, clusters, _) = repositories().await;
+    let created = clusters
+        .create(&cluster_input("fixture-cluster"))
+        .await
+        .unwrap();
+    let mut edit = ClusterInput::plaintext("fixture-cluster", "broker:9092");
+    clusters.update(&created.id, &edit).await.unwrap().unwrap();
+    let omitted = clusters
+        .decrypted_config(&created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(omitted.password.as_deref(), Some("fixture-password"));
+    assert_eq!(omitted.ca_pem.as_deref(), Some("fixture-ca"));
+    assert_eq!(
+        omitted.client_certificate_pem.as_deref(),
+        Some("fixture-certificate")
+    );
+    assert_eq!(omitted.client_key_pem.as_deref(), Some("fixture-key"));
+
+    edit.password = Some(String::new());
+    edit.ca_pem = Some(String::new());
+    edit.client_certificate_pem = Some(String::new());
+    edit.client_key_pem = Some(String::new());
+    clusters.update(&created.id, &edit).await.unwrap().unwrap();
+    let empty = clusters
+        .decrypted_config(&created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(empty.password.as_deref(), Some("fixture-password"));
+    assert_eq!(empty.ca_pem.as_deref(), Some("fixture-ca"));
+    assert_eq!(
+        empty.client_certificate_pem.as_deref(),
+        Some("fixture-certificate")
+    );
+    assert_eq!(empty.client_key_pem.as_deref(), Some("fixture-key"));
+
+    edit.password = Some("fixture-new-password".into());
+    edit.client_certificate_pem = Some("fixture-new-certificate".into());
+    clusters.update(&created.id, &edit).await.unwrap().unwrap();
+    let partial = clusters
+        .decrypted_config(&created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(partial.password.as_deref(), Some("fixture-new-password"));
+    assert_eq!(partial.ca_pem.as_deref(), Some("fixture-ca"));
+    assert_eq!(
+        partial.client_certificate_pem.as_deref(),
+        Some("fixture-new-certificate")
+    );
+    assert_eq!(partial.client_key_pem.as_deref(), Some("fixture-key"));
+
+    edit.password = None;
+    edit.client_certificate_pem = None;
+    edit.ca_pem = Some("fixture-new-ca".into());
+    edit.client_key_pem = Some("fixture-new-key".into());
+    clusters.update(&created.id, &edit).await.unwrap().unwrap();
+    let final_config = clusters
+        .decrypted_config(&created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        final_config.password.as_deref(),
+        Some("fixture-new-password")
+    );
+    assert_eq!(final_config.ca_pem.as_deref(), Some("fixture-new-ca"));
+    assert_eq!(
+        final_config.client_certificate_pem.as_deref(),
+        Some("fixture-new-certificate")
+    );
+    assert_eq!(
+        final_config.client_key_pem.as_deref(),
+        Some("fixture-new-key")
+    );
+}
+
+// A zero duration means immediate eligibility; only negative durations are invalid.
+#[tokio::test]
+async fn cluster_duration_accepts_zero_and_rejects_negative_values() {
+    let (_, clusters, _) = repositories().await;
+    let mut input = ClusterInput::plaintext("fixture-zero-duration", "broker:9092");
+    input.default_over_limit_seconds = 0;
+    let created = clusters.create(&input).await.unwrap();
+    assert_eq!(created.default_over_limit_seconds, 0);
+    input.default_over_limit_seconds = -1;
+    assert!(clusters.update(&created.id, &input).await.is_err());
+    assert_eq!(
+        clusters
+            .get(&created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .default_over_limit_seconds,
+        0
+    );
+    input.name = "fixture-negative-duration".into();
+    assert!(clusters.create(&input).await.is_err());
+}
+
+#[tokio::test]
+async fn lag_rule_duration_accepts_zero_and_rejects_negative_values() {
+    let (pool, clusters, rules) = repositories().await;
+    let cluster = clusters
+        .create(&ClusterInput::plaintext("fixture-duration", "broker:9092"))
+        .await
+        .unwrap();
+    let mut override_rule = rule("billing", "orders");
+    override_rule.over_limit_seconds = 0;
+    let saved = rules
+        .replace(&cluster.id, &[override_rule.clone()])
+        .await
+        .unwrap();
+    assert_eq!(saved[0].over_limit_seconds, 0);
+    assert_eq!(
+        rules.list(&cluster.id).await.unwrap()[0].over_limit_seconds,
+        0
+    );
+    override_rule.over_limit_seconds = -1;
+    assert!(rules.replace(&cluster.id, &[override_rule]).await.is_err());
+    assert_eq!(rules.list(&cluster.id).await.unwrap(), saved);
+    assert!(sqlx::query("INSERT INTO lag_rules (id, cluster_id, group_id, topic, normal_lag_max, high_lag_min, over_limit_seconds) VALUES ('fixture-negative-duration', ?, 'shipping', 'orders', 10, 100, -1)").bind(&cluster.id).execute(&pool).await.is_err());
 }
 
 // Valid rules must survive both validation failures and a SQL error mid-replacement.

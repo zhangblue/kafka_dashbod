@@ -9,7 +9,7 @@ CREATE TABLE clusters (
   connection_timeout_ms INTEGER NOT NULL DEFAULT 10000 CHECK (connection_timeout_ms > 0),
   default_normal_lag_max INTEGER NOT NULL DEFAULT 999 CHECK (default_normal_lag_max >= 0),
   default_high_lag_min INTEGER NOT NULL DEFAULT 5000 CHECK (default_high_lag_min > default_normal_lag_max),
-  default_over_limit_seconds INTEGER NOT NULL DEFAULT 30 CHECK (default_over_limit_seconds > 0),
+  default_over_limit_seconds INTEGER NOT NULL DEFAULT 30 CHECK (default_over_limit_seconds >= 0),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -21,7 +21,7 @@ CREATE TABLE lag_rules (
   topic TEXT NOT NULL,
   normal_lag_max INTEGER NOT NULL CHECK (normal_lag_max >= 0),
   high_lag_min INTEGER NOT NULL CHECK (high_lag_min > normal_lag_max),
-  over_limit_seconds INTEGER NOT NULL CHECK (over_limit_seconds > 0)
+  over_limit_seconds INTEGER NOT NULL CHECK (over_limit_seconds >= 0)
 );
 
 CREATE UNIQUE INDEX lag_rules_cluster_group_topic ON lag_rules(cluster_id, group_id, topic);

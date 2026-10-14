@@ -22,6 +22,25 @@ struct ClusterSecrets {
     client_key_pem: Option<String>,
 }
 
+impl From<&ClusterInput> for ClusterSecrets {
+    fn from(input: &ClusterInput) -> Self {
+        Self {
+            password: input.password.clone(),
+            ca_pem: input.ca_pem.clone(),
+            client_certificate_pem: input.client_certificate_pem.clone(),
+            client_key_pem: input.client_key_pem.clone(),
+        }
+    }
+}
+
+fn merge_secret(previous: Option<String>, replacement: &Option<String>) -> Option<String> {
+    replacement
+        .as_ref()
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or(previous)
+}
+
 #[derive(sqlx::FromRow)]
 struct ClusterRow {
     id: String,
@@ -76,19 +95,24 @@ impl ClusterRepository {
         Self { pool, cipher }
     }
 
-    fn encrypt_secrets(&self, input: &ClusterInput) -> Result<Vec<u8>, RepositoryError> {
-        let secrets = ClusterSecrets {
-            password: input.password.clone(),
-            ca_pem: input.ca_pem.clone(),
-            client_certificate_pem: input.client_certificate_pem.clone(),
-            client_key_pem: input.client_key_pem.clone(),
-        };
-        let plaintext = serde_json::to_vec(&secrets).map_err(|_| RepositoryError::InvalidInput)?;
+    fn encrypt_secrets(&self, secrets: &ClusterSecrets) -> Result<Vec<u8>, RepositoryError> {
+        let plaintext = serde_json::to_vec(secrets).map_err(|_| RepositoryError::InvalidInput)?;
         Ok(self.cipher.encrypt(&plaintext)?)
     }
 
+    fn decrypt_secrets(
+        &self,
+        encrypted: Option<Vec<u8>>,
+    ) -> Result<ClusterSecrets, RepositoryError> {
+        match encrypted {
+            Some(bytes) => serde_json::from_slice(&self.cipher.decrypt(&bytes)?)
+                .map_err(|_| RepositoryError::InvalidStoredConfig),
+            None => Ok(ClusterSecrets::default()),
+        }
+    }
+
     pub async fn create(&self, input: &ClusterInput) -> Result<ClusterDto, RepositoryError> {
-        let encrypted = self.encrypt_secrets(input)?;
+        let encrypted = self.encrypt_secrets(&ClusterSecrets::from(input))?;
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let sql = public_columns!(
@@ -129,13 +153,32 @@ impl ClusterRepository {
         rows.into_iter().map(ClusterRow::into_dto).collect()
     }
 
-    /// Replaces all settings, including credentials. Omitted secrets clear old values.
+    /// Updates settings; omitted or empty sensitive fields retain their previous values.
     pub async fn update(
         &self,
         id: &str,
         input: &ClusterInput,
     ) -> Result<Option<ClusterDto>, RepositoryError> {
-        let encrypted = self.encrypt_secrets(input)?;
+        let mut tx = self.pool.begin().await?;
+        let previous: Option<Option<Vec<u8>>> =
+            sqlx::query_scalar("SELECT encrypted_secrets FROM clusters WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
+        let previous = self.decrypt_secrets(previous)?;
+        let merged = ClusterSecrets {
+            password: merge_secret(previous.password, &input.password),
+            ca_pem: merge_secret(previous.ca_pem, &input.ca_pem),
+            client_certificate_pem: merge_secret(
+                previous.client_certificate_pem,
+                &input.client_certificate_pem,
+            ),
+            client_key_pem: merge_secret(previous.client_key_pem, &input.client_key_pem),
+        };
+        let encrypted = self.encrypt_secrets(&merged)?;
         let sql = public_columns!(
             "UPDATE clusters SET name = ?, bootstrap_servers = ?, security_protocol = ?, sasl_mechanism = ?, username = ?, encrypted_secrets = ?, connection_timeout_ms = ?, default_normal_lag_max = ?, default_high_lag_min = ?, default_over_limit_seconds = ?, updated_at = ? WHERE id = ? RETURNING ",
             ""
@@ -153,9 +196,11 @@ impl ClusterRepository {
             .bind(input.default_over_limit_seconds)
             .bind(Utc::now().to_rfc3339())
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?;
-        row.map(ClusterRow::into_dto).transpose()
+        let result = row.map(ClusterRow::into_dto).transpose()?;
+        tx.commit().await?;
+        Ok(result)
     }
 
     pub async fn delete(&self, id: &str) -> Result<bool, RepositoryError> {
@@ -181,11 +226,7 @@ impl ClusterRepository {
         use sqlx::{FromRow, Row};
         let public = ClusterRow::from_row(&row)?.into_dto()?;
         let encrypted: Option<Vec<u8>> = row.try_get("encrypted_secrets")?;
-        let secrets: ClusterSecrets = match encrypted {
-            Some(bytes) => serde_json::from_slice(&self.cipher.decrypt(&bytes)?)
-                .map_err(|_| RepositoryError::InvalidStoredConfig)?,
-            None => ClusterSecrets::default(),
-        };
+        let secrets = self.decrypt_secrets(encrypted)?;
         let timeout = u64::try_from(public.connection_timeout_ms)
             .map_err(|_| RepositoryError::InvalidStoredConfig)?;
         Ok(Some(DecryptedClusterConfig {
