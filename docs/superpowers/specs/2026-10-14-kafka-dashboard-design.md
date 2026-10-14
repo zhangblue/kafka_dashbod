@@ -16,6 +16,8 @@
 - Topic 汇总及逐 Partition low/high watermark。
 - 所有消费组，包括当前没有活跃成员但仍保留已提交 Offset 的消费组。
 - Consumer Group 在 Topic/Partition 维度的 committed offset 和 Lag。
+- 可配置的 Lag 状态默认区间，以及按 Consumer Group + Topic 精确匹配的自定义区间。
+- 可配置的持续超限时间，用于过滤 Flink checkpoint 等场景造成的短时 Lag 波动。
 - 可选择的 3 秒、5 秒、10 秒刷新频率。
 - 浏览器内最近一小时 Lag 折线图。
 - 短租约监控会话，仅在仪表盘使用期间维持 Kafka 连接。
@@ -75,11 +77,27 @@
 - `encrypted_password`
 - CA、客户端证书及其加密口令配置
 - 连接超时
+- 默认正常 Lag 上限，初始值为 `999`
+- 默认高 Lag 起始值，初始值为 `5000`
+- 默认持续超限时间，初始值为 `30` 秒
 - 创建和更新时间
 
 敏感值写入数据库前使用环境变量 `KAFKA_DASHBOARD_MASTER_KEY` 提供的主密钥，通过带随机 nonce 的 AEAD 算法加密。读取配置的 API 不返回密码或私钥明文；编辑时空密码表示保留原值。
 
-### 5.2 MonitorSession
+### 5.2 LagStatusRule
+
+- `id`
+- `cluster_id`
+- `consumer_group`
+- `topic`
+- 正常 Lag 上限
+- 高 Lag 起始值
+- 持续超限时间（秒）
+- 创建和更新时间
+
+同一集群内的 Consumer Group + Topic 组合必须唯一。规则精确匹配时覆盖集群的三个默认值；没有匹配规则时回退到集群默认值。正常上限必须大于或等于 `0`，高 Lag 起始值必须大于正常上限，持续超限时间必须大于或等于 `0`。
+
+### 5.3 MonitorSession
 
 - 随机会话 ID
 - 集群 ID
@@ -88,7 +106,7 @@
 - 最后续租时间
 - 当前采集锁或等价的防重入状态
 
-### 5.3 ClusterSnapshot
+### 5.4 ClusterSnapshot
 
 - 服务端采集时间
 - 集群基本状态
@@ -106,6 +124,20 @@
 - Topic 汇总行显示 Partition 数、所有分区 low watermark 的最小值、所有非空分区最大消息 Offset 的最大值，以及 `sum(high - low)` 得到的保留消息数估算。Offset 本质上只在 Partition 内有意义，因此汇总值用于概览，展开后的逐 Partition 值才是权威数据。
 - Consumer Group + Topic 汇总 Lag 为具有有效 committed offset 的 Partition Lag 之和；同时显示未提交 Partition 数。展开后展示逐 Partition committed offset、high watermark、最大消息 Offset 和 Lag。
 
+### 6.1 Lag 状态判定
+
+对没有采集错误且所有 Partition 均存在 committed offset 的 Consumer Group + Topic，按下列区间判定：
+
+- 正常：`0 <= total_lag <= normal_lag_max`，集群默认范围为 `0–999`。
+- 积压：`normal_lag_max < total_lag < high_lag_min`，集群默认范围为 `1000–4999`。
+- 高 Lag：`total_lag >= high_lag_min`，集群默认范围为 `>= 5000`。
+
+状态优先级为：采集异常、未提交、高 Lag、积压、正常。存在采集错误时立即显示“采集异常”；至少一个 Partition 不存在 committed offset 时立即显示“未提交”，并将数值展示为“已知 Lag + 未知 Partition 数”。这两种状态不受持续超限时间影响。
+
+Lag 首次超过正常上限时开始计时。在连续超限时间达到当前生效规则的设定值前，仍按正常波动显示；达到后，根据当前 Lag 落点显示“积压”或“高 Lag”。Lag 回到正常范围时立即清除计时。积压与高 Lag 共用一次连续超限计时，在二者区间内变化不会重新开始计时。
+
+连续超限计时属于当前浏览器监控会话，只在页面可见且持续采样时推进。页面隐藏、刷新、切换集群或会话重建后计时重新开始，不把未采集的后台时间算入持续时间。
+
 ## 7. API 设计
 
 ### 7.1 集群配置
@@ -115,6 +147,8 @@
 - `PUT /api/clusters/:id`：更新集群。
 - `DELETE /api/clusters/:id`：删除集群；删除前终止该集群的活动会话。
 - `POST /api/clusters/:id/test`：临时连接并测试认证，完成后立即释放连接。
+- `GET /api/clusters/:id/lag-rules`：读取集群默认 Lag 状态设置和自定义规则。
+- `PUT /api/clusters/:id/lag-rules`：原子更新集群默认 Lag 状态设置和全部自定义规则。
 
 ### 7.2 监控会话
 
@@ -145,20 +179,23 @@
 - 最近一小时总 Lag 折线图。
 - 按 Lag 降序展示异常消费组，支持跳转详情。
 
-“异常消费组”在第一版定义为总 Lag 大于 0 或包含采集错误/未提交 Partition 的消费组，不引入可配置告警阈值。
+“异常消费组”是当前状态为“采集异常”“未提交”“积压”或“高 Lag”的消费组。“正常”状态允许处于配置范围内的非零 Lag。
 
 ### 9.3 Topics 页
 
 - 按名称搜索 Topic。
 - Topic 汇总行展示 Partition 数、汇总最小/最大 Offset、保留消息数估算。
 - 展开后展示逐 Partition low watermark、high watermark 和最大消息 Offset。
+- Topic 表格在相关字段旁提供说明提示，解释 low watermark、high watermark、最大消息 Offset 和保留消息数估算的定义、计算方式及边界情况。
 
 ### 9.4 Consumer Groups 页
 
 - 按消费组名称和 Topic 搜索。
 - 默认按总 Lag 降序。
-- 汇总行展示消费组状态、Topic、有效 Partition 数、未提交 Partition 数和总 Lag。
+- 汇总行展示消费组状态、Topic、已提交 Partition 数、未提交 Partition 数和总 Lag。
 - 展开后展示每个 Partition 的 committed offset、high watermark、最大消息 Offset 和 Lag。
+- 状态、已提交/未提交、总 Lag 和趋势字段均提供说明提示。趋势只表示相较上一采样点的方向，不参与状态判定。
+- 命中 Consumer Group + Topic 自定义规则的行显示“自定义规则”标记；悬停标记可查看实际采用的正常上限、高 Lag 起始值和持续超限时间。使用集群默认规则的行不显示该标记。
 
 ### 9.5 消费组详情
 
@@ -171,12 +208,18 @@
 - 新增、编辑、删除集群。
 - 保存前可测试连接。
 - 密码和私钥不回显；编辑时允许保持原敏感字段。
+- “Lag 状态判断区间”提供集群默认正常上限、高 Lag 起始值和持续超限时间。
+- “自定义 Lag 状态判定区间”允许新增和删除 Consumer Group + Topic 精确覆盖规则。
+- Consumer Group 必须从当前集群已发现的消费组下拉列表选择。选定 Consumer Group 后，Topic 下拉列表只显示该消费组存在 committed offset 的 Topic，不允许自由输入。
+- 打开规则配置时复用当前集群监控会话加载下拉选项；没有活动会话时创建短租约会话，离开配置页后释放。集群不可达时保留已有规则只读展示，并要求重新连接后才能新增或更换 Consumer Group/Topic。
+- 已保存规则引用的 Consumer Group 或 Topic 暂时不存在时保留该规则，并将对应选项标记为“当前不可用”；用户可以删除规则，但不能用任意文本替换名称。
 
 ## 10. 状态与错误体验
 
 - 首次采集显示骨架屏。
 - 普通刷新保留已有内容，避免页面闪烁。
 - 行级失败显示警告和错误摘要；悬停或展开查看详细原因。
+- Lag 状态区间、持续超限计时和自定义规则标记遵循第 6.1 节定义。
 - 数据超过两倍当前刷新周期仍未更新时标记为陈旧。
 - 会话过期时前端自动创建新会话并重试一次；持续失败后停止自动重试并提供手动重连。
 - 后端日志包含 request ID、集群 ID 和操作类型，但不得记录密码、私钥或完整连接参数。
@@ -193,14 +236,14 @@
 
 ### 12.1 后端
 
-- 单元测试：配置校验、加密与解密、Lag 计算、空分区、未提交 Offset、租约续期与过期、错误映射。
-- API 测试：集群 CRUD、敏感字段脱敏、会话创建/续租/删除、会话过期恢复、部分成功响应。
+- 单元测试：配置校验、加密与解密、Lag 计算、空分区、未提交 Offset、默认与自定义规则选择、租约续期与过期、错误映射。
+- API 测试：集群 CRUD、Lag 规则唯一性与边界校验、敏感字段脱敏、会话创建/续租/删除、会话过期恢复、部分成功响应。
 - Kafka 集成测试：使用测试容器验证 PLAINTEXT、Topic watermarks、消费组 committed offsets 和 Lag。TLS/SASL 配置转换通过单元测试覆盖，并在可用环境中保留可选集成测试。
 
 ### 12.2 前端
 
-- 单元测试：最近一小时环形缓冲、Lag 汇总、刷新频率切换、陈旧状态判断。
-- 组件测试：Topic 展开表格、消费组筛选与排序、错误和空状态、图表序列选择。
+- 单元测试：最近一小时环形缓冲、Lag 汇总、状态区间匹配、持续超限计时与重置、刷新频率切换、陈旧状态判断。
+- 组件测试：Topic 展开表格、字段说明提示、消费组筛选与排序、自定义规则标记、规则下拉联动与不可用选项、错误和空状态、图表序列选择。
 - 行为测试：页面隐藏时暂停、重新可见时恢复、切换集群和卸载页面时释放会话。
 
 ### 12.3 端到端
@@ -215,6 +258,9 @@
 - 所有 Topic 均可搜索、汇总和展开查看 Partition Offset。
 - 所有仍可由 Kafka 查询到的消费组均可查看 committed offset 与 Lag，包括无活跃成员的组。
 - Lag 与最大消息 Offset 符合本文定义，空分区和未提交 Offset 展示明确。
+- 集群默认 Lag 区间可配置；Consumer Group + Topic 自定义规则可以覆盖默认区间与持续超限时间，并在 Consumer Groups 表格中明确标记。
+- Lag 只有持续超过正常范围达到生效规则的设定时间后才显示“积压”或“高 Lag”，回到正常范围后计时重置。
+- Lag 规则中的 Consumer Group 和 Topic 只能从当前集群发现的数据中选择，不能手工输入。
 - 最近一小时趋势只保存在浏览器内存，连续运行超过一小时后不会保留超期样本。
 - Kafka 局部错误不会清空健康数据，界面能区分部分失败、断开和陈旧状态。
 - 敏感认证字段不会通过读取 API 或日志泄露，数据库中不保存明文密码。
