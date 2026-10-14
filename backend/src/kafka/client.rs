@@ -106,6 +106,98 @@ fn connection_failure(client: &AdminClient<SafeContext>, error: &KafkaError) -> 
     result
 }
 
+type GroupListDestructor = unsafe fn(*const bindings::rd_kafka_group_list);
+
+/// Owns one native group list, independently of the API's top-level return code.
+/// The destructor is paired with the allocator when ownership is transferred.
+struct OwnedGroupList {
+    ptr: *const bindings::rd_kafka_group_list,
+    destroy: GroupListDestructor,
+}
+
+impl Drop for OwnedGroupList {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            // SAFETY: validate_group_list_result's caller transfers unique ownership
+            // of this allocation and supplies its matching destructor. No references
+            // escape the validator, and Drop is the only place that frees the list.
+            unsafe { (self.destroy)(self.ptr) };
+        }
+    }
+}
+
+unsafe fn destroy_native_group_list(ptr: *const bindings::rd_kafka_group_list) {
+    // SAFETY: the production caller supplies only non-null owned list pointers
+    // returned by rd_kafka_list_groups, including its __PARTIAL return path.
+    unsafe { bindings::rd_kafka_group_list_destroy(ptr) };
+}
+
+/// Consume a native result without discarding ownership on error or __PARTIAL.
+///
+/// # Safety
+/// A non-null `ptr` must uniquely own a valid group-list allocation, whose groups
+/// array is readable for group_cnt entries and remains alive until `destroy`.
+/// `destroy` must be the matching deallocator and must not retain any references.
+/// Null is permitted and never passed to the destructor.
+unsafe fn validate_group_list_result(
+    status: bindings::rd_kafka_resp_err_t,
+    ptr: *const bindings::rd_kafka_group_list,
+    destroy: GroupListDestructor,
+) -> Result<(), KafkaError> {
+    // Establish ownership before examining status: __PARTIAL also allocates a list.
+    let owned = OwnedGroupList { ptr, destroy };
+    use bindings::rd_kafka_resp_err_t::{RD_KAFKA_RESP_ERR__PARTIAL, RD_KAFKA_RESP_ERR_NO_ERROR};
+    if status != RD_KAFKA_RESP_ERR_NO_ERROR && status != RD_KAFKA_RESP_ERR__PARTIAL {
+        return Err(KafkaError::GroupListFetch(status.into()));
+    }
+    // SAFETY: the caller guarantees a valid list allocation; as_ref handles null.
+    let list =
+        unsafe { owned.ptr.as_ref() }.ok_or(KafkaError::GroupListFetch(RDKafkaErrorCode::Fail))?;
+    let count = usize::try_from(list.group_cnt)
+        .map_err(|_| KafkaError::GroupListFetch(RDKafkaErrorCode::Fail))?;
+    if count > 0 {
+        if list.groups.is_null()
+            || count > isize::MAX as usize / std::mem::size_of::<bindings::rd_kafka_group_info>()
+        {
+            return Err(KafkaError::GroupListFetch(RDKafkaErrorCode::Fail));
+        }
+        // SAFETY: the owning result's contract guarantees a valid, aligned array
+        // of count entries within one allocation. Its storage remains alive through
+        // owned, size/null checks hold, and this borrowed slice never escapes.
+        let groups = unsafe { std::slice::from_raw_parts(list.groups, count) };
+        for group in groups {
+            if group.err != RD_KAFKA_RESP_ERR_NO_ERROR {
+                return Err(KafkaError::GroupListFetch(group.err.into()));
+            }
+        }
+    }
+    if status != RD_KAFKA_RESP_ERR_NO_ERROR {
+        return Err(KafkaError::GroupListFetch(status.into()));
+    }
+    Ok(())
+}
+
+fn list_groups(client: &AdminClient<SafeContext>, timeout: Duration) -> Result<(), KafkaError> {
+    let timeout_ms = i32::try_from(timeout.as_millis())
+        .map_err(|_| KafkaError::GroupListFetch(RDKafkaErrorCode::InvalidArgument))?;
+    let mut ptr = std::ptr::null();
+    // SAFETY: the client is borrowed and alive throughout this blocking call. The
+    // optional group argument is null (all groups), the out-pointer is initialized
+    // to null, and timeout fits the C API. Any returned allocation is owned below.
+    let status = unsafe {
+        bindings::rd_kafka_list_groups(
+            client.inner().native_ptr(),
+            std::ptr::null(),
+            &mut ptr,
+            timeout_ms,
+        )
+    };
+    // SAFETY: librdkafka returns a uniquely owned valid list on success/__PARTIAL,
+    // leaving our initialized null pointer untouched on other errors. Its matching
+    // native destructor is supplied, and no references escape this invocation.
+    unsafe { validate_group_list_result(status, ptr, destroy_native_group_list) }
+}
+
 /// A temporary client scoped to this request; all native work and drop finish before return.
 /// This function never creates or retains a monitoring session.
 pub async fn test_connection(
@@ -146,12 +238,7 @@ fn probe(
     timeout: Duration,
     started: Instant,
 ) -> Result<ConnectionTestResult, ConnectionError> {
-    // list_groups in librdkafka is exposed as fetch_group_list by rust-rdkafka.
-    let groups = client
-        .inner()
-        .fetch_group_list(None, timeout)
-        .map_err(|error| connection_failure(client, &error))?;
-    drop(groups);
+    list_groups(client, timeout).map_err(|error| connection_failure(client, &error))?;
     let remaining = timeout
         .checked_sub(started.elapsed())
         .filter(|v| !v.is_zero())
@@ -179,6 +266,105 @@ fn probe(
 mod tests {
     use super::*;
     use rdkafka::error::{KafkaError, RDKafkaErrorCode};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    // repr(C) keeps `list` at offset zero so the injected destructor can recover
+    // the allocation while the production parser sees the real native structure.
+    #[repr(C)]
+    struct GroupListFixture {
+        list: bindings::rd_kafka_group_list,
+        groups: Box<[bindings::rd_kafka_group_info]>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for GroupListFixture {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn group_list_fixture(
+        errors: &[bindings::rd_kafka_resp_err_t],
+        drops: Arc<AtomicUsize>,
+    ) -> *const bindings::rd_kafka_group_list {
+        let mut groups: Box<[_]> = errors
+            .iter()
+            .map(|&err| bindings::rd_kafka_group_info {
+                broker: bindings::rd_kafka_metadata_broker {
+                    id: 1,
+                    host: std::ptr::null_mut(),
+                    port: 9092,
+                },
+                group: std::ptr::null_mut(),
+                err,
+                state: std::ptr::null_mut(),
+                protocol_type: std::ptr::null_mut(),
+                protocol: std::ptr::null_mut(),
+                members: std::ptr::null_mut(),
+                member_cnt: 0,
+            })
+            .collect();
+        let list = bindings::rd_kafka_group_list {
+            groups: groups.as_mut_ptr(),
+            group_cnt: groups.len() as i32,
+        };
+        Box::into_raw(Box::new(GroupListFixture {
+            list,
+            groups,
+            drops,
+        }))
+        .cast()
+    }
+
+    unsafe fn destroy_fixture_group_list(ptr: *const bindings::rd_kafka_group_list) {
+        // SAFETY: only pointers produced by group_list_fixture reach this destructor;
+        // the repr(C) first field has the same address as the unique Box allocation.
+        drop(unsafe { Box::from_raw(ptr.cast_mut().cast::<GroupListFixture>()) });
+    }
+
+    // A returned non-null list is owned even when librdkafka reports __PARTIAL.
+    #[test]
+    fn native_group_list_releases_success_partial_and_error_results() {
+        use bindings::rd_kafka_resp_err_t::*;
+        for (status, expected_success) in [
+            (RD_KAFKA_RESP_ERR_NO_ERROR, true),
+            (RD_KAFKA_RESP_ERR__PARTIAL, false),
+            (RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED, false),
+        ] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let ptr = group_list_fixture(&[RD_KAFKA_RESP_ERR_NO_ERROR], drops.clone());
+            // SAFETY: fixture storage is valid, uniquely owned, and paired with its
+            // matching destructor; the parser consumes that ownership exactly once.
+            let result =
+                unsafe { validate_group_list_result(status, ptr, destroy_fixture_group_list) };
+            assert_eq!(result.is_ok(), expected_success);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    // A top-level successful response may still contain denied groups.
+    #[test]
+    fn native_group_list_checks_group_item_authorization_and_releases_list() {
+        use bindings::rd_kafka_resp_err_t::*;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let ptr = group_list_fixture(
+            &[
+                RD_KAFKA_RESP_ERR_NO_ERROR,
+                RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED,
+            ],
+            drops.clone(),
+        );
+        // SAFETY: ownership and destructor both originate from group_list_fixture.
+        let result = unsafe {
+            validate_group_list_result(RD_KAFKA_RESP_ERR_NO_ERROR, ptr, destroy_fixture_group_list)
+        };
+        let error = result.expect_err("a denied group must fail the connection test");
+        assert_eq!(map_error(&error).code(), "KAFKA_AUTH_FAILED");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
 
     // Returning a timeout for an authentication/TLS/DNS failure hides actionable causes.
     #[test]
