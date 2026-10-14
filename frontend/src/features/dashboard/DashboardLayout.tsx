@@ -4,6 +4,7 @@ import { Link, Outlet } from 'react-router'
 import { clustersApi } from '../../api/client'
 import type { ClusterDto } from '../../api/types'
 import { ApiErrorNotice } from '../clusters/ClusterForm'
+import { ConsumerGroupLagProvider } from '../consumer-groups/ConsumerGroupLagProvider'
 import { useMonitorSession, type RefreshSeconds } from './useMonitorSession'
 import type { DashboardContext } from './useDashboard'
 
@@ -21,7 +22,9 @@ function Monitor({ cluster, refreshSeconds }: { cluster: ClusterDto | null; refr
     {monitor.status === 'error' && <button type="button" onClick={monitor.reconnect}>重新连接</button>}
     <ApiErrorNotice error={monitor.error} />
     {Boolean(monitor.snapshot?.partialFailures.length) && <p role="alert">部分数据采集失败；未知值和不完整数据已保留。</p>}
-    <Outlet context={{ cluster, monitor } satisfies DashboardContext} />
+    <ConsumerGroupLagProvider clusterId={cluster?.id ?? null} monitor={monitor}>
+      <Outlet context={{ cluster, monitor } satisfies DashboardContext} />
+    </ConsumerGroupLagProvider>
   </>
 }
 

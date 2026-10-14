@@ -7,6 +7,7 @@ import type { ClusterSnapshot, ConsumerGroupTopicSnapshot, LagRuleSet } from '..
 import { clusterFixture, snapshotFixture } from '../../test/handlers'
 import type { DashboardContext } from '../dashboard/useDashboard'
 import { ConsumerGroupsPage } from './ConsumerGroupsPage'
+import { ConsumerGroupLagProvider } from './ConsumerGroupLagProvider'
 
 const row = (groupId: string, topic: string, lag: number): ConsumerGroupTopicSnapshot => ({ groupId, topic, lag,
   incomplete: false, unknownPartitionCount: 0, partitions: [{ partition: 0, high: 50000, committedOffset: 50000 - lag, lag }] })
@@ -23,7 +24,8 @@ function show(value: ClusterSnapshot | null = snapshot, ruleSet = rules) {
   client.setQueryData(['lag-rules', clusterFixture.id], ruleSet)
   const context: DashboardContext = { cluster: clusterFixture, monitor: { snapshot: value, history: [], status: 'connected',
     error: null, isFetching: false, continuityKey: 'a', refresh: async () => {}, reconnect: () => {} } }
-  const tree = () => <QueryClientProvider client={client}><MemoryRouter><Routes><Route element={<Outlet context={{ ...context }} />}>
+  const tree = () => <QueryClientProvider client={client}><MemoryRouter><Routes><Route element={
+    <ConsumerGroupLagProvider clusterId={context.cluster!.id} monitor={context.monitor}><Outlet context={{ ...context }} /></ConsumerGroupLagProvider>}>
     <Route index element={<ConsumerGroupsPage />} />
   </Route></Routes></MemoryRouter></QueryClientProvider>
   const view = render(tree())

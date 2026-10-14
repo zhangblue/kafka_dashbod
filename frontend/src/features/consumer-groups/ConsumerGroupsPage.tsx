@@ -1,13 +1,12 @@
 import { Fragment, useId, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { lagRulesApi } from '../../api/client'
-import type { ConsumerGroupTopicSnapshot, LagRuleSet } from '../../api/types'
+import type { ConsumerGroupTopicSnapshot } from '../../api/types'
 import { MetricHelp } from '../../components/MetricHelp'
 import { StatusBadge } from '../../components/StatusBadge'
 import { ApiErrorNotice } from '../clusters/ClusterForm'
 import { useDashboard } from '../dashboard/useDashboard'
 import type { MonitorSession } from '../dashboard/useMonitorSession'
-import { advanceLagStates, evaluateLag, initialLagState, lagRowKey, resetAllLagStates, resolveLagRule, rowHealth, statusLabels, type LagStatus } from './status'
+import { statusLabels, type LagStatus } from './status'
+import { useConsumerGroupLag, type ConsumerGroupLagRow } from './useConsumerGroupLag'
 
 const format = (value: number | null) => value === null ? '—' : value.toLocaleString('en-US')
 
@@ -22,29 +21,13 @@ function PartitionTable({ row }: { row: ConsumerGroupTopicSnapshot }) {
   </tr>)}</tbody></table>
 }
 
-function ConsumerGroupsTable({ monitor, rules }: { monitor: MonitorSession; rules: LagRuleSet }) {
+function ConsumerGroupsTable({ monitor, evaluatedRows }: { monitor: MonitorSession; evaluatedRows: ConsumerGroupLagRow[] }) {
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<LagStatus | 'all'>('all')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const id = useId()
-  const { snapshot, status, continuityKey } = monitor
-  const [tracking, setTracking] = useState(() => ({ snapshot, status, continuityKey, rules,
-    book: advanceLagStates({ snapshot, status, continuityKey, rules }, resetAllLagStates()) }))
-  let book = tracking.book
-  // Adjust only when a sampling input changes; search/filter/expand renders never advance time.
-  if (tracking.snapshot !== snapshot || tracking.status !== status || tracking.continuityKey !== continuityKey || tracking.rules !== rules) {
-    book = advanceLagStates({ snapshot, status, continuityKey, rules }, tracking.book)
-    setTracking({ snapshot, status, continuityKey, rules, book })
-  }
-  const rows = (snapshot?.consumerGroups ?? []).map(row => {
-    const key = lagRowKey(snapshot!.clusterId, row.groupId, row.topic)
-    const health = rowHealth(row, snapshot!)
-    const resolved = resolveLagRule(rules, row.groupId, row.topic)
-    const tracked = book.rows[key]
-    const state = tracked?.state ?? evaluateLag({ lag: row.lag, elapsedVisibleMs: 0, rule: resolved.rule,
-      ...health, collectionError: health.collectionError || status === 'error' }, initialLagState()).state
-    return { row, key, health, resolved, state, trend: tracked?.trend }
-  }).filter(({ row, state }) => (filter === 'all' || state.status === filter)
+  const { snapshot, status } = monitor
+  const rows = evaluatedRows.filter(({ row, state }) => (filter === 'all' || state.status === filter)
     && `${row.groupId}\n${row.topic}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))
     .sort((a, b) => b.row.lag - a.row.lag || a.key.localeCompare(b.key))
   return <>
@@ -83,13 +66,12 @@ function ConsumerGroupsTable({ monitor, rules }: { monitor: MonitorSession; rule
 
 export function ConsumerGroupsPage() {
   const { cluster, monitor } = useDashboard()
-  const rules = useQuery({ queryKey: ['lag-rules', cluster?.id], enabled: Boolean(cluster),
-    queryFn: ({ signal }) => lagRulesApi.get(cluster!.id, signal) })
+  const lag = useConsumerGroupLag()
   return <section aria-label="Consumer Groups 内容"><h2>Consumer Groups</h2>
     {!cluster ? <p>请选择集群。</p> : <>
-      {rules.isPending && <p role="status">正在加载 Lag 规则…</p>}
-      <ApiErrorNotice error={rules.error} />
-      {rules.data && <ConsumerGroupsTable key={cluster.id} monitor={monitor} rules={rules.data} />}
+      {lag.isPending && <p role="status">正在加载 Lag 规则…</p>}
+      <ApiErrorNotice error={lag.error} />
+      {lag.ready && <ConsumerGroupsTable key={cluster.id} monitor={monitor} evaluatedRows={lag.rows} />}
     </>}
   </section>
 }
