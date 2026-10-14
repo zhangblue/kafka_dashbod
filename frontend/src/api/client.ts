@@ -47,5 +47,5 @@ export const lagRulesApi = {
 export const sessionsApi = {
   create: (clusterId: string, signal?: AbortSignal) => apiFetch<CreatedSession>(`${clusterPath(clusterId)}/sessions`, { method: 'POST', signal }),
   snapshot: (id: string, signal?: AbortSignal) => apiFetch<ClusterSnapshot>(`${sessionPath(id)}/snapshot`, { signal }),
-  close: (id: string) => apiFetch<void>(sessionPath(id), { method: 'DELETE', keepalive: true }),
+  close: (id: string) => apiFetch<void>(sessionPath(id), { method: 'DELETE' }),
 }
