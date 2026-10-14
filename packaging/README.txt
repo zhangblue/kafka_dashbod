@@ -22,6 +22,7 @@ To print the binary version without a key, run the matching bin/* binary --versi
 The launcher locates web/ and data/ relative to itself even after moving this directory.
 It creates data/ with private permissions and stores SQLite at data/kafka-dashboard.db.
 DATABASE_URL and KAFKA_DASHBOARD_WEB_DIR can override these defaults.
+The working directory is the release directory; explicit relative paths resolve there.
 Send SIGTERM or Ctrl-C to shut down gracefully. Back up SQLite and retain its original key.
 Never distribute data/, real .env files, credentials, or private keys in a release.
 

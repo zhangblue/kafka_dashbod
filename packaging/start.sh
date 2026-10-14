@@ -11,9 +11,11 @@ if [ -z "${KAFKA_DASHBOARD_MASTER_KEY:-}" ]; then
     echo 'KAFKA_DASHBOARD_MASTER_KEY is required (32 random bytes encoded as Base64).' >&2
     exit 1
 fi
+cd "$release_dir"
 umask 077
 mkdir -p "$release_dir/data"
-DATABASE_URL=${DATABASE_URL:-"sqlite://$release_dir/data/kafka-dashboard.db?mode=rwc"}
+# Keep directory names out of the SQLite URI: '?' and '%xx' are URI syntax.
+DATABASE_URL=${DATABASE_URL:-'sqlite://data/kafka-dashboard.db?mode=rwc'}
 KAFKA_DASHBOARD_WEB_DIR=${KAFKA_DASHBOARD_WEB_DIR:-"$release_dir/web"}
 export DATABASE_URL KAFKA_DASHBOARD_WEB_DIR
 exec "$release_dir/bin/kafka-dashboard-$platform" "$@"

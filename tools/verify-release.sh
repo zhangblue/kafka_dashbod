@@ -72,13 +72,16 @@ grep -qx 'KAFKA_DASHBOARD_MASTER_KEY=REPLACE_WITH_BASE64_ENCODED_32_RANDOM_BYTES
 runtime_image=busybox:1.37.0
 docker run --rm --platform linux/amd64 -v "$release:/release:ro" "$runtime_image" /release/bin/kafka-dashboard-linux-amd64 --version
 
-cp -R "$release" "$temp/mac release"
-cp -R "$release" "$temp/linux release"
+mac_release="$temp/mac release?%20中文"
+linux_release="$temp/linux release?%20中文"
+linux_mount='/release?%20 中文'
+cp -R "$release" "$mac_release"
+cp -R "$release" "$linux_release"
 KAFKA_DASHBOARD_MASTER_KEY=$(openssl rand -base64 32)
 export KAFKA_DASHBOARD_MASTER_KEY
 unset DATABASE_URL KAFKA_DASHBOARD_WEB_DIR
 # ANSI color disabled so the bound ephemeral port can be read without guessing a free port.
-NO_COLOR=1 RUST_LOG=info KAFKA_DASHBOARD_BIND=127.0.0.1:0 "$temp/mac release/start.sh" > "$temp/mac.log" 2>&1 &
+NO_COLOR=1 RUST_LOG=info KAFKA_DASHBOARD_BIND=127.0.0.1:0 "$mac_release/start.sh" > "$temp/mac.log" 2>&1 &
 mac_pid=$!
 attempt=0
 mac_port=
@@ -113,7 +116,7 @@ check_http() {
     done
     [ "$(sqlite3 "$destination/data/kafka-dashboard.db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('clusters', 'lag_rules');")" = 2 ] || fail 'SQLite migrations missing'
 }
-check_http "http://127.0.0.1:$mac_port" "$temp/mac release"
+check_http "http://127.0.0.1:$mac_port" "$mac_release"
 kill -TERM "$mac_pid"
 attempt=0
 while kill -0 "$mac_pid" 2>/dev/null; do
@@ -126,11 +129,11 @@ mac_pid=
 echo 'macOS: health, SQLite, index, assets, SPA fallback and SIGTERM passed'
 
 container=$(docker run -d --platform linux/amd64 \
-    -v "$temp/linux release:/release" -p 127.0.0.1::3000 \
+    -v "$linux_release:$linux_mount" -p 127.0.0.1::3000 \
     -e KAFKA_DASHBOARD_MASTER_KEY -e KAFKA_DASHBOARD_BIND=0.0.0.0:3000 \
-    "$runtime_image" /release/start.sh)
+    "$runtime_image" "$linux_mount/start.sh")
 linux_address=$(docker port "$container" 3000/tcp | head -1)
-check_http "http://$linux_address" "$temp/linux release"
+check_http "http://$linux_address" "$linux_release"
 docker kill --signal TERM "$container" >/dev/null
 attempt=0
 while [ "$(docker inspect --format '{{.State.Running}}' "$container")" = true ]; do

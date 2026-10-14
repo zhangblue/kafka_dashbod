@@ -113,6 +113,8 @@ kafka-dashboard/
 
 复制整个目录或解压归档到目标机器的可写位置，核验 `shasum -a 256 -c SHA256SUMS`（Linux 也可用 `sha256sum -c SHA256SUMS`），在 shell 或服务管理器中安全设置此前说明的 `KAFKA_DASHBOARD_MASTER_KEY`，运行 `./start.sh`。支持 **macOS arm64 和 Linux x86_64**；启动器自动选择二进制，默认访问地址为 `http://127.0.0.1:3000`，用 `KAFKA_DASHBOARD_BIND` 修改。启动器按自身位置定位 `web/`，创建私有权限的 `data/` 并使用 `data/kafka-dashboard.db`，可整体搬移；`DATABASE_URL` 和 `KAFKA_DASHBOARD_WEB_DIR` 可覆盖默认路径。参数原样透传，实际服务配置通过环境变量提供。
 
+启动器将工作目录切换到发行目录，再使用固定的相对 SQLite URL，目录名含 `?`、`%20`、空格或中文时也不会改变数据库实际位置。显式设置的环境变量值原样保留，其中相对路径以发行目录为基准。
+
 运行机器不需要 Node.js、Rust、系统 librdkafka 或系统 OpenSSL。Linux 二进制使用 musl，静态链接 librdkafka、SQLite 和 vendored OpenSSL；macOS 保留操作系统原生库依赖（如 libSystem），并非完全静态。Linux 包不携带宿主机 CA 信任库，私有 TLS 请在集群设置显式配置 CA PEM。网络/DNS、可写存储和操作系统执行许可仍需可用。
 
 验证命令需在构建主机执行，使用 `curl`、`file`、`shasum`、`sqlite3`、`otool`、`openssl` 和 Docker。它校验完整文件清单、哈希、架构和静态链接边界，在临时副本运行 macOS 程序与 Linux/amd64 最小容器，验证版本、SQLite 迁移、健康接口、页面/资源、SPA fallback 和 SIGTERM 退出；验证后清理临时进程和容器，不向发行目录写入数据库。

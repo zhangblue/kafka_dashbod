@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, copyFile, writeFile, readFile, readdir, rm, rename, stat, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -41,7 +42,7 @@ for (const [osName, arch, platform] of [['Darwin', 'arm64', 'darwin-arm64'], ['L
     const f = await fixture(t, osName, arch);
     const result = f.run(['--bind', '127.0.0.1:9090', 'argument with spaces', '']);
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(result.stdout.split('\n'), [platform, `sqlite://${f.release}/data/kafka-dashboard.db?mode=rwc`, `${f.release}/web`, '--bind', '127.0.0.1:9090', 'argument with spaces', '', '']);
+    assert.deepEqual(result.stdout.split('\n'), [platform, 'sqlite://data/kafka-dashboard.db?mode=rwc', `${f.release}/web`, '--bind', '127.0.0.1:9090', 'argument with spaces', '', '']);
     assert.equal((await stat(path.join(f.release, 'data'))).isDirectory(), true);
   });
 }
@@ -74,6 +75,52 @@ test('explicit database and web paths remain configurable', async t => {
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.stdout.split('\n').slice(1, 3), ['sqlite:///custom.db', '/custom/web']);
 });
+
+// Exercise SQLx's real URI parser: literal '?' and '%20' must remain directory names.
+const nativeBinary = path.join(root, 'dist/kafka-dashboard/bin/kafka-dashboard-darwin-arm64');
+for (const directory of ['release?query', 'release%20encoded', 'release with spaces', '中文发行目录']) {
+  test(`real binary starts after relocation to ${directory}`, {
+    skip: process.platform !== 'darwin' || process.arch !== 'arm64' || !existsSync(nativeBinary)
+      ? 'Requires the built Darwin/arm64 release binary' : false,
+  }, async t => {
+    const f = await fixture(t);
+    await copyFile(nativeBinary, path.join(f.release, 'bin/kafka-dashboard-darwin-arm64'));
+    await writeFile(path.join(f.release, 'web/index.html'), '<html>relocated release</html>');
+    const moved = path.join(f.temp, directory);
+    await rename(f.release, moved);
+    const env = { ...process.env, KAFKA_DASHBOARD_MASTER_KEY: key, KAFKA_DASHBOARD_BIND: '127.0.0.1:0', RUST_LOG: 'info', NO_COLOR: '1' };
+    delete env.DATABASE_URL;
+    delete env.KAFKA_DASHBOARD_WEB_DIR;
+    const child = spawn('/bin/sh', [path.join(moved, 'start.sh')], { cwd: f.temp, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
+    try {
+      let port;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (child.exitCode !== null || child.signalCode !== null) break;
+        port = stdout.match(/address=127\.0\.0\.1:(\d+)/)?.[1];
+        if (port) break;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      assert.ok(port, `server failed to start: ${stderr}`);
+      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { status: 'ok' });
+      const db = await readFile(path.join(moved, 'data/kafka-dashboard.db'));
+      assert.equal(db.subarray(0, 16).toString(), 'SQLite format 3\0');
+      assert.equal(existsSync(path.join(f.temp, 'data/kafka-dashboard.db')), false);
+      child.kill('SIGTERM');
+      const result = await Promise.race([exited, new Promise(resolve => setTimeout(() => resolve('timeout'), 5000).unref())]);
+      assert.deepEqual(result, { code: 0, signal: null });
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await exited;
+    }
+  });
+}
 
 async function buildFixture(t, fail = '') {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'release-build-test-'));
