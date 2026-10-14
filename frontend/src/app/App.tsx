@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router'
 import { DashboardLayout } from '../features/dashboard/DashboardLayout'
 import { ClustersPage } from '../features/clusters/ClustersPage'
+import { TopicsPage } from '../features/topics/TopicsPage'
 
 function App() {
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
@@ -21,7 +22,7 @@ function App() {
       <Routes>
         <Route element={<DashboardLayout />}>
           <Route index element={<section aria-label="概览内容" />} />
-          <Route path="topics" element={<section aria-label="Topics 内容" />} />
+          <Route path="topics" element={<TopicsPage />} />
           <Route path="consumer-groups" element={<section aria-label="Consumer Groups 内容" />} />
         </Route>
         <Route path="settings" element={<ClustersPage />} />
