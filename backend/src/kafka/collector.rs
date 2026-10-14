@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     future::Future,
     sync::{Arc, Mutex},
     time::Duration,
@@ -35,6 +36,7 @@ pub struct TopicPartition {
 pub struct TopicMetadata {
     pub topic: String,
     pub partitions: Vec<i32>,
+    pub metadata_complete: bool,
 }
 
 pub struct GroupMetadata {
@@ -135,6 +137,7 @@ pub async fn collect(
     topics.dedup_by(|a, b| a.topic == b.topic);
     groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
     groups.dedup_by(|a, b| a.group_id == b.group_id);
+    let consumer_group_ids = groups.iter().map(|group| group.group_id.clone()).collect();
     let partitions: Vec<_> = topics
         .iter_mut()
         .flat_map(|topic| {
@@ -169,24 +172,33 @@ pub async fn collect(
         }
     }))
     .buffer_unordered(concurrency)
-    .collect::<Vec<_>>()
+    .collect::<HashMap<_, _>>()
     .await;
-    watermarks.sort_by(|(a, _), (b, _)| (&a.topic, a.partition).cmp(&(&b.topic, b.partition)));
     let mut topic_snapshots = Vec::new();
     for topic in topics {
-        let mut healthy = Vec::new();
-        for (partition, result) in watermarks.iter().filter(|(p, _)| p.topic == topic.topic) {
-            match result {
+        let mut metrics = Vec::new();
+        for partition in topic.partitions {
+            let key = TopicPartition {
+                topic: topic.topic.clone(),
+                partition,
+            };
+            match watermarks
+                .remove(&key)
+                .expect("every discovered partition was queried")
+            {
                 Ok((low, high)) => {
-                    healthy.push(PartitionWatermark::new(partition.partition, *low, *high))
+                    metrics.push(PartitionWatermark::new(partition, low, high));
                 }
-                Err(error) => failures.push(error.failure(
-                    "watermark",
-                    format!("{}:{}", partition.topic, partition.partition),
-                )),
+                Err(error) => {
+                    failures
+                        .push(error.failure("watermark", format!("{}:{partition}", topic.topic)));
+                    metrics.push(PartitionWatermark::unavailable(partition));
+                }
             }
         }
-        topic_snapshots.push(TopicSnapshot::from_partitions(topic.topic, healthy));
+        let mut snapshot = TopicSnapshot::from_partitions(topic.topic, metrics);
+        snapshot.incomplete |= !topic.metadata_complete;
+        topic_snapshots.push(snapshot);
     }
     // Query every discovered partition, including those whose watermark failed.
     let results = stream::iter(groups.into_iter().map(|group| {
@@ -208,7 +220,8 @@ pub async fn collect(
                 Vec::new()
             }
         };
-        for offset in &offsets {
+        let mut committed = HashMap::with_capacity(offsets.len());
+        for offset in offsets {
             if let Some(error) = offset.error {
                 failures.push(error.failure(
                     "committed",
@@ -218,29 +231,35 @@ pub async fn collect(
                     ),
                 ));
             }
+            let value = if offset.error.is_none() {
+                offset.offset.filter(|value| *value >= 0)
+            } else {
+                None
+            };
+            committed.insert(offset.partition, value);
         }
         for topic in &topic_snapshots {
             let rows = topic
                 .partitions
                 .iter()
                 .map(|p| {
-                    let offset = offsets
-                        .iter()
-                        .find(|offset| {
-                            offset.partition.topic == topic.topic
-                                && offset.partition.partition == p.partition
-                                && offset.error.is_none()
+                    let offset = committed
+                        .get(&TopicPartition {
+                            topic: topic.topic.clone(),
+                            partition: p.partition,
                         })
-                        .and_then(|offset| offset.offset)
-                        .filter(|offset| *offset >= 0);
+                        .copied()
+                        .flatten();
                     GroupPartitionSnapshot::new(p.partition, p.high, offset)
                 })
                 .collect();
-            consumer_groups.push(ConsumerGroupTopicSnapshot::from_partitions(
+            let mut snapshot = ConsumerGroupTopicSnapshot::from_partitions(
                 group.group_id.clone(),
                 topic.topic.clone(),
                 rows,
-            ));
+            );
+            snapshot.incomplete |= topic.incomplete;
+            consumer_groups.push(snapshot);
         }
     }
     consumer_groups.sort_by(|a, b| (&a.group_id, &a.topic).cmp(&(&b.group_id, &b.topic)));
@@ -251,6 +270,7 @@ pub async fn collect(
         cluster_id: cluster_id.into(),
         collected_at: chrono::Utc::now().to_rfc3339(),
         topics: topic_snapshots,
+        consumer_group_ids,
         consumer_groups,
         partial_failures: failures,
     }
@@ -417,6 +437,7 @@ impl KafkaProbe for NativeProbe {
                 .topics()
                 .iter()
                 .map(|topic| {
+                    let mut metadata_complete = topic.error().is_none();
                     if let Some(error) = topic.error() {
                         failures.lock().expect("failures poisoned").push(
                             native_error(KafkaError::MetadataFetch(error.into()))
@@ -426,23 +447,23 @@ impl KafkaProbe for NativeProbe {
                     let partitions = topic
                         .partitions()
                         .iter()
-                        .filter_map(|p| {
+                        .map(|p| {
                             if let Some(error) = p.error() {
+                                metadata_complete = false;
                                 failures.lock().expect("failures poisoned").push(
                                     native_error(KafkaError::MetadataFetch(error.into())).failure(
                                         "metadata",
                                         format!("{}:{}", topic.name(), p.id()),
                                     ),
                                 );
-                                None
-                            } else {
-                                Some(p.id())
                             }
+                            p.id()
                         })
                         .collect();
                     TopicMetadata {
                         topic: topic.name().into(),
                         partitions,
+                        metadata_complete,
                     }
                 })
                 .collect())
@@ -523,19 +544,27 @@ mod tests {
         peak: AtomicUsize,
         delay: Duration,
         committed_fails: bool,
+        topics_fails: bool,
+        all_watermarks_fail: bool,
+        multiple_groups: bool,
     }
 
     #[async_trait::async_trait]
     impl KafkaProbe for FakeProbe {
         async fn topics(&self) -> Result<Vec<TopicMetadata>, ProbeError> {
+            if self.topics_fails {
+                return Err(ProbeError::Query);
+            }
             Ok(vec![
                 TopicMetadata {
                     topic: "zeta".into(),
                     partitions: vec![0],
+                    metadata_complete: true,
                 },
                 TopicMetadata {
                     topic: "orders".into(),
                     partitions: vec![2, 0, 1],
+                    metadata_complete: true,
                 },
             ])
         }
@@ -550,6 +579,9 @@ mod tests {
             }
             let _release = Release(&self.active);
             tokio::time::sleep(self.delay).await;
+            if self.all_watermarks_fail {
+                return Err(ProbeError::Query);
+            }
             match (topic, partition) {
                 ("orders", 2) => Err(ProbeError::Query),
                 ("orders", 0) => Ok((120, 98_241)),
@@ -559,15 +591,38 @@ mod tests {
         }
         async fn groups(&self) -> Result<Vec<GroupMetadata>, ProbeError> {
             // No active members are required to discover an inactive group.
-            Ok(vec![GroupMetadata {
+            let mut groups = vec![GroupMetadata {
                 group_id: "inactive".into(),
-            }])
+            }];
+            if self.multiple_groups {
+                groups.push(GroupMetadata {
+                    group_id: "live".into(),
+                });
+            }
+            Ok(groups)
         }
         async fn committed(
             &self,
-            _: &str,
+            group: &str,
             partitions: &[TopicPartition],
         ) -> Result<Vec<CommittedOffset>, ProbeError> {
+            assert!(
+                group == "inactive" || (self.multiple_groups && group == "live"),
+                "unexpected target group.id"
+            );
+            let expected = if self.topics_fails {
+                vec![]
+            } else {
+                vec![("orders", 0), ("orders", 1), ("orders", 2), ("zeta", 0)]
+            };
+            assert_eq!(
+                partitions
+                    .iter()
+                    .map(|p| (p.topic.as_str(), p.partition))
+                    .collect::<Vec<_>>(),
+                expected,
+                "committed queries must include every discovered partition"
+            );
             if self.committed_fails {
                 return Err(ProbeError::Authorization);
             }
@@ -576,7 +631,9 @@ mod tests {
                 .map(|p| CommittedOffset {
                     partition: p.clone(),
                     offset: if p.topic == "orders" && p.partition == 0 {
-                        Some(90_031)
+                        Some(if group == "inactive" { 90_031 } else { 98_240 })
+                    } else if p.topic == "orders" && p.partition == 2 {
+                        Some(77)
                     } else {
                         None
                     },
@@ -592,6 +649,9 @@ mod tests {
             peak: AtomicUsize::new(0),
             delay,
             committed_fails: false,
+            topics_fails: false,
+            all_watermarks_fail: false,
+            multiple_groups: false,
         }
     }
 
@@ -623,14 +683,14 @@ mod tests {
                 .iter()
                 .map(|p| p.partition)
                 .collect::<Vec<_>>(),
-            [0, 1]
+            [0, 1, 2]
         );
         assert_eq!(snapshot.topics[0].latest_message_offset, Some(98_240));
         assert_eq!(snapshot.topics[0].retained_offset_span, 98_121);
         let group = &snapshot.consumer_groups[0];
         assert_eq!((&*group.group_id, &*group.topic), ("inactive", "orders"));
         assert_eq!(group.lag, 8_210);
-        assert_eq!(group.unknown_partition_count, 1);
+        assert_eq!(group.unknown_partition_count, 2);
         assert_eq!(group.partitions[1].lag, None);
         assert_eq!(snapshot.partial_failures.len(), 1);
         assert_eq!(snapshot.partial_failures[0].scope, "watermark");
@@ -685,13 +745,108 @@ mod tests {
         assert_eq!(snapshot.topics.len(), 2);
         assert_eq!(snapshot.consumer_groups.len(), 2);
         assert_eq!(snapshot.consumer_groups[0].group_id, "inactive");
-        assert_eq!(snapshot.consumer_groups[0].unknown_partition_count, 2);
+        assert_eq!(snapshot.consumer_groups[0].unknown_partition_count, 3);
         assert!(
             snapshot
                 .partial_failures
                 .iter()
                 .any(|failure| failure.scope == "committed" && failure.code == "KAFKA_AUTH_FAILED")
         );
+    }
+
+    // Independent committed success must survive failure of this partition's watermark.
+    #[tokio::test]
+    async fn failed_watermark_keeps_partition_identity_and_successful_committed_offset() {
+        let snapshot = serde_json::to_value(
+            collect(
+                &probe(Duration::ZERO),
+                "cluster",
+                CollectionOptions::default(),
+            )
+            .await,
+        )
+        .unwrap();
+        let partition = &snapshot["topics"][0]["partitions"][2];
+        assert_eq!(partition["partition"], 2);
+        assert!(partition["low"].is_null() && partition["high"].is_null());
+        assert!(partition["retainedOffsetSpan"].is_null());
+        assert_eq!(snapshot["topics"][0]["incomplete"], true);
+        let group = &snapshot["consumerGroups"][0];
+        assert_eq!(group["partitions"][2]["committedOffset"], 77);
+        assert!(group["partitions"][2]["high"].is_null());
+        assert!(group["partitions"][2]["lag"].is_null());
+        assert_eq!(group["unknownPartitionCount"], 2);
+        assert_eq!(group["incomplete"], true);
+    }
+
+    // All watermark failures must still preserve known offsets and every partition.
+    #[tokio::test]
+    async fn all_watermarks_failed_retains_unknown_metrics_and_known_committed_offsets() {
+        let mut probe = probe(Duration::ZERO);
+        probe.all_watermarks_fail = true;
+        let snapshot =
+            serde_json::to_value(collect(&probe, "cluster", CollectionOptions::default()).await)
+                .unwrap();
+        assert_eq!(
+            snapshot["topics"][0]["partitions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(snapshot["topics"][0]["low"].is_null());
+        assert_eq!(snapshot["topics"][0]["incomplete"], true);
+        let group = &snapshot["consumerGroups"][0];
+        assert_eq!(group["partitions"].as_array().unwrap().len(), 3);
+        assert_eq!(group["partitions"][0]["committedOffset"], 90_031);
+        assert!(group["partitions"][1]["committedOffset"].is_null());
+        assert_eq!(group["partitions"][2]["committedOffset"], 77);
+        assert_eq!(group["unknownPartitionCount"], 3);
+        assert_eq!(group["incomplete"], true);
+    }
+
+    // Topic metadata failure must not erase successful group discovery.
+    #[tokio::test]
+    async fn metadata_failure_preserves_discovered_group_identities() {
+        let mut probe = probe(Duration::ZERO);
+        probe.topics_fails = true;
+        probe.multiple_groups = true;
+        let snapshot =
+            serde_json::to_value(collect(&probe, "cluster", CollectionOptions::default()).await)
+                .unwrap();
+        assert_eq!(
+            snapshot["consumerGroupIds"],
+            serde_json::json!(["inactive", "live"])
+        );
+        assert_eq!(snapshot["topics"], serde_json::json!([]));
+        assert_eq!(snapshot["consumerGroups"], serde_json::json!([]));
+        assert_eq!(snapshot["partialFailures"][0]["scope"], "topics");
+    }
+
+    // A wrong group.id, swapped offsets, or replacing unknown with zero breaks this.
+    #[tokio::test]
+    async fn committed_offsets_are_aggregated_for_the_exact_target_group() {
+        let mut probe = probe(Duration::ZERO);
+        probe.multiple_groups = true;
+        let snapshot = collect(&probe, "cluster", CollectionOptions::default()).await;
+        let inactive = snapshot
+            .consumer_groups
+            .iter()
+            .find(|row| row.group_id == "inactive" && row.topic == "orders")
+            .unwrap();
+        let live = snapshot
+            .consumer_groups
+            .iter()
+            .find(|row| row.group_id == "live" && row.topic == "orders")
+            .unwrap();
+        assert_eq!(inactive.partitions[0].committed_offset, Some(90_031));
+        assert_eq!(inactive.partitions[0].lag, Some(8_210));
+        assert_eq!(live.partitions[0].committed_offset, Some(98_240));
+        assert_eq!(live.partitions[0].lag, Some(1));
+        assert_eq!(inactive.partitions[1].committed_offset, None);
+        assert_eq!(live.partitions[1].committed_offset, None);
+        assert_eq!(inactive.partitions[1].lag, None);
+        assert_eq!(live.partitions[1].lag, None);
     }
 
     // Cancellation of an async timeout must not release the native concurrency slot.

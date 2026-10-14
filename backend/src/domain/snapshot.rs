@@ -6,20 +6,31 @@ use super::offset::{lag, latest_message_offset, retained_offset_span};
 #[serde(rename_all = "camelCase")]
 pub struct PartitionWatermark {
     pub partition: i32,
-    pub low: i64,
-    pub high: i64,
+    /// None means the watermark query did not produce a value.
+    pub low: Option<i64>,
+    pub high: Option<i64>,
     pub latest_message_offset: Option<i64>,
-    pub retained_offset_span: u64,
+    pub retained_offset_span: Option<u64>,
 }
 
 impl PartitionWatermark {
     pub fn new(partition: i32, low: i64, high: i64) -> Self {
         Self {
             partition,
-            low,
-            high,
+            low: Some(low),
+            high: Some(high),
             latest_message_offset: latest_message_offset(low, high),
-            retained_offset_span: retained_offset_span(low, high),
+            retained_offset_span: Some(retained_offset_span(low, high)),
+        }
+    }
+
+    pub fn unavailable(partition: i32) -> Self {
+        Self {
+            partition,
+            low: None,
+            high: None,
+            latest_message_offset: None,
+            retained_offset_span: None,
         }
     }
 }
@@ -34,6 +45,8 @@ pub struct TopicSnapshot {
     pub latest_message_offset: Option<i64>,
     /// Sum of retained offset spans, not a physical message count.
     pub retained_offset_span: u64,
+    /// Aggregates cover known partitions only when this flag is true.
+    pub incomplete: bool,
     pub partitions: Vec<PartitionWatermark>,
 }
 
@@ -41,15 +54,19 @@ impl TopicSnapshot {
     pub fn from_partitions(topic: String, partitions: Vec<PartitionWatermark>) -> Self {
         Self {
             topic,
-            low: partitions.iter().map(|partition| partition.low).min(),
+            low: partitions
+                .iter()
+                .filter_map(|partition| partition.low)
+                .min(),
             latest_message_offset: partitions
                 .iter()
                 .filter_map(|partition| partition.latest_message_offset)
                 .max(),
             retained_offset_span: partitions
                 .iter()
-                .map(|partition| partition.retained_offset_span)
+                .filter_map(|partition| partition.retained_offset_span)
                 .sum(),
+            incomplete: partitions.iter().any(|partition| partition.high.is_none()),
             partitions,
         }
     }
@@ -59,18 +76,24 @@ impl TopicSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct GroupPartitionSnapshot {
     pub partition: i32,
-    pub high: i64,
+    /// Independent of committed_offset; absent if the watermark query failed.
+    pub high: Option<i64>,
     pub committed_offset: Option<i64>,
     pub lag: Option<u64>,
 }
 
 impl GroupPartitionSnapshot {
-    pub fn new(partition: i32, high: i64, committed_offset: Option<i64>) -> Self {
+    pub fn new(
+        partition: i32,
+        high: impl Into<Option<i64>>,
+        committed_offset: Option<i64>,
+    ) -> Self {
+        let high = high.into();
         Self {
             partition,
             high,
             committed_offset,
-            lag: lag(high, committed_offset),
+            lag: high.and_then(|high| lag(high, committed_offset)),
         }
     }
 }
@@ -80,9 +103,11 @@ impl GroupPartitionSnapshot {
 pub struct ConsumerGroupTopicSnapshot {
     pub group_id: String,
     pub topic: String,
-    /// Sum over committed partitions only; consult unknown_partition_count as well.
+    /// Sum over computable partition lags only; consult incomplete as well.
     pub lag: u64,
     pub unknown_partition_count: usize,
+    /// Lag sums known partition lags only; missing metadata can also make it incomplete.
+    pub incomplete: bool,
     pub partitions: Vec<GroupPartitionSnapshot>,
 }
 
@@ -101,8 +126,9 @@ impl ConsumerGroupTopicSnapshot {
                 .sum(),
             unknown_partition_count: partitions
                 .iter()
-                .filter(|partition| partition.committed_offset.is_none())
+                .filter(|partition| partition.lag.is_none())
                 .count(),
+            incomplete: partitions.iter().any(|partition| partition.lag.is_none()),
             partitions,
         }
     }
@@ -124,6 +150,8 @@ pub struct ClusterSnapshot {
     /// Collection time as an RFC 3339 timestamp supplied by the collector.
     pub collected_at: String,
     pub topics: Vec<TopicSnapshot>,
+    /// Independent discovery identities, retained even when topic metadata is unavailable.
+    pub consumer_group_ids: Vec<String>,
     pub consumer_groups: Vec<ConsumerGroupTopicSnapshot>,
     pub partial_failures: Vec<PartialFailure>,
 }
@@ -148,7 +176,7 @@ mod tests {
         assert_eq!(snapshot.latest_message_offset, Some(98_240));
         assert_eq!(snapshot.retained_offset_span, 98_311);
         assert_eq!(snapshot.partitions[0].latest_message_offset, Some(98_240));
-        assert_eq!(snapshot.partitions[0].retained_offset_span, 98_121);
+        assert_eq!(snapshot.partitions[0].retained_offset_span, Some(98_121));
     }
 
     // Catch fabricating a latest offset when no partition retains messages.
@@ -206,6 +234,7 @@ mod tests {
                 "orders".into(),
                 vec![PartitionWatermark::new(0, 5, 5)],
             )],
+            consumer_group_ids: vec!["billing".into()],
             consumer_groups: vec![ConsumerGroupTopicSnapshot::from_partitions(
                 "billing".into(),
                 "orders".into(),
@@ -226,13 +255,14 @@ mod tests {
                 "collectedAt": "2026-10-15T00:00:00Z",
                 "topics": [{
                     "topic": "orders", "low": 5, "latestMessageOffset": null,
-                    "retainedOffsetSpan": 0,
+                    "retainedOffsetSpan": 0, "incomplete": false,
                     "partitions": [{ "partition": 0, "low": 5, "high": 5,
                         "latestMessageOffset": null, "retainedOffsetSpan": 0 }]
                 }],
+                "consumerGroupIds": ["billing"],
                 "consumerGroups": [{
                     "groupId": "billing", "topic": "orders", "lag": 0,
-                    "unknownPartitionCount": 1,
+                    "unknownPartitionCount": 1, "incomplete": true,
                     "partitions": [{ "partition": 0, "high": 5,
                         "committedOffset": null, "lag": null }]
                 }],

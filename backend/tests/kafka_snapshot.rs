@@ -45,6 +45,7 @@ impl SessionClientFactory for Factory {
             cluster_id: cluster_id.into(),
             collected_at: "2026-10-15T00:00:00Z".into(),
             topics: vec![],
+            consumer_group_ids: vec![],
             consumer_groups: vec![],
             partial_failures: vec![],
         })
@@ -132,7 +133,121 @@ async fn snapshot_api_renews_rejects_overlap_and_close_waits_after_http_cancella
     assert_eq!(snapshot["clusterId"], cluster_id);
     assert_eq!(snapshot["partialFailures"], serde_json::json!([]));
     assert!(snapshot["consumerGroups"].is_array());
+    assert!(snapshot["consumerGroupIds"].is_array());
     sessions.close_all().await;
+}
+
+#[test]
+fn known_committed_fixture_requires_complete_and_valid_environment_values() {
+    let values = |group: Option<&str>,
+                  topic: Option<&str>,
+                  partition: Option<&str>,
+                  offset: Option<&str>| {
+        [group, topic, partition, offset].map(|value| value.map(str::to_owned))
+    };
+    assert!(
+        known_offset_fixture([None, None, None, None])
+            .unwrap()
+            .is_none()
+    );
+    assert!(known_offset_fixture(values(Some("reader"), None, None, None)).is_err());
+    assert!(
+        known_offset_fixture(values(
+            Some("reader"),
+            Some("orders"),
+            Some("bad"),
+            Some("42")
+        ))
+        .is_err()
+    );
+    assert!(
+        known_offset_fixture(values(
+            Some("reader"),
+            Some("orders"),
+            Some("-1"),
+            Some("42")
+        ))
+        .is_err()
+    );
+    assert!(
+        known_offset_fixture(values(
+            Some("reader"),
+            Some("orders"),
+            Some("0"),
+            Some("-1")
+        ))
+        .is_err()
+    );
+    let expected = known_offset_fixture(values(
+        Some("reader"),
+        Some("orders"),
+        Some("2"),
+        Some("42"),
+    ))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        (
+            expected.group_id.as_str(),
+            expected.topic.as_str(),
+            expected.partition,
+            expected.committed
+        ),
+        ("reader", "orders", 2, Some(42))
+    );
+    assert_eq!(
+        known_offset_fixture(values(
+            Some("reader"),
+            Some("orders"),
+            Some("2"),
+            Some("null")
+        ))
+        .unwrap()
+        .unwrap()
+        .committed,
+        None
+    );
+}
+
+struct KnownOffset {
+    group_id: String,
+    topic: String,
+    partition: i32,
+    committed: Option<i64>,
+}
+
+fn known_offset_fixture(values: [Option<String>; 4]) -> Result<Option<KnownOffset>, &'static str> {
+    if values.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [Some(group_id), Some(topic), Some(partition), Some(offset)] = values else {
+        return Err("set all four TEST_KAFKA_GROUP_ID/TOPIC/PARTITION/COMMITTED_OFFSET values");
+    };
+    let partition: i32 = partition
+        .parse()
+        .map_err(|_| "invalid expected partition")?;
+    let committed = if offset == "null" {
+        None
+    } else {
+        Some(
+            offset
+                .parse::<i64>()
+                .map_err(|_| "invalid expected committed offset")?,
+        )
+    };
+    if group_id.is_empty()
+        || topic.is_empty()
+        || partition < 0
+        || committed.is_some_and(|value| value < 0)
+    {
+        return Err("expected group/topic must be nonempty and partition/offset nonnegative");
+    }
+    Ok(Some(KnownOffset {
+        group_id,
+        topic,
+        partition,
+        committed,
+    }))
 }
 
 // Read-only integration: never create topics, produce, subscribe, or commit offsets.
@@ -144,6 +259,16 @@ async fn readonly_broker_snapshot_contains_all_discoverable_resources() {
         sessions::manager::KafkaSessionClientFactory,
     };
     let brokers = std::env::var("TEST_KAFKA_BROKERS").expect("set TEST_KAFKA_BROKERS");
+    let known = known_offset_fixture(
+        [
+            "TEST_KAFKA_GROUP_ID",
+            "TEST_KAFKA_TOPIC",
+            "TEST_KAFKA_PARTITION",
+            "TEST_KAFKA_COMMITTED_OFFSET",
+        ]
+        .map(|key| std::env::var(key).ok()),
+    )
+    .unwrap();
     let factory = KafkaSessionClientFactory;
     let client = factory
         .create(DecryptedClusterConfig::plaintext(brokers))
@@ -164,15 +289,16 @@ async fn readonly_broker_snapshot_contains_all_discoverable_resources() {
             .find(|row| row.topic == topic.topic)
             .unwrap();
         assert_eq!(actual.partitions.len(), topic.partitions.len());
+        assert!(!actual.incomplete);
         for p in &actual.partitions {
-            assert!(p.low >= 0 && p.high >= p.low);
-            assert_eq!(
-                p.latest_message_offset,
-                (p.high > p.low).then(|| p.high - 1)
-            );
+            let low = p.low.expect("successful watermark must have low");
+            let high = p.high.expect("successful watermark must have high");
+            assert!(low >= 0 && high >= low);
+            assert_eq!(p.latest_message_offset, (high > low).then(|| high - 1));
         }
     }
     for group in expected_groups {
+        assert!(snapshot.consumer_group_ids.contains(&group.group_id));
         assert!(
             snapshot
                 .consumer_groups
@@ -196,10 +322,27 @@ async fn readonly_broker_snapshot_contains_all_discoverable_resources() {
         for p in &group.partitions {
             assert_eq!(
                 p.lag,
-                p.committed_offset
-                    .map(|offset| p.high.saturating_sub(offset).max(0) as u64)
+                p.high
+                    .zip(p.committed_offset)
+                    .map(|(high, offset)| high.saturating_sub(offset).max(0) as u64)
             );
         }
+    }
+    if let Some(known) = known {
+        let group = snapshot
+            .consumer_groups
+            .iter()
+            .find(|row| row.group_id == known.group_id && row.topic == known.topic)
+            .expect("configured group/topic must appear in snapshot");
+        let partition = group
+            .partitions
+            .iter()
+            .find(|row| row.partition == known.partition)
+            .expect("configured partition must appear in snapshot");
+        assert_eq!(
+            partition.committed_offset, known.committed,
+            "broker committed offset must match configured independent expectation"
+        );
     }
     assert!(
         snapshot.partial_failures.is_empty(),
