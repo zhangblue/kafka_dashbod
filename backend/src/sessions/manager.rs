@@ -16,7 +16,7 @@ use rdkafka::{
     error::KafkaError,
 };
 use tokio::{
-    sync::{Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard, oneshot, watch},
     time::Instant,
 };
 
@@ -128,7 +128,46 @@ struct LeasedEntry<C> {
 
 struct Sessions<C> {
     entries: HashMap<String, LeasedEntry<C>>,
+    operations: HashMap<String, Operation>,
     shutting_down: bool,
+}
+
+/// A completion record lives in the manager until its owned task has released resources.
+struct Operation {
+    cluster_id: String,
+    closing_session_id: Option<String>,
+    expired: bool,
+    cancelled: Arc<AtomicBool>,
+    completion: watch::Receiver<bool>,
+}
+
+impl<C> Sessions<C> {
+    fn register_operation(
+        &mut self,
+        cluster_id: String,
+        closing_session_id: Option<String>,
+        expired: bool,
+    ) -> (
+        String,
+        watch::Sender<bool>,
+        watch::Receiver<bool>,
+        Arc<AtomicBool>,
+    ) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (done, completion) = watch::channel(false);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.operations.insert(
+            id.clone(),
+            Operation {
+                cluster_id,
+                closing_session_id,
+                expired,
+                cancelled: cancelled.clone(),
+                completion: completion.clone(),
+            },
+        );
+        (id, done, completion, cancelled)
+    }
 }
 
 pub struct SessionManager<F: SessionClientFactory = KafkaSessionClientFactory> {
@@ -136,8 +175,6 @@ pub struct SessionManager<F: SessionClientFactory = KafkaSessionClientFactory> {
     lease: Duration,
     state: Arc<Mutex<Sessions<F::Client>>>,
     cluster_gate: Arc<Mutex<()>>,
-    cleanup_gate: Arc<Mutex<()>>,
-    creation_gate: Arc<Mutex<()>>,
 }
 
 impl<F: SessionClientFactory> Clone for SessionManager<F> {
@@ -147,8 +184,6 @@ impl<F: SessionClientFactory> Clone for SessionManager<F> {
             lease: self.lease,
             state: self.state.clone(),
             cluster_gate: self.cluster_gate.clone(),
-            cleanup_gate: self.cleanup_gate.clone(),
-            creation_gate: self.creation_gate.clone(),
         }
     }
 }
@@ -157,11 +192,10 @@ impl<F: SessionClientFactory> SessionManager<F> {
     pub fn new(lease: Duration, factory: F) -> Self {
         let state = Arc::new(Mutex::new(Sessions {
             entries: HashMap::<String, LeasedEntry<F::Client>>::new(),
+            operations: HashMap::new(),
             shutting_down: false,
         }));
         let weak = Arc::downgrade(&state);
-        let cleanup_gate = Arc::new(Mutex::new(()));
-        let reaper_gate = cleanup_gate.clone();
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tokio::spawn(async move {
@@ -173,7 +207,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
                 if state.lock().await.shutting_down {
                     break;
                 }
-                Self::reap(&state, lease, &reaper_gate).await;
+                Self::reap(&state, lease).await;
             }
         });
         Self {
@@ -181,8 +215,6 @@ impl<F: SessionClientFactory> SessionManager<F> {
             lease,
             state,
             cluster_gate: Arc::new(Mutex::new(())),
-            cleanup_gate,
-            creation_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -200,32 +232,65 @@ impl<F: SessionClientFactory> SessionManager<F> {
         cluster_id: impl Into<String>,
         config: DecryptedClusterConfig,
     ) -> Result<String, SessionError> {
-        let _creation = self.creation_gate.lock().await;
-        if self.state.lock().await.shutting_down {
-            return Err(SessionError::ShuttingDown);
-        }
-        let client = self.factory.create(config).await?;
-        let session = Arc::new(SessionEntry {
-            cluster_id: cluster_id.into(),
-            clients: Mutex::new(Some(client)),
-            collection_lock: Mutex::new(()),
-            closed: AtomicBool::new(false),
-        });
+        let cluster_id = cluster_id.into();
         let mut state = self.state.lock().await;
         if state.shutting_down {
-            drop(state);
-            session.close().await;
             return Err(SessionError::ShuttingDown);
         }
-        let id = uuid::Uuid::new_v4().to_string();
-        state.entries.insert(
-            id.clone(),
-            LeasedEntry {
-                session,
-                renewed_at: Instant::now(),
-            },
-        );
-        Ok(id)
+        let (operation_id, done, _, cancelled) =
+            state.register_operation(cluster_id.clone(), None, false);
+        let (reply, result) = oneshot::channel();
+        let shared = self.state.clone();
+        let factory = self.factory.clone();
+        // Registration and spawn happen under the same lock, with no cancellation point.
+        // Cancelling this request drops only the reply receiver, never the owning task.
+        tokio::spawn(async move {
+            match factory.create(config).await {
+                Ok(client) => {
+                    let session = Arc::new(SessionEntry {
+                        cluster_id,
+                        clients: Mutex::new(Some(client)),
+                        collection_lock: Mutex::new(()),
+                        closed: AtomicBool::new(false),
+                    });
+                    let mut state = shared.lock().await;
+                    if state.shutting_down || cancelled.load(Ordering::Acquire) || reply.is_closed()
+                    {
+                        let error = if state.shutting_down {
+                            SessionError::ShuttingDown
+                        } else {
+                            SessionError::Expired
+                        };
+                        drop(state);
+                        session.close().await;
+                        let _ = reply.send(Err(error));
+                    } else {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        state.entries.insert(
+                            id.clone(),
+                            LeasedEntry {
+                                session: session.clone(),
+                                renewed_at: Instant::now(),
+                            },
+                        );
+                        if reply.send(Ok(id.clone())).is_err() {
+                            state.entries.remove(&id);
+                            drop(state);
+                            session.close().await;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            }
+            shared.lock().await.operations.remove(&operation_id);
+            done.send_replace(true);
+        });
+        drop(state);
+        result
+            .await
+            .map_err(|_| SessionError::Connection(ConnectionError::Timeout))?
     }
 
     pub async fn get(&self, id: &str) -> Result<Arc<SessionEntry<F::Client>>, SessionError> {
@@ -244,14 +309,22 @@ impl<F: SessionClientFactory> SessionManager<F> {
         id: &str,
         renew: bool,
     ) -> Result<Arc<SessionEntry<F::Client>>, SessionError> {
-        let _cleanup = self.cleanup_gate.lock().await;
         let mut state = self.state.lock().await;
-        let entry = state.entries.get_mut(id).ok_or(SessionError::Expired)?;
+        let Some(entry) = state.entries.get_mut(id) else {
+            let closing = Self::pending_close(&state, id);
+            drop(state);
+            if let Some(completion) = closing {
+                Self::wait(completion).await;
+            }
+            return Err(SessionError::Expired);
+        };
         let now = Instant::now();
         if now.duration_since(entry.renewed_at) >= self.lease {
             let expired = state.entries.remove(id).expect("entry exists").session;
+            let completion =
+                Self::start_cleanup(&self.state, &mut state, id.to_owned(), expired, true);
             drop(state);
-            expired.close().await;
+            Self::wait(completion).await;
             return Err(SessionError::Expired);
         }
         if renew {
@@ -261,59 +334,83 @@ impl<F: SessionClientFactory> SessionManager<F> {
     }
 
     pub async fn close(&self, id: &str) -> Result<(), SessionError> {
-        let _cleanup = self.cleanup_gate.lock().await;
-        let entry = self
-            .state
-            .lock()
-            .await
-            .entries
-            .remove(id)
-            .ok_or(SessionError::Expired)?;
-        entry.session.close().await;
+        let mut state = self.state.lock().await;
+        let completion = if let Some(entry) = state.entries.remove(id) {
+            Self::start_cleanup(&self.state, &mut state, id.to_owned(), entry.session, false)
+        } else {
+            Self::pending_close(&state, id).ok_or(SessionError::Expired)?
+        };
+        drop(state);
+        Self::wait(completion).await;
         Ok(())
     }
 
     pub async fn close_for_cluster(&self, cluster_id: &str) {
-        let _cleanup = self.cleanup_gate.lock().await;
-        let entries = {
+        let completions = {
             let mut state = self.state.lock().await;
+            let mut completions: Vec<_> = state
+                .operations
+                .values()
+                .filter(|operation| operation.cluster_id == cluster_id)
+                .map(|operation| {
+                    operation.cancelled.store(true, Ordering::Release);
+                    operation.completion.clone()
+                })
+                .collect();
             let ids: Vec<_> = state
                 .entries
                 .iter()
                 .filter(|(_, entry)| entry.session.cluster_id == cluster_id)
                 .map(|(id, _)| id.clone())
                 .collect();
-            ids.into_iter()
-                .filter_map(|id| state.entries.remove(&id))
-                .collect::<Vec<_>>()
+            for id in ids {
+                let entry = state.entries.remove(&id).expect("entry exists");
+                completions.push(Self::start_cleanup(
+                    &self.state,
+                    &mut state,
+                    id,
+                    entry.session,
+                    false,
+                ));
+            }
+            completions
         };
-        for entry in entries {
-            entry.session.close().await;
+        for completion in completions {
+            Self::wait(completion).await;
         }
     }
 
     pub async fn close_all(&self) {
-        self.state.lock().await.shutting_down = true;
-        let _creation = self.creation_gate.lock().await;
-        let _cleanup = self.cleanup_gate.lock().await;
-        let entries = {
+        let completions = {
             let mut state = self.state.lock().await;
             state.shutting_down = true;
-            std::mem::take(&mut state.entries)
+            for (id, entry) in std::mem::take(&mut state.entries) {
+                Self::start_cleanup(&self.state, &mut state, id, entry.session, false);
+            }
+            state
+                .operations
+                .values()
+                .map(|operation| operation.completion.clone())
+                .collect::<Vec<_>>()
         };
-        for entry in entries.into_values() {
-            entry.session.close().await;
+        for completion in completions {
+            Self::wait(completion).await;
         }
     }
 
     pub async fn reap_expired(&self) {
-        Self::reap(&self.state, self.lease, &self.cleanup_gate).await;
+        Self::reap(&self.state, self.lease).await;
     }
 
-    async fn reap(state: &Mutex<Sessions<F::Client>>, lease: Duration, cleanup_gate: &Mutex<()>) {
-        let _cleanup = cleanup_gate.lock().await;
-        let expired = {
-            let mut state = state.lock().await;
+    async fn reap(shared: &Arc<Mutex<Sessions<F::Client>>>, lease: Duration) {
+        let completions = {
+            let mut state = shared.lock().await;
+            let mut completions: Vec<_> = state
+                .operations
+                .values()
+                .filter(|operation| operation.expired)
+                .map(|operation| operation.completion.clone())
+                .collect();
             let now = Instant::now();
             let ids: Vec<_> = state
                 .entries
@@ -321,13 +418,54 @@ impl<F: SessionClientFactory> SessionManager<F> {
                 .filter(|(_, entry)| now.duration_since(entry.renewed_at) >= lease)
                 .map(|(id, _)| id.clone())
                 .collect();
-            ids.into_iter()
-                .filter_map(|id| state.entries.remove(&id))
-                .collect::<Vec<_>>()
+            for id in ids {
+                let entry = state.entries.remove(&id).expect("entry exists");
+                completions.push(Self::start_cleanup(
+                    shared,
+                    &mut state,
+                    id,
+                    entry.session,
+                    true,
+                ));
+            }
+            completions
         };
-        for entry in expired {
-            entry.session.close().await;
+        for completion in completions {
+            Self::wait(completion).await;
         }
+    }
+
+    fn pending_close(state: &Sessions<F::Client>, id: &str) -> Option<watch::Receiver<bool>> {
+        state
+            .operations
+            .values()
+            .find(|operation| operation.closing_session_id.as_deref() == Some(id))
+            .map(|operation| operation.completion.clone())
+    }
+
+    fn start_cleanup(
+        shared: &Arc<Mutex<Sessions<F::Client>>>,
+        state: &mut Sessions<F::Client>,
+        id: String,
+        entry: Arc<SessionEntry<F::Client>>,
+        expired: bool,
+    ) -> watch::Receiver<bool> {
+        entry.closed.store(true, Ordering::Release);
+        let (operation_id, done, completion, _) =
+            state.register_operation(entry.cluster_id.clone(), Some(id), expired);
+        let shared = shared.clone();
+        // The operation stays tracked while waiting for a collector's client lock and
+        // while native destruction runs. Request cancellation cannot abort this task.
+        tokio::spawn(async move {
+            entry.close().await;
+            shared.lock().await.operations.remove(&operation_id);
+            done.send_replace(true);
+        });
+        completion
+    }
+
+    async fn wait(mut completion: watch::Receiver<bool>) {
+        let _ = completion.wait_for(|done| *done).await;
     }
 }
 
@@ -338,6 +476,16 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    async fn poll_once<F: Future>(mut future: std::pin::Pin<&mut F>) -> Option<F::Output> {
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(match future.as_mut().poll(cx) {
+                std::task::Poll::Ready(output) => Some(output),
+                std::task::Poll::Pending => None,
+            })
+        })
+        .await
+    }
 
     #[derive(Clone)]
     struct FakeSessionClientFactory(Arc<AtomicUsize>, Arc<tokio::sync::Notify>);
@@ -550,5 +698,197 @@ mod tests {
         ));
         shutdown.await.unwrap();
         assert_eq!(factory.drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Clone)]
+    struct BlockingFactory {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
+        drops: Arc<AtomicUsize>,
+        dropped: Arc<tokio::sync::Notify>,
+    }
+
+    impl SessionClientFactory for BlockingFactory {
+        type Client = FakeClient;
+        async fn create(&self, _: DecryptedClusterConfig) -> Result<FakeClient, SessionError> {
+            let release = self.release.lock().unwrap().take().unwrap();
+            let factory = self.clone();
+            tokio::task::spawn_blocking(move || {
+                let client = FakeClient(factory.drops.clone(), factory.dropped.clone());
+                factory.started.notify_one();
+                release.recv().unwrap();
+                Ok(client)
+            })
+            .await
+            .unwrap()
+        }
+    }
+
+    // Aborting a request must not detach its still-running native creation from shutdown.
+    #[tokio::test]
+    async fn cancelled_creation_remains_tracked_until_native_creation_and_drop_finish() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let factory = BlockingFactory {
+            started: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(std::sync::Mutex::new(Some(release_rx))),
+            drops: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(tokio::sync::Notify::new()),
+        };
+        let manager = SessionManager::new(LEASE_DURATION, factory.clone());
+        let creating = tokio::spawn({
+            let manager = manager.clone();
+            async move {
+                manager
+                    .create("cluster-a", DecryptedClusterConfig::plaintext("kafka:9092"))
+                    .await
+            }
+        });
+        factory.started.notified().await;
+        creating.abort();
+        assert!(creating.await.unwrap_err().is_cancelled());
+        let mut shutdown = Box::pin(manager.close_all());
+        let returned_early = poll_once(shutdown.as_mut()).await.is_some();
+        release_tx.send(()).unwrap();
+        factory.dropped.notified().await;
+        if !returned_early {
+            shutdown.await;
+        }
+        assert!(
+            !returned_early,
+            "shutdown lost a cancelled creation's blocking task"
+        );
+        assert_eq!(factory.drops.load(Ordering::SeqCst), 1);
+    }
+
+    // Cluster deletion must also drain creation whose API request released its cluster gate.
+    #[tokio::test]
+    async fn cluster_close_drains_pending_creation_with_live_or_cancelled_caller() {
+        for cancel_caller in [false, true] {
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let factory = BlockingFactory {
+                started: Arc::new(tokio::sync::Notify::new()),
+                release: Arc::new(std::sync::Mutex::new(Some(release_rx))),
+                drops: Arc::new(AtomicUsize::new(0)),
+                dropped: Arc::new(tokio::sync::Notify::new()),
+            };
+            let manager = SessionManager::new(LEASE_DURATION, factory.clone());
+            let creating = tokio::spawn({
+                let manager = manager.clone();
+                async move {
+                    manager
+                        .create("cluster-a", DecryptedClusterConfig::plaintext("kafka:9092"))
+                        .await
+                }
+            });
+            factory.started.notified().await;
+            if cancel_caller {
+                creating.abort();
+            }
+            let mut closing = Box::pin(manager.close_for_cluster("cluster-a"));
+            let returned_early = poll_once(closing.as_mut()).await.is_some();
+            release_tx.send(()).unwrap();
+            if !returned_early {
+                closing.await;
+            }
+            assert!(!returned_early, "cluster close lost an in-flight creation");
+            if cancel_caller {
+                assert!(creating.await.unwrap_err().is_cancelled());
+            } else {
+                assert!(matches!(
+                    creating.await.unwrap(),
+                    Err(SessionError::Expired)
+                ));
+            }
+            assert_eq!(factory.drops.load(Ordering::SeqCst), 1);
+            assert!(manager.state.lock().await.entries.is_empty());
+        }
+    }
+
+    async fn assert_cancelled_close_remains_tracked(mode: u8) {
+        let (manager, drops) = manager();
+        let id = manager
+            .create("cluster-a", DecryptedClusterConfig::plaintext("kafka:9092"))
+            .await
+            .unwrap();
+        let held = manager.get(&id).await.unwrap();
+        let client_guard = held.clients.lock().await;
+        let closing = tokio::spawn({
+            let manager = manager.clone();
+            async move {
+                match mode {
+                    0 => {
+                        manager.close(&id).await.unwrap();
+                    }
+                    1 => manager.close_for_cluster("cluster-a").await,
+                    _ => manager.close_all().await,
+                }
+            }
+        });
+        while !held.closed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        closing.abort();
+        assert!(closing.await.unwrap_err().is_cancelled());
+        let mut shutdown = Box::pin(manager.close_all());
+        let returned_early = poll_once(shutdown.as_mut()).await.is_some();
+        drop(client_guard);
+        if !returned_early {
+            shutdown.await;
+        }
+        assert!(
+            !returned_early,
+            "cancelled close lost a client still held by an old Arc"
+        );
+        assert!(held.clients.lock().await.is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_explicit_close_remains_tracked() {
+        assert_cancelled_close_remains_tracked(0).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_cluster_close_remains_tracked() {
+        assert_cancelled_close_remains_tracked(1).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_shutdown_remains_tracked() {
+        assert_cancelled_close_remains_tracked(2).await;
+    }
+
+    // Closing one session must not consume another session's lease while waiting on native work.
+    #[tokio::test]
+    async fn slow_close_does_not_block_an_unrelated_sessions_renewal() {
+        let (manager, _) = manager();
+        let first = manager
+            .create("cluster-a", DecryptedClusterConfig::plaintext("kafka:9092"))
+            .await
+            .unwrap();
+        let second = manager
+            .create("cluster-b", DecryptedClusterConfig::plaintext("kafka:9092"))
+            .await
+            .unwrap();
+        let held = manager.get(&first).await.unwrap();
+        let guard = held.clients.lock().await;
+        let closing = tokio::spawn({
+            let manager = manager.clone();
+            async move {
+                manager.close(&first).await.unwrap();
+            }
+        });
+        while !held.closed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        let mut renewing = Box::pin(manager.get_and_renew(&second));
+        let renewal = poll_once(renewing.as_mut()).await;
+        drop(guard);
+        closing.await.unwrap();
+        assert!(
+            renewal.is_some(),
+            "unrelated renewal waited on another session's cleanup"
+        );
+        assert!(renewal.unwrap().is_ok());
     }
 }
