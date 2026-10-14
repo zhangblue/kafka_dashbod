@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { Link } from 'react-router'
 import type { ClusterSnapshot } from '../../api/types'
 import { StatusBadge } from '../../components/StatusBadge'
@@ -8,6 +8,7 @@ import { LagLineChart } from '../charts/LagLineChart'
 import { useConsumerGroupLag } from '../consumer-groups/useConsumerGroupLag'
 import { rowHealth } from '../consumer-groups/status'
 import { useDashboard } from '../dashboard/useDashboard'
+import { useSnapshotStale } from '../dashboard/useSnapshotStale'
 
 function totalLag(snapshot: ClusterSnapshot) {
   const known = snapshot.consumerGroups.reduce((sum, row) => sum + row.lag, 0)
@@ -21,11 +22,7 @@ function totalLag(snapshot: ClusterSnapshot) {
 export function OverviewPage() {
   const { cluster, monitor, refreshSeconds = 5 } = useDashboard()
   const lag = useConsumerGroupLag()
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(timer)
-  }, [])
+  const stale = useSnapshotStale(monitor, refreshSeconds)
   const samples = useMemo(() => monitor.history.map(sample => {
     const value = totalLag(sample.snapshot)
     return { at: sample.at, lag: value.incomplete ? null : value.known }
@@ -38,7 +35,6 @@ export function OverviewPage() {
       ? <div role="status" aria-label="正在加载概览" className="overview-skeleton"><p>正在加载概览…</p><div /><div /><div /><div /></div>
       : <p>尚未采集概览数据。</p>}
   </section>
-  const stale = monitor.status === 'error' || now - Date.parse(snapshot.collectedAt) > refreshSeconds * 2000
   const total = totalLag(snapshot)
   const abnormal = lag.rows.filter(row => row.state.status !== 'normal')
     .sort((a, b) => (b.displayRow ?? b.row).lag - (a.displayRow ?? a.row).lag || a.key.localeCompare(b.key))

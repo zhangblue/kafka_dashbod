@@ -1,10 +1,11 @@
-import { act, renderHook } from '@testing-library/react'
+import { act, cleanup, renderHook } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrictMode, useState, type ReactNode } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ApiError, sessionsApi } from '../../api/client'
 import { snapshotFixture } from '../../test/handlers'
 import { useMonitorSession } from './useMonitorSession'
+import { sessionTransition } from './sessionTransitions'
 
 let sequence: number
 let created: string[]
@@ -37,7 +38,15 @@ beforeEach(() => {
     return { ...snapshotFixture, collectedAt: new Date(clock++ * 1000).toISOString() }
   })
 })
-afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
+afterEach(async () => {
+  // Vitest runs this file's teardown before setup.ts's automatic cleanup.
+  // Release hooks while the API fakes still own their resources, then await the
+  // page-wide queue before restoring fetch clients or starting the next test.
+  cleanup()
+  await sessionTransition(async () => {})
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+})
 
 it.each([3, 5, 10] as const)('collects at %ss without clearing history when cadence changes', async seconds => {
   const { result, rerender, unmount } = renderHook(({ interval }) => useMonitorSession('a', interval), { wrapper: Wrapper, initialProps: { interval: seconds } })
@@ -119,6 +128,53 @@ it('releases old sessions and clears current cluster state when switching', asyn
   expect(created).toEqual(['a-1', 'b-2'])
   unmount()
   expect(closed).toContain('b-2')
+})
+
+it('waits for the previous mount DELETE to finish before creating another cluster session', async () => {
+  let finishClose!: () => void
+  vi.mocked(sessionsApi.close).mockImplementation(async id => {
+    closed.push(id)
+    await new Promise<void>(resolve => { finishClose = resolve })
+  })
+  const first = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
+  await flush()
+  first.unmount()
+  const second = renderHook(() => useMonitorSession('b', 3), { wrapper: Wrapper })
+  try {
+    await flush()
+    expect(closed).toEqual(['a-1'])
+    expect(created).toEqual(['a-1'])
+  } finally {
+    vi.mocked(sessionsApi.close).mockImplementation(async id => { closed.push(id) })
+    await act(async () => finishClose())
+  }
+  await flush()
+  expect(created).toEqual(['a-1', 'b-2'])
+  expect(second.result.current.status).toBe('connected')
+  second.unmount()
+})
+
+it('waits for an abandoned in-flight creation and its DELETE across mounts', async () => {
+  let finishCreate!: (value: { sessionId: string; leaseSeconds: number }) => void
+  let finishClose!: () => void
+  vi.mocked(sessionsApi.create).mockImplementationOnce(() => new Promise(resolve => { finishCreate = resolve }))
+  vi.mocked(sessionsApi.close).mockImplementationOnce(async id => {
+    closed.push(id)
+    await new Promise<void>(resolve => { finishClose = resolve })
+  })
+  const first = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
+  await flush(); first.unmount()
+  const second = renderHook(() => useMonitorSession('b', 3), { wrapper: Wrapper })
+  await flush()
+  try { expect(created).toEqual([]) } finally {
+    await act(async () => finishCreate({ sessionId: 'abandoned', leaseSeconds: 30 }))
+    await flush()
+    await act(async () => finishClose())
+  }
+  await flush()
+  expect(created).toEqual(['b-1'])
+  expect(closed).toContain('abandoned')
+  second.unmount()
 })
 
 it('does not overlap slow snapshots with polling or manual refresh', async () => {

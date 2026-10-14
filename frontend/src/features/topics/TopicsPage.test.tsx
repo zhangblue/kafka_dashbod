@@ -1,11 +1,12 @@
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router'
-import { expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import type { ClusterSnapshot } from '../../api/types'
 import { clusterFixture, snapshotFixture } from '../../test/handlers'
 import type { DashboardContext } from '../dashboard/useDashboard'
 import { TopicsPage } from './TopicsPage'
+afterEach(() => vi.useRealTimers())
 
 const snapshot: ClusterSnapshot = { ...snapshotFixture, topics: [
   { topic: 'order-events', low: 10, latestMessageOffset: 105101, retainedOffsetSpan: 105097, incomplete: false,
@@ -27,6 +28,15 @@ function show(value: ClusterSnapshot | null = snapshot) {
     <Route index element={<TopicsPage />} />
   </Route></Routes></MemoryRouter>)
 }
+
+it('marks the whole Topics page stale after two refresh intervals', () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+  vi.setSystemTime(new Date(snapshot.collectedAt))
+  show()
+  expect(screen.queryByLabelText('Topics 数据已陈旧')).not.toBeInTheDocument()
+  act(() => vi.advanceTimersByTime(11000))
+  expect(screen.getByLabelText('Topics 数据已陈旧')).toBeInTheDocument()
+})
 
 // Catches incorrect aggregation across partition offset spaces and lost search filtering.
 it('shows topic overview calculations and filters by topic name', async () => {

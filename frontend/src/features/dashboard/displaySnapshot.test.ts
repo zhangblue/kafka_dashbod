@@ -105,3 +105,28 @@ it('retains whole-group committed failures using the collector group resource fo
   expect(Object.keys(display.staleResources)).toHaveLength(3)
   expect(raw.consumerGroups[0].lag).toBe(0)
 })
+
+it.each(['worker', 'worker/orders:0'])('retains previously associated rows missing after committed failure %s without filling raw history', resource => {
+  const raw: ClusterSnapshot = { ...complete, collectedAt: '2026-10-15T00:00:05Z', consumerGroups: [],
+    partialFailures: [failure('committed', resource)] }
+  const display = retainDisplaySnapshot(raw, retainDisplaySnapshot(complete))
+  expect(display.snapshot.consumerGroups).toHaveLength(1)
+  expect(display.snapshot.consumerGroups[0].lag).toBe(100)
+  expect(display.staleResources[groupDisplayKey('worker', 'orders')]).toBe(complete.collectedAt)
+  expect(display.staleResources[groupPartitionDisplayKey('worker', 'orders', 0)]).toBe(complete.collectedAt)
+  expect(display.staleResources[groupPartitionDisplayKey('worker', 'orders', 1)]).toBe(complete.collectedAt)
+  expect(raw.consumerGroups).toEqual([])
+  const again = retainDisplaySnapshot({ ...raw, collectedAt: '2026-10-15T00:00:10Z' }, display)
+  expect(again.staleResources[groupDisplayKey('worker', 'orders')]).toBe(complete.collectedAt)
+  expect(retainDisplaySnapshot(complete, display).staleResources).toEqual({})
+})
+
+it.each(['group', 'topic', 'unrelated failure', 'no failure'])('does not revive an association after %s confirms it is absent or healthy', reason => {
+  const raw: ClusterSnapshot = { ...complete, consumerGroups: [],
+    consumerGroupIds: reason === 'group' ? [] : complete.consumerGroupIds,
+    topics: reason === 'topic' ? [] : complete.topics,
+    partialFailures: reason === 'no failure' ? [] : [failure('committed', reason === 'unrelated failure' ? 'another-worker' : 'worker')] }
+  const display = retainDisplaySnapshot(raw, retainDisplaySnapshot(complete))
+  expect(display.snapshot.consumerGroups).toEqual([])
+  expect(display.staleResources[groupDisplayKey('worker', 'orders')]).toBeUndefined()
+})

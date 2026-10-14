@@ -53,22 +53,26 @@ export function retainDisplaySnapshot(current: ClusterSnapshot, previous?: Displ
   const consumerGroups = merge(current.consumerGroups, before.consumerGroups,
     row => groupDisplayKey(row.groupId, row.topic), row => {
       const groupUnknown = groupFailed(row.groupId), topicUnknown = topicFailed(row.topic)
+      const associationUnknown = fails('committed', [row.groupId,
+        ...row.partitions.map(partition => `${row.groupId}/${row.topic}:${partition.partition}`)])
       // Failure in one discovery dimension cannot revive a resource deleted in the other.
-      return (groupUnknown || topicUnknown)
+      // A failed committed read may also hide a previously known inactive-group association.
+      return (groupUnknown || topicUnknown || associationUnknown)
         && (currentGroups.has(row.groupId) || groupUnknown)
         && (currentTopics.has(row.topic) || topicUnknown)
     }).map(row => {
     const old = before.consumerGroups.find(value => value.groupId === row.groupId && value.topic === row.topic)
     if (!old) return row
+    const rowMissing = !current.consumerGroups.some(value => value.groupId === row.groupId && value.topic === row.topic)
     const partitions = merge(row.partitions, old.partitions, partition => partition.partition,
       partition => committedFailed(row.groupId, row.topic, partition.partition)).map(partition => {
       const prior = old.partitions.find(value => value.partition === partition.partition)
-      if (!prior || !committedFailed(row.groupId, row.topic, partition.partition)) return partition
+      if (!prior || (!rowMissing && !committedFailed(row.groupId, row.topic, partition.partition))) return partition
       retain(groupPartitionDisplayKey(row.groupId, row.topic, partition.partition))
       return prior
     })
     parentTime(groupDisplayKey(row.groupId, row.topic), partitions.map(partition => groupPartitionDisplayKey(row.groupId, row.topic, partition.partition)))
-    if ((groupFailed(row.groupId) || topicFailed(row.topic)) && !partitions.length) retain(groupDisplayKey(row.groupId, row.topic))
+    if ((rowMissing || groupFailed(row.groupId) || topicFailed(row.topic)) && !partitions.length) retain(groupDisplayKey(row.groupId, row.topic))
     return { ...row, partitions, lag: partitions.reduce((sum, partition) => sum + (partition.lag ?? 0), 0) }
   })
   const consumerGroupIds = [...new Set([...current.consumerGroupIds, ...before.consumerGroupIds.filter(group => groupFailed(group))])]

@@ -39,6 +39,8 @@ export const clustersApi = {
   update: (id: string, value: ClusterInput) => apiFetch<ClusterDto>(clusterPath(id), { method: 'PUT', body: JSON.stringify(value) }),
   delete: (id: string) => apiFetch<void>(clusterPath(id), { method: 'DELETE' }),
   test: (id: string, signal?: AbortSignal) => apiFetch<ConnectionTestResult>(`${clusterPath(id)}/test`, { method: 'POST', signal }),
+  testDraft: (value: ClusterInput, id?: string) => apiFetch<ConnectionTestResult>(id ? `${clusterPath(id)}/test` : '/api/clusters/test',
+    { method: 'POST', body: JSON.stringify(value) }),
 }
 export const lagRulesApi = {
   get: (id: string, signal?: AbortSignal) => apiFetch<LagRuleSet>(`${clusterPath(id)}/lag-rules`, { signal }),
@@ -47,5 +49,5 @@ export const lagRulesApi = {
 export const sessionsApi = {
   create: (clusterId: string, signal?: AbortSignal) => apiFetch<CreatedSession>(`${clusterPath(clusterId)}/sessions`, { method: 'POST', signal }),
   snapshot: (id: string, signal?: AbortSignal) => apiFetch<ClusterSnapshot>(`${sessionPath(id)}/snapshot`, { signal }),
-  close: (id: string) => apiFetch<void>(sessionPath(id), { method: 'DELETE' }),
+  close: (id: string) => apiFetch<void>(sessionPath(id), { method: 'DELETE', keepalive: true }),
 }

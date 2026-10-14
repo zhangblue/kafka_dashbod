@@ -24,10 +24,8 @@ export function resolveLagRule(rules: LagRuleSet, groupId: string, topic: string
 
 export const lagRowKey = (clusterId: string, groupId: string, topic: string) => JSON.stringify([clusterId, groupId, topic])
 
-export function rowHealth(row: ConsumerGroupTopicSnapshot, snapshot: ClusterSnapshot) {
-  const uncommittedCount = row.partitions.filter(p => p.committedOffset === null || p.committedOffset < 0).length
-  const unknownCount = row.partitions.filter(p => p.lag === null).length
-  const failed = snapshot.partialFailures.some(failure => {
+export function hasCollectionFailure(row: ConsumerGroupTopicSnapshot, snapshot: ClusterSnapshot) {
+  return snapshot.partialFailures.some(failure => {
     const resource = failure.resource
     if (failure.scope === 'committed') return resource === row.groupId
       || row.partitions.some(p => resource === `${row.groupId}/${row.topic}:${p.partition}`)
@@ -37,8 +35,13 @@ export function rowHealth(row: ConsumerGroupTopicSnapshot, snapshot: ClusterSnap
     if (failure.scope === 'groups') return resource === snapshot.clusterId || resource === 'cluster' || resource === 'unknown' || resource === row.groupId
     return false
   })
+}
+
+export function rowHealth(row: ConsumerGroupTopicSnapshot, snapshot: ClusterSnapshot) {
+  const uncommittedCount = row.partitions.filter(p => p.committedOffset === null || p.committedOffset < 0).length
+  const unknownCount = row.partitions.filter(p => p.lag === null).length
   // Backend incomplete also covers uncommitted partitions. Only that fully explained case is not a collection error.
-  const collectionError = failed || snapshot.topics.some(topic => topic.topic === row.topic && topic.incomplete)
+  const collectionError = hasCollectionFailure(row, snapshot) || snapshot.topics.some(topic => topic.topic === row.topic && topic.incomplete)
     || row.partitions.some(p => p.high === null || (p.lag === null && p.committedOffset !== null && p.committedOffset >= 0))
     || row.unknownPartitionCount !== unknownCount
     || (row.incomplete && (!uncommittedCount || unknownCount !== uncommittedCount))

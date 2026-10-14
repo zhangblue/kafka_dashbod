@@ -48,7 +48,7 @@ it('opens the Consumer Groups route with real snapshot rows', async () => {
   vi.spyOn(sessionsApi, 'close').mockResolvedValue(undefined)
   render(<App />)
   expect(await screen.findByRole('table', { name: 'Consumer Groups 汇总' })).toBeInTheDocument()
-  expect(screen.getByText('audit-worker')).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: /audit-worker.*audit-log/ })).toBeInTheDocument()
 })
 
 // Catches lag state being owned by a route that unmounts while the monitoring session remains live.

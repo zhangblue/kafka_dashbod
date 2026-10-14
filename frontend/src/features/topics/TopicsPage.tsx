@@ -4,6 +4,7 @@ import { MetricHelp } from '../../components/MetricHelp'
 import { useDashboard } from '../dashboard/useDashboard'
 import { StaleNotice } from '../../components/StaleNotice'
 import { topicDisplayKey, topicPartitionDisplayKey } from '../dashboard/displaySnapshot'
+import { useSnapshotStale } from '../dashboard/useSnapshotStale'
 
 const format = (value: number | null) => value === null ? '—' : value.toLocaleString('en-US')
 const latest = (partition: PartitionWatermark) => partition.low === null || partition.high === null
@@ -35,7 +36,8 @@ function PartitionTable({ topic, staleResources }: { topic: TopicSnapshot; stale
 }
 
 export function TopicsPage() {
-  const { monitor } = useDashboard()
+  const { monitor, refreshSeconds } = useDashboard()
+  const stale = useSnapshotStale(monitor, refreshSeconds)
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const id = useId()
@@ -43,6 +45,7 @@ export function TopicsPage() {
   const topics = snapshot?.topics.filter(topic => topic.topic.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) ?? []
   return <section aria-label="Topics 内容">
     <h2>Topics</h2>
+    {stale && <p role="status" aria-label="Topics 数据已陈旧">数据已陈旧</p>}
     <label>搜索 Topic <input type="search" value={search} onChange={event => setSearch(event.target.value)} /></label>
     <p>Topic 汇总仅供概览，不同 Partition 的 Offset 不能视为统一序列；以展开后的 Partition 水位为准。</p>
     {!!snapshot?.partialFailures.length && <p role="status">部分数据采集失败；保留的上次采集值标为陈旧，其余未知值显示 —。</p>}

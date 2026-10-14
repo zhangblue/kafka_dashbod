@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, clustersApi, lagRulesApi, sessionsApi } from '../../api/client'
@@ -6,6 +6,7 @@ import type { ClusterDto, ClusterInput, ClusterSnapshot, LagRuleSet } from '../.
 import { ClusterForm, ApiErrorNotice } from './ClusterForm'
 import { LagRulesForm } from '../lag-rules/LagRulesForm'
 import { snapshotUnavailable } from '../lag-rules/snapshotAvailability'
+import { sessionTransition } from '../dashboard/sessionTransitions'
 
 function ConfigurationSession({ clusterId, onReconnect, children }: {
   clusterId: string
@@ -15,7 +16,29 @@ function ConfigurationSession({ clusterId, onReconnect, children }: {
   const [ownSnapshot, setOwnSnapshot] = useState<ClusterSnapshot | null>(null)
   const [connectionError, setConnectionError] = useState<unknown>(null)
   const [connecting, setConnecting] = useState(true)
+  const [visible, setVisible] = useState(() => document.visibilityState === 'visible')
+  const [pageActive, setPageActive] = useState(true)
+  const stopSession = useRef(() => {})
   useEffect(() => {
+    const pause = () => { setOwnSnapshot(null); setConnectionError(null); setConnecting(true) }
+    const visibility = () => {
+      const next = document.visibilityState === 'visible'
+      if (!next) pause()
+      setVisible(next)
+    }
+    const hide = () => { stopSession.current(); pause(); setPageActive(false) }
+    const show = () => setPageActive(true)
+    document.addEventListener('visibilitychange', visibility)
+    window.addEventListener('pagehide', hide)
+    window.addEventListener('pageshow', show)
+    return () => {
+      document.removeEventListener('visibilitychange', visibility)
+      window.removeEventListener('pagehide', hide)
+      window.removeEventListener('pageshow', show)
+    }
+  }, [])
+  useEffect(() => {
+    if (!visible || !pageActive) return
     let disposed = false
     let sessionId: string | undefined
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -24,14 +47,20 @@ function ConfigurationSession({ clusterId, onReconnect, children }: {
       if (sessionId) {
         const id = sessionId
         sessionId = undefined
-        void sessionsApi.close(id).catch(() => {})
+        void sessionTransition(() => sessionsApi.close(id)).catch(() => {})
       }
     }
     async function connect() {
       try {
         // Let creation finish so a session returned after unmount can be released.
-        const session = await sessionsApi.create(clusterId)
-        sessionId = session.sessionId
+        const session = await sessionTransition(async () => {
+          if (disposed) return null
+          const created = await sessionsApi.create(clusterId)
+          if (disposed) { await sessionsApi.close(created.sessionId).catch(() => {}); return null }
+          sessionId = created.sessionId
+          return created
+        })
+        if (!session) return
         if (disposed) { close(); return }
         const refresh = async () => {
           try {
@@ -54,14 +83,16 @@ function ConfigurationSession({ clusterId, onReconnect, children }: {
         if (!disposed) { setConnectionError(error); setConnecting(false) }
       }
     }
+    const stop = () => { disposed = true; controller.abort(); clearTimeout(timer); close() }
+    stopSession.current = stop
     void connect()
-    return () => { disposed = true; controller.abort(); clearTimeout(timer); close() }
-  }, [clusterId])
+    return () => { stop(); if (stopSession.current === stop) stopSession.current = () => {} }
+  }, [clusterId, visible, pageActive])
   return <>
     <ApiErrorNotice error={connectionError} />
-    {connecting && <p role="status">正在连接集群…</p>}
+    {(!visible || !pageActive) ? <p role="status">已暂停（页面不可见）</p> : connecting && <p role="status">正在连接集群…</p>}
     {(!ownSnapshot || snapshotUnavailable(ownSnapshot)) && <button type="button" disabled={connecting} onClick={onReconnect}>重新连接</button>}
-    {children(ownSnapshot)}
+    {children(visible && pageActive ? ownSnapshot : null)}
   </>
 }
 
@@ -144,6 +175,7 @@ export function ClustersPage({ snapshot = null }: ClustersPageProps) {
     </fieldset>)}
     {editing && <ClusterForm key={editing === 'new' ? 'new' : editing.id} cluster={editing === 'new' ? undefined : editing}
       saving={save.isPending} error={save.error} onCancel={() => setEditing(null)}
+      onTest={value => clustersApi.testDraft(value, editing === 'new' ? undefined : editing.id)}
       onSave={value => save.mutate({ id: editing === 'new' ? undefined : editing.id, value })} />}
     {rulesCluster && <RulesEditor key={rulesCluster.id} cluster={rulesCluster}
       snapshot={snapshot?.clusterId === rulesCluster.id ? snapshot : null} onClose={() => setRulesClusterId(null)} />}

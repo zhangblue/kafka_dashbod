@@ -7,14 +7,17 @@ import { ApiErrorNotice } from '../clusters/ClusterForm'
 import { ConsumerGroupLagProvider } from '../consumer-groups/ConsumerGroupLagProvider'
 import { useMonitorSession, type RefreshSeconds } from './useMonitorSession'
 import type { DashboardContext } from './useDashboard'
+import { useSnapshotStale } from './useSnapshotStale'
 
 export type { DashboardContext } from './useDashboard'
 
 function Monitor({ cluster, refreshSeconds }: { cluster: ClusterDto | null; refreshSeconds: RefreshSeconds }) {
   const monitor = useMonitorSession(cluster?.id ?? null, refreshSeconds)
+  const stale = useSnapshotStale(monitor, refreshSeconds)
   const labels = { idle: '未连接', connecting: '正在连接…', connected: '已连接', paused: '已暂停（页面不可见）', error: '连接已断开，显示最后一次快照' }
   return <>
     <p role="status">{labels[monitor.status]}</p>
+    {stale && <p role="status" aria-label="监控数据已陈旧">数据已陈旧</p>}
     <p>最后更新时间：{monitor.snapshot
       ? <time aria-label="最后更新时间" dateTime={monitor.snapshot.collectedAt}>{new Date(monitor.snapshot.collectedAt).toLocaleString()}</time>
       : '尚未采集'}</p>

@@ -5,6 +5,7 @@ import type { ClusterSnapshot, CreatedSession } from '../../api/types'
 import { appendSample, type SnapshotSample } from './history'
 import { snapshotUnavailable } from '../lag-rules/snapshotAvailability'
 import { retainDisplaySnapshot, type DisplaySnapshot, type MonitorDisplay } from './displaySnapshot'
+import { sessionTransition } from './sessionTransitions'
 
 export type RefreshSeconds = 3 | 5 | 10
 type Lease = CreatedSession & { expiresAt: number }
@@ -14,7 +15,7 @@ let nextRuntimeId = 0
 function closeLease(runtime: { lease: Lease | undefined }) {
   const lease = runtime.lease
   runtime.lease = undefined
-  if (lease) void sessionsApi.close(lease.sessionId).catch(() => {})
+  if (lease) void sessionTransition(() => sessionsApi.close(lease.sessionId)).catch(() => {})
 }
 
 function waitForCollection(milliseconds: number, signal: AbortSignal) {
@@ -74,8 +75,8 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
       void client.cancelQueries({ queryKey })
       const lease = runtime.lease
       runtime.lease = undefined
-      if (lease) void fetch(new URL(`/api/sessions/${encodeURIComponent(lease.sessionId)}`, window.location.origin),
-        { method: 'DELETE', keepalive: true }).catch(() => {})
+      if (lease) void sessionTransition(() => fetch(new URL(`/api/sessions/${encodeURIComponent(lease.sessionId)}`, window.location.origin),
+        { method: 'DELETE', keepalive: true })).catch(() => {})
     }
     const onPageShow = () => {
       runtime.pageHidden = false
@@ -108,10 +109,12 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
         if (runtime.lease && runtime.lease.expiresAt <= Date.now()) close()
         if (!runtime.lease) {
           setContinuity(value => value + 1)
-          runtime.creating ??= sessionsApi.create(runtime.clusterId!).then(session => {
+          runtime.creating ??= sessionTransition(async () => {
+            if (!runtime.active || !runtime.foreground) throw aborted()
+            const session = await sessionsApi.create(runtime.clusterId!)
             const lease = { ...session, expiresAt: Date.now() + session.leaseSeconds * 1000 }
             if (!runtime.active || !runtime.foreground) {
-              void sessionsApi.close(session.sessionId).catch(() => {})
+              await sessionsApi.close(session.sessionId).catch(() => {})
               throw aborted()
             }
             runtime.lease = lease

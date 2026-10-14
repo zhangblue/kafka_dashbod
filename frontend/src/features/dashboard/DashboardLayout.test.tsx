@@ -16,7 +16,7 @@ beforeEach(() => {
   vi.spyOn(sessionsApi, 'snapshot').mockImplementation(async id => ({ ...snapshotFixture, clusterId: id }))
   vi.spyOn(sessionsApi, 'close').mockImplementation(async id => { closed.push(id) })
 })
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
 function Consumer() {
   const { cluster, monitor } = useOutletContext<DashboardContext>()
   return <p>当前：{cluster?.name}，样本：{monitor.history.length}</p>
@@ -38,6 +38,19 @@ it('shows cluster, interval, last server collection time, manual refresh and chi
   expect(screen.getByText('当前：生产 Kafka，样本：1')).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: '手动刷新' }))
   await waitFor(() => expect(screen.getByRole('button', { name: '手动刷新' })).not.toBeDisabled())
+})
+
+it('exposes time-stale data in the common header while a slow sample is pending', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+  vi.setSystemTime(new Date(snapshotFixture.collectedAt))
+  renderLayout()
+  await screen.findByText('当前：生产 Kafka，样本：1')
+  vi.mocked(sessionsApi.snapshot).mockImplementation(() => new Promise(() => {}))
+  expect(screen.queryByLabelText('监控数据已陈旧')).not.toBeInTheDocument()
+  act(() => vi.advanceTimersByTime(11000))
+  expect(screen.getByLabelText('监控数据已陈旧')).toBeInTheDocument()
+  fireEvent.change(screen.getByRole('combobox', { name: '刷新频率' }), { target: { value: '10' } })
+  expect(screen.queryByLabelText('监控数据已陈旧')).not.toBeInTheDocument()
 })
 
 it('clears the previous cluster and releases its session on cluster change', async () => {

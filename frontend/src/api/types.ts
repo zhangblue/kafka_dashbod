@@ -10,7 +10,12 @@ export interface ClusterInput {
   caPem?: string | null
   clientCertificatePem?: string | null
   clientKeyPem?: string | null
+  clientKeyPassphrase?: string | null
   clearPassword?: boolean
+  clearCaPem?: boolean
+  clearClientCertificatePem?: boolean
+  clearClientKeyPem?: boolean
+  clearClientKeyPassphrase?: boolean
   connectionTimeoutMs: number
   defaultNormalLagMax: number
   defaultHighLagMin: number
@@ -24,6 +29,11 @@ export interface ClusterDto {
   securityProtocol: SecurityProtocol
   saslMechanism: string | null
   username: string | null
+  passwordConfigured?: boolean
+  caPemConfigured?: boolean
+  clientCertificatePemConfigured?: boolean
+  clientKeyPemConfigured?: boolean
+  clientKeyPassphraseConfigured?: boolean
   connectionTimeoutMs: number
   defaultNormalLagMax: number
   defaultHighLagMin: number

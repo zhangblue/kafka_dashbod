@@ -1,27 +1,34 @@
 import { Fragment, useId, useState } from 'react'
 import { useSearchParams } from 'react-router'
-import type { ConsumerGroupTopicSnapshot } from '../../api/types'
+import type { ClusterSnapshot, ConsumerGroupTopicSnapshot } from '../../api/types'
 import { MetricHelp } from '../../components/MetricHelp'
 import { StatusBadge } from '../../components/StatusBadge'
 import { StaleNotice } from '../../components/StaleNotice'
-import { groupPartitionDisplayKey } from '../dashboard/displaySnapshot'
+import { groupPartitionDisplayKey, topicPartitionDisplayKey } from '../dashboard/displaySnapshot'
 import { ApiErrorNotice } from '../clusters/ClusterForm'
 import { useDashboard } from '../dashboard/useDashboard'
 import type { MonitorSession } from '../dashboard/useMonitorSession'
 import { lagRowKey, statusLabels, type LagStatus } from './status'
 import { useConsumerGroupLag, type ConsumerGroupLagRow } from './useConsumerGroupLag'
+import { useSnapshotStale } from '../dashboard/useSnapshotStale'
+import { ConsumerGroupHistory } from './ConsumerGroupHistory'
 
 const format = (value: number | null) => value === null ? '—' : value.toLocaleString('en-US')
 
-function PartitionTable({ row, staleResources }: { row: ConsumerGroupTopicSnapshot; staleResources: Record<string, string> | undefined }) {
+function PartitionTable({ row, snapshot, staleResources }: { row: ConsumerGroupTopicSnapshot; snapshot: ClusterSnapshot; staleResources: Record<string, string> | undefined }) {
   return <table aria-label={`${row.groupId} / ${row.topic} Partitions`}><thead><tr>
     <th scope="col">Partition</th>
     <th scope="col">High watermark <MetricHelp label={`${row.groupId} / ${row.topic} High watermark`}>下一条消息将写入的位置，不是最后一条消息的 Offset。采集失败时显示 —。</MetricHelp></th>
+    <th scope="col">最大消息 Offset <MetricHelp label={`${row.groupId} / ${row.topic} 最大消息 Offset`}>非空分区为 high - 1；空分区或水位未知时显示 —。</MetricHelp></th>
     <th scope="col">Committed Offset <MetricHelp label={`${row.groupId} / ${row.topic} Committed Offset`}>消费组提交的下一条待消费位置；未提交或采集失败时显示 —，不能当作 0。</MetricHelp></th>
     <th scope="col">Lag <MetricHelp label={`${row.groupId} / ${row.topic} Partition Lag`}>max(high - committedOffset, 0)。任一位置未知时显示 —，并不计入已知 Lag。</MetricHelp></th>
-  </tr></thead><tbody>{row.partitions.map(partition => <tr key={partition.partition}>
-    <td>{partition.partition}</td><td>{format(partition.high)}</td><td>{format(partition.committedOffset === null || partition.committedOffset < 0 ? null : partition.committedOffset)}</td><td>{format(partition.lag)}{staleResources?.[groupPartitionDisplayKey(row.groupId, row.topic, partition.partition)] && <StaleNotice at={staleResources[groupPartitionDisplayKey(row.groupId, row.topic, partition.partition)]} />}</td>
-  </tr>)}</tbody></table>
+  </tr></thead><tbody>{row.partitions.map(partition => {
+    const watermark = snapshot.topics.find(topic => topic.topic === row.topic)?.partitions.find(item => item.partition === partition.partition)
+    const max = watermark?.latestMessageOffset ?? null
+    const watermarkStaleAt = staleResources?.[topicPartitionDisplayKey(row.topic, partition.partition)]
+    return <tr key={partition.partition}>
+    <td>{partition.partition}</td><td>{format(partition.high)}</td><td>{format(max)}{watermarkStaleAt && <StaleNotice at={watermarkStaleAt} />}</td><td>{format(partition.committedOffset === null || partition.committedOffset < 0 ? null : partition.committedOffset)}</td><td>{format(partition.lag)}{staleResources?.[groupPartitionDisplayKey(row.groupId, row.topic, partition.partition)] && <StaleNotice at={staleResources[groupPartitionDisplayKey(row.groupId, row.topic, partition.partition)]} />}</td>
+  </tr>})}</tbody></table>
 }
 
 function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId: string; monitor: MonitorSession; evaluatedRows: ConsumerGroupLagRow[] }) {
@@ -64,7 +71,7 @@ function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId:
           <td>{health.validCount}</td><td>{health.uncommittedCount}</td>
           <td>{format(displayRow.lag)}{row.unknownPartitionCount > 0 ? ` + ${row.unknownPartitionCount} 未知` : ''}{health.collectionError ? '（不完整）' : ''}</td>
           <td>{trend ? <span aria-label={`Lag ${trend === 'up' ? '上升' : trend === 'down' ? '下降' : '持平'}`}>{trend === 'up' ? '↑' : trend === 'down' ? '↓' : '→'}</span> : '—'}</td>
-        </tr>{open && <tr><td colSpan={7} id={detailsId}><PartitionTable row={displayRow} staleResources={monitor.staleResources} /></td></tr>}</Fragment>
+        </tr>{open && <tr><td colSpan={7} id={detailsId}><PartitionTable row={displayRow} snapshot={monitor.displaySnapshot ?? snapshot} staleResources={monitor.staleResources} /></td></tr>}</Fragment>
       })}</tbody></table>
       {!rows.length && <p>{snapshot.consumerGroups.length ? '没有匹配的 Consumer Group / Topic。' : '暂无 Consumer Group / Topic 数据。'}</p>}
     </>}
@@ -72,13 +79,16 @@ function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId:
 }
 
 export function ConsumerGroupsPage() {
-  const { cluster, monitor } = useDashboard()
+  const { cluster, monitor, refreshSeconds } = useDashboard()
+  const stale = useSnapshotStale(monitor, refreshSeconds)
   const lag = useConsumerGroupLag()
   return <section aria-label="Consumer Groups 内容"><h2>Consumer Groups</h2>
+    {stale && <p role="status" aria-label="Consumer Groups 数据已陈旧">数据已陈旧</p>}
     {!cluster ? <p>请选择集群。</p> : <>
       {lag.isPending && <p role="status">正在加载 Lag 规则…</p>}
       <ApiErrorNotice error={lag.error} />
       {lag.ready && <ConsumerGroupsTable key={cluster.id} clusterId={cluster.id} monitor={monitor} evaluatedRows={lag.rows} />}
+      <ConsumerGroupHistory key={`history-${cluster.id}`} snapshot={monitor.snapshot} history={monitor.history} stale={stale} />
     </>}
   </section>
 }

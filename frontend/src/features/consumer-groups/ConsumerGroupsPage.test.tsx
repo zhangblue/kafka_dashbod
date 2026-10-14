@@ -2,12 +2,16 @@ import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router'
-import { expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import type { ClusterSnapshot, ConsumerGroupTopicSnapshot, LagRuleSet } from '../../api/types'
 import { clusterFixture, snapshotFixture } from '../../test/handlers'
 import type { DashboardContext } from '../dashboard/useDashboard'
 import { ConsumerGroupsPage } from './ConsumerGroupsPage'
 import { ConsumerGroupLagProvider } from './ConsumerGroupLagProvider'
+
+const chart = vi.hoisted(() => ({ setOption: vi.fn(), resize() {}, dispose() {} }))
+vi.mock('echarts/core', () => ({ init: () => chart, use() {} }))
+afterEach(() => { vi.useRealTimers(); vi.clearAllMocks() })
 
 const row = (groupId: string, topic: string, lag: number): ConsumerGroupTopicSnapshot => ({ groupId, topic, lag,
   incomplete: false, unknownPartitionCount: 0, partitions: [{ partition: 0, high: 50000, committedOffset: 50000 - lag, lag }] })
@@ -29,8 +33,8 @@ function show(value: ClusterSnapshot | null = snapshot, ruleSet = rules, entry =
     <Route index element={<ConsumerGroupsPage />} />
   </Route></Routes></MemoryRouter></QueryClientProvider>
   const view = render(tree())
-  return { update: (patch: Partial<DashboardContext['monitor']>) => {
-    context.monitor = { ...context.monitor, ...patch }; view.rerender(tree())
+  return { update: (patch: Partial<DashboardContext['monitor']>, refreshSeconds = context.refreshSeconds) => {
+    context.monitor = { ...context.monitor, ...patch }; context.refreshSeconds = refreshSeconds; view.rerender(tree())
   }, client }
 }
 
@@ -45,10 +49,84 @@ it('sorts by numeric lag descending and filters by group, topic and evaluated st
   expect(within(table).getAllByRole('row')).toHaveLength(2)
   await user.clear(screen.getByRole('searchbox'))
   await user.selectOptions(screen.getByRole('combobox', { name: '状态筛选' }), 'high')
-  expect(screen.getByText('busy-worker')).toBeInTheDocument()
-  expect(screen.queryByText('flink-orders')).not.toBeInTheDocument()
-  await user.selectOptions(screen.getByRole('combobox'), 'uncommitted')
-  expect(screen.getByText('new-worker')).toBeInTheDocument()
+  expect(within(table).getByText('busy-worker')).toBeInTheDocument()
+  expect(within(table).queryByText('flink-orders')).not.toBeInTheDocument()
+  await user.selectOptions(screen.getByRole('combobox', { name: '状态筛选' }), 'uncommitted')
+  expect(within(table).getByText('new-worker')).toBeInTheDocument()
+})
+
+it('selects multiple topic and partition raw histories with null gaps and retains them when cadence changes', async () => {
+  const user = userEvent.setup()
+  const first = { ...snapshot, consumerGroups: [row('worker', 'orders', 12), row('worker', 'events', 6)] }
+  const second = { ...first, collectedAt: '2026-10-15T00:00:05Z', consumerGroups: [
+    { ...row('worker', 'orders', 0), incomplete: true, unknownPartitionCount: 1,
+      partitions: [{ partition: 0, high: null, committedOffset: 10, lag: null }] },
+    row('worker', 'events', 9),
+  ] }
+  const { update } = show(second)
+  update({ displaySnapshot: first, history: [{ at: 1000, snapshot: first }, { at: 2000, snapshot: second }] })
+  expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({ series: [
+    expect.objectContaining({ name: 'orders / 总 Lag', data: [[1000, 12], [2000, null]] }),
+  ] }), true)
+  await user.click(screen.getByRole('checkbox', { name: 'orders / 总 Lag' }))
+  await user.click(screen.getByRole('checkbox', { name: 'orders / Partition 0' }))
+  await user.click(screen.getByRole('checkbox', { name: 'events / Partition 0' }))
+  expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({ series: [
+    expect.objectContaining({ name: 'orders / Partition 0', data: [[1000, 12], [2000, null]], connectNulls: false }),
+    expect.objectContaining({ name: 'events / Partition 0', data: [[1000, 6], [2000, 9]], connectNulls: false }),
+  ] }), true)
+  expect(screen.getByRole('table', { name: 'worker Lag 历史数据' })).toHaveTextContent('未知 / 不完整')
+  update({}, 10)
+  expect(screen.getByRole('checkbox', { name: 'orders / Partition 0' })).toBeChecked()
+  expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({ series: [
+    expect.objectContaining({ data: [[1000, 12], [2000, null]] }), expect.objectContaining({ data: [[1000, 6], [2000, 9]] }),
+  ] }), true)
+  await user.click(screen.getByRole('checkbox', { name: 'orders / Partition 0' }))
+  expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({ series: [expect.objectContaining({ name: 'events / Partition 0' })] }), true)
+})
+
+it('gaps only the affected partition on local failure and every selected partition on group discovery failure', async () => {
+  const user = userEvent.setup()
+  const first = { ...snapshot, consumerGroups: [{ ...row('worker', 'orders', 11), partitions: [
+    { partition: 0, high: 10, committedOffset: 5, lag: 5 }, { partition: 1, high: 10, committedOffset: 4, lag: 6 },
+  ] }] }
+  const partitionFailure = { ...first, partialFailures: [{ scope: 'committed', resource: 'worker/orders:1', code: 'TIMEOUT', message: 'timeout' }] }
+  const groupFailure = { ...first, partialFailures: [{ scope: 'groups', resource: 'worker', code: 'TIMEOUT', message: 'timeout' }] }
+  const { update } = show(first)
+  update({ history: [{ at: 1000, snapshot: first }, { at: 2000, snapshot: partitionFailure }, { at: 3000, snapshot: groupFailure }] })
+  await user.click(screen.getByRole('checkbox', { name: 'orders / 总 Lag' }))
+  await user.click(screen.getByRole('checkbox', { name: 'orders / Partition 0' }))
+  await user.click(screen.getByRole('checkbox', { name: 'orders / Partition 1' }))
+  expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({ series: [
+    expect.objectContaining({ name: 'orders / Partition 0', data: [[1000, 5], [2000, 5], [3000, null]] }),
+    expect.objectContaining({ name: 'orders / Partition 1', data: [[1000, 6], [2000, null], [3000, null]] }),
+  ] }), true)
+})
+
+it('shows nonempty maximum offsets and dashes for empty or unknown watermarks', () => {
+  const value: ClusterSnapshot = { ...snapshot, topics: [{ topic: 'orders', low: 0, latestMessageOffset: 9, retainedOffsetSpan: 10, incomplete: true,
+    partitions: [{ partition: 0, low: 0, high: 10, latestMessageOffset: 9, retainedOffsetSpan: 10 },
+      { partition: 1, low: 20, high: 20, latestMessageOffset: null, retainedOffsetSpan: 0 },
+      { partition: 2, low: null, high: null, latestMessageOffset: null, retainedOffsetSpan: null }] }],
+    consumerGroups: [{ ...row('worker', 'orders', 5), partitions: [
+      { partition: 0, high: 11, committedOffset: 5, lag: 6 },
+      { partition: 1, high: 20, committedOffset: 20, lag: 0 },
+      { partition: 2, high: null, committedOffset: 3, lag: null }] }] }
+  show(value, rules, '/?groupId=worker&topic=orders')
+  const table = screen.getByRole('table', { name: 'worker / orders Partitions' })
+  expect(within(table).getByRole('columnheader', { name: /最大消息 Offset/ })).toBeInTheDocument()
+  expect(within(table).getAllByRole('row').slice(1).map(item => within(item).getAllByRole('cell')[2].textContent)).toEqual(['9', '—', '—'])
+})
+
+it('marks the whole group page time-stale and updates the threshold with refresh frequency', () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+  vi.setSystemTime(new Date(snapshot.collectedAt))
+  const { update } = show(snapshot)
+  expect(screen.queryByLabelText('Consumer Groups 数据已陈旧')).not.toBeInTheDocument()
+  act(() => vi.advanceTimersByTime(11000))
+  expect(screen.getByLabelText('Consumer Groups 数据已陈旧')).toBeInTheDocument()
+  update({}, 10)
+  expect(screen.queryByLabelText('Consumer Groups 数据已陈旧')).not.toBeInTheDocument()
 })
 
 it('opens the exact group and topic partition details from an overview link', () => {
@@ -72,7 +150,7 @@ it('shows known lag plus unknown partitions and expands committed offsets withou
   await user.click(screen.getByRole('button', { name: '展开 new-worker / new' }))
   const partitions = screen.getByRole('table', { name: 'new-worker / new Partitions' })
   expect(within(within(partitions).getAllByRole('row')[2]).getAllByRole('cell').map(cell => cell.textContent))
-    .toEqual(['1', '100', '—', '—'])
+    .toEqual(['1', '100', '—', '—', '—'])
   expect(screen.getByRole('button', { name: '收起 new-worker / new' })).toHaveAttribute('aria-expanded', 'true')
 })
 
