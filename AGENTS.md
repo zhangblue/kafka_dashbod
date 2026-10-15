@@ -39,7 +39,7 @@ SQLite 含明文 Kafka 凭据，须限制数据库、sidecar 和备份的访问�
 
 ## 开发与验证
 
-后端使用 `cargo run -p backend --bin kafka-dashboard` 启动，无必填环境配置。前端使用 `npm --prefix frontend ci`、`npm --prefix frontend run dev -- --host 127.0.0.1`。生产静态目录由 `KAFKA_DASHBOARD_WEB_DIR` 配置；开发代理地址用 `KAFKA_DASHBOARD_API_TARGET`。
+后端使用 `cargo run -p backend --bin kafka-dashboard` 启动，正常启动必须读取当前工作目录中可读且格式有效的 `.env`；可先执行 `cp packaging/.env.example .env`，源码开发时按需调整或移除发行静态目录配置 `KAFKA_DASHBOARD_WEB_DIR=web`，并调整数据库路径或创建模板所需的可写 `data/` 目录。父进程已设置的同名环境变量优先于 `.env`；`--version` 查询例外，无需 `.env`。前端使用 `npm --prefix frontend ci`、`npm --prefix frontend run dev -- --host 127.0.0.1`。生产静态目录由 `KAFKA_DASHBOARD_WEB_DIR` 配置；开发代理地址用 `KAFKA_DASHBOARD_API_TARGET`。
 
 ```bash
 cargo fmt --all -- --check
