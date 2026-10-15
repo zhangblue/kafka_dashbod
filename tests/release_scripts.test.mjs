@@ -334,6 +334,61 @@ for (const kind of ['similar executable path', 'unrelated argument containing bi
     }
   });
 }
+test('process inspection consumes a large table without broken pipe diagnostics', async t => {
+  const f = await fixture(t);
+  assert.equal(f.run(['start']).status, 0);
+  const pid = await readPid(f.release);
+  await executable(path.join(f.commands, 'ps'), `#!/bin/sh
+awk 'BEGIN {
+  print ENVIRON["TEST_PID"] " /bin/sh " ENVIRON["TEST_BINARY"]
+  for (i = 0; i < 10000; i++) print 100000 + i " /unrelated/background-service"
+}'
+`);
+  const env = { TEST_PID: String(pid), TEST_BINARY: path.join(f.release, 'bin/kafka-dashboard-darwin-arm64') };
+  for (const action of ['status', 'stop']) {
+    const result = f.run([action], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '', 'successful process inspection must not emit pipe errors');
+  }
+  assert.equal(isRunning(pid), false);
+});
+for (const kind of ['exact command', 'similar first path', 'similar second path', 'extra argument', 'unrelated prefix']) {
+  test(`QEMU process identity handles ${kind} with complete path matching`, async t => {
+    const f = await fixture(t);
+    assert.equal(f.run(['start']).status, 0);
+    const pid = await readPid(f.release);
+    const binary = path.join(f.release, 'bin/kafka-dashboard-darwin-arm64');
+    const command = {
+      'exact command': `[qemu] ${binary} ${binary}`,
+      'similar first path': `[qemu] ${binary}.old ${binary}`,
+      'similar second path': `[qemu] ${binary} ${binary}.old`,
+      'extra argument': `[qemu] ${binary} ${binary} --unrelated`,
+      'unrelated prefix': `wrapper [qemu] ${binary} ${binary}`,
+    }[kind];
+    // Model the actual BusyBox process table boundary observed under linux/amd64
+    // emulation while keeping the PID and signals backed by a real owned service.
+    await executable(path.join(f.commands, 'ps'), '#!/bin/sh\nprintf "%s {kafka-dashboard} %s\\n" "$TEST_PID" "$TEST_COMMAND"\n');
+    const env = { TEST_PID: String(pid), TEST_COMMAND: command };
+    if (kind === 'exact command') {
+      const status = f.run(['status'], env);
+      assert.equal(status.status, 0, status.stderr);
+      assert.match(status.stdout, new RegExp(`Kafka Lens 正在运行，PID: ${pid}`));
+      const stopped = f.run(['stop'], env);
+      assert.equal(stopped.status, 0, stopped.stderr);
+      assert.equal(existsSync(pidPath(f.release)), false);
+      assert.equal(isRunning(pid), false);
+    } else {
+      for (const action of ['status', 'stop', 'restart']) {
+        const result = f.run([action], env);
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /进程身份不匹配/);
+        assert.equal(await readPid(f.release), pid);
+        assert.equal(isRunning(pid), true);
+      }
+      assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\n`);
+    }
+  });
+}
 test('failed process inspection is a pid error and preserves the pid file', async t => {
   const f = await fixture(t);
   await mkdir(path.join(f.release, 'data'));
@@ -524,30 +579,104 @@ for (const [name, file, message] of [
   });
 }
 
-test('failed runtime verification reaps even a server that ignores TERM', async t => {
+async function runtimeFixture(t, ignoreTerm = false) {
   const f = await buildFixture(t);
   assert.equal(f.run().status, 0);
   const release = path.join(f.temp, 'dist/kafka-dashboard');
-  const pidFile = path.join(f.temp, 'server.pid');
-  let serverPid;
-  t.after(() => {
-    try { if (serverPid) process.kill(serverPid, 'SIGKILL'); } catch {}
-  });
-  await executable(path.join(release, 'bin/kafka-dashboard-darwin-arm64'), `#!${process.execPath}\nif (process.argv.includes('--version')) process.exit(0);\nrequire('node:fs').writeFileSync(process.env.SERVER_PID_FILE, String(process.pid));\nprocess.on('SIGTERM', () => {});\nif (process.env.RUST_LOG === 'info') console.log('address=127.0.0.1:12345');\nsetInterval(() => {}, 1000);\n`);
+  await executable(path.join(release, 'bin/kafka-dashboard-darwin-arm64'), `#!/bin/sh
+[ "\${1-}" != --version ] || exit 0
+printf '%s\\n' "$$" > "$SERVER_PID_FILE"
+trap '${ignoreTerm ? ':' : 'exit 0'}' TERM
+[ "$RUST_LOG" != info ] || echo 'address=127.0.0.1:12345'
+while :; do sleep 0.1; done
+`);
   const manifest = await readFile(path.join(release, 'SHA256SUMS'), 'utf8');
   const digest = createHash('sha256').update(await readFile(path.join(release, 'bin/kafka-dashboard-darwin-arm64'))).digest('hex');
   await writeFile(path.join(release, 'SHA256SUMS'), manifest.replace(/^[a-f0-9]{64}(  \.\/bin\/kafka-dashboard-darwin-arm64)$/m, `${digest}$1`));
   await executable(path.join(f.temp, 'commands/file'), '#!/bin/sh\nprintf "Mach-O 64-bit executable arm64 ELF 64-bit x86-64 statically linked\\n"\n');
   await executable(path.join(f.temp, 'commands/otool'), '#!/bin/sh\nprintf "binary:\\n"\n');
+  return { ...f, release };
+}
+
+test('failed runtime verification reaps even a server that ignores TERM', async t => {
+  const f = await runtimeFixture(t, true);
+  const serverPidFile = path.join(f.temp, 'server.pid');
+  let serverPid;
+  t.after(() => {
+    try { if (serverPid) process.kill(serverPid, 'SIGKILL'); } catch {}
+  });
   await executable(path.join(f.temp, 'commands/docker'), '#!/bin/sh\nexit 0\n');
   await executable(path.join(f.temp, 'commands/curl'), '#!/bin/sh\nexit 1\n');
-  const result = spawnSync('/bin/sh', [path.join(root, 'tools/verify-release.sh'), release], {
+  const result = spawnSync('/bin/sh', [path.join(root, 'tools/verify-release.sh'), f.release], {
     encoding: 'utf8', timeout: 30000,
-    env: { ...process.env, PATH: `${f.temp}/commands:${process.env.PATH}`, SERVER_PID_FILE: pidFile, RUST_LOG: 'error' },
+    env: { ...process.env, PATH: `${f.temp}/commands:${process.env.PATH}`, SERVER_PID_FILE: serverPidFile, RUST_LOG: 'error' },
   });
+  serverPid = Number(await readFile(serverPidFile, 'utf8'));
+  assert.equal(result.error, undefined, 'verification must finish its own failure cleanup before timeout');
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Health timeout/);
-  const pid = Number(await readFile(pidFile, 'utf8'));
-  serverPid = pid;
-  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
+});
+
+test('Linux lifecycle verification executes start status and stop in a persistent container', async t => {
+  const f = await runtimeFixture(t);
+  const serverPidFile = path.join(f.temp, 'server.pid');
+  const dockerEvents = path.join(f.temp, 'docker-events');
+  let serverPid;
+  t.after(() => {
+    try { if (serverPid) process.kill(serverPid, 'SIGKILL'); } catch {}
+  });
+  await executable(path.join(f.temp, 'commands/docker'), `#!/bin/sh
+case "$1" in
+  run)
+    case " $* " in
+      *' --rm '*) exit 0 ;;
+    esac
+    for argument do
+      case "$argument" in */start.sh) echo 'launcher cannot be container PID 1' >&2; exit 1;; esac
+    done
+    printf 'container\\n' >> "$DOCKER_EVENTS"
+    echo release-container ;;
+  exec)
+    [ "$2" = release-container ] || exit 2
+    case "$3" in
+      '/release?%20 中文/start.sh')
+        printf '%s\\n' "$4" >> "$DOCKER_EVENTS"
+        case "$4" in
+          start) : ;;
+          stop) touch "$DOCKER_EVENTS.stopped" ;;
+          status)
+            if [ -e "$DOCKER_EVENTS.stopped" ]; then echo 'Kafka Lens 未运行'; else echo 'Kafka Lens 正在运行，PID: 12345'; fi ;;
+          *) exit 3 ;;
+        esac ;;
+      cat) echo 12345 ;;
+      sh) exit 0 ;;
+      *) exit 4 ;;
+    esac ;;
+  port) echo 127.0.0.1:23456 ;;
+  rm) printf 'remove\\n' >> "$DOCKER_EVENTS" ;;
+  *) exit 5 ;;
+esac
+`);
+  await executable(path.join(f.temp, 'commands/curl'), `#!/bin/sh
+for argument do url=$argument; done
+case "$url" in
+  */api/health) printf '{"status":"ok"}' ;;
+  */assets/app.js) cat "$TEST_RELEASE/web/assets/app.js" ;;
+  *) cat "$TEST_RELEASE/web/index.html" ;;
+esac
+`);
+  await executable(path.join(f.temp, 'commands/sqlite3'), '#!/bin/sh\necho 2\n');
+  await writeFile(path.join(f.release, 'web/index.html'), '<html><script src="/assets/app.js"></script></html>');
+  const manifest = await readFile(path.join(f.release, 'SHA256SUMS'), 'utf8');
+  const digest = createHash('sha256').update(await readFile(path.join(f.release, 'web/index.html'))).digest('hex');
+  await writeFile(path.join(f.release, 'SHA256SUMS'), manifest.replace(/^[a-f0-9]{64}(  \.\/web\/index.html)$/m, `${digest}$1`));
+  const result = spawnSync('/bin/sh', [path.join(root, 'tools/verify-release.sh'), f.release], {
+    encoding: 'utf8', timeout: 30000,
+    env: { ...process.env, PATH: `${f.temp}/commands:${process.env.PATH}`, SERVER_PID_FILE: serverPidFile, TEST_RELEASE: f.release, DOCKER_EVENTS: dockerEvents },
+  });
+  serverPid = Number(await readFile(serverPidFile, 'utf8'));
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual((await readFile(dockerEvents, 'utf8')).trim().split('\n'), ['container', 'start', 'status', 'stop', 'status', 'remove']);
+  assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
 });

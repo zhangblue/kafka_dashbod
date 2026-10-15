@@ -47,13 +47,14 @@ inspect_process() {
         return 2
     fi
     process_command=$(printf '%s\n' "$process_table" | awk -v target="$pid" '
-        $1 == target {
+        $1 == target && !found {
             sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "")
             # BusyBox prefixes shebang commands with a {comm} annotation.
             sub(/^\{[^}]+\}[[:space:]]+/, "")
-            print
-            exit
-        }')
+            command = $0
+            found = 1
+        }
+        END { if (found) print command }')
     if ! kill -0 "$pid" 2>/dev/null; then
         if [ -n "$process_command" ]; then
             echo '无法检查进程：没有访问权限' >&2
@@ -71,8 +72,10 @@ inspect_process() {
     fi
     # This launcher never passes service arguments. Match the complete command,
     # including the direct POSIX-shell interpreter form used by script binaries.
+    # Docker linux/amd64 emulation may expose QEMU with the executable repeated.
+    # Accept only that exact observed shape, with both absolute paths identical.
     case "$process_command" in
-        "$binary"|"/bin/sh $binary") return 0 ;;
+        "$binary"|"/bin/sh $binary"|"[qemu] $binary $binary") return 0 ;;
         *) echo 'PID 文件对应的进程身份不匹配' >&2; return 2 ;;
     esac
 }

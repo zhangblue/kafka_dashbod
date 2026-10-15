@@ -26,19 +26,26 @@ done
 
 temp=$(mktemp -d "${TMPDIR:-/tmp}/kafka-release-verify.XXXXXX")
 mac_pid=
+mac_release=
 container=
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
+    # The launcher returns before the service exits. Recover its PID even when
+    # startup failed before the main flow could read it, and always reap our fixture.
+    if [ -n "$mac_release" ]; then
+        if [ -z "$mac_pid" ] && [ -f "$mac_release/data/kafka-dashboard.pid" ]; then
+            mac_pid=$(cat "$mac_release/data/kafka-dashboard.pid")
+        fi
+        LC_ALL=en_US.UTF-8 "$mac_release/start.sh" stop >/dev/null 2>&1 || :
+    fi
     if [ -n "$mac_pid" ]; then
-        kill -TERM "$mac_pid" 2>/dev/null || :
+        if kill -0 "$mac_pid" 2>/dev/null; then kill -KILL "$mac_pid" 2>/dev/null || :; fi
         cleanup_attempt=0
         while kill -0 "$mac_pid" 2>/dev/null && [ "$cleanup_attempt" -lt 20 ]; do
             cleanup_attempt=$((cleanup_attempt + 1))
             sleep 0.1
         done
-        if kill -0 "$mac_pid" 2>/dev/null; then kill -KILL "$mac_pid" 2>/dev/null || :; fi
-        wait "$mac_pid" 2>/dev/null || :
     fi
     if [ -n "$container" ]; then docker rm -f "$container" >/dev/null 2>&1 || :; fi
     rm -rf "$temp"
@@ -80,13 +87,16 @@ cp "$mac_release/.env.example" "$mac_release/.env"
 cp "$linux_release/.env.example" "$linux_release/.env"
 unset DATABASE_URL KAFKA_DASHBOARD_WEB_DIR
 # ANSI color disabled so the bound ephemeral port can be read without guessing a free port.
-NO_COLOR=1 RUST_LOG=info KAFKA_DASHBOARD_BIND=127.0.0.1:0 "$mac_release/start.sh" > "$temp/mac.log" 2>&1 &
-mac_pid=$!
+# macOS ps escapes Unicode arguments in the C locale, defeating exact identity
+# checks after relocation. Keep C for manifest ordering and UTF-8 for the launcher.
+LC_ALL=en_US.UTF-8 NO_COLOR=1 RUST_LOG=info KAFKA_DASHBOARD_BIND=127.0.0.1:0 "$mac_release/start.sh" start
+mac_pid=$(cat "$mac_release/data/kafka-dashboard.pid")
+mac_log="$mac_release/data/kafka-dashboard.log"
 attempt=0
 mac_port=
 while [ "$attempt" -lt 100 ]; do
     kill -0 "$mac_pid" 2>/dev/null || fail 'macOS server exited before startup'
-    mac_port=$(sed -n 's/.*address=127\.0\.0\.1:\([0-9]*\).*/\1/p' "$temp/mac.log" | head -1)
+    mac_port=$(sed -n 's/.*address=127\.0\.0\.1:\([0-9]*\).*/\1/p' "$mac_log" | head -1)
     [ -z "$mac_port" ] || break
     attempt=$((attempt + 1))
     sleep 0.1
@@ -116,33 +126,28 @@ check_http() {
     [ "$(sqlite3 "$destination/data/kafka-dashboard.db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('clusters', 'lag_rules');")" = 2 ] || fail 'SQLite migrations missing'
 }
 check_http "http://127.0.0.1:$mac_port" "$mac_release"
-kill -TERM "$mac_pid"
-attempt=0
-while kill -0 "$mac_pid" 2>/dev/null; do
-    attempt=$((attempt + 1))
-    [ "$attempt" -lt 100 ] || fail 'macOS did not exit after SIGTERM'
-    sleep 0.1
-done
-wait "$mac_pid" || fail 'macOS SIGTERM exit was not clean'
+LC_ALL=en_US.UTF-8 "$mac_release/start.sh" stop
+[ ! -e "$mac_release/data/kafka-dashboard.pid" ] || fail 'macOS PID file survived start.sh stop'
+if kill -0 "$mac_pid" 2>/dev/null; then fail 'macOS process survived start.sh stop'; fi
 mac_pid=
-echo 'macOS: health, SQLite, index, assets, SPA fallback and SIGTERM passed'
+echo 'macOS: health, SQLite, index, assets, SPA fallback and background lifecycle passed'
 
 container=$(docker run -d --platform linux/amd64 \
     -v "$linux_release:$linux_mount" -p 127.0.0.1::3000 \
     -e KAFKA_DASHBOARD_BIND=0.0.0.0:3000 \
-    "$runtime_image" "$linux_mount/start.sh")
+    "$runtime_image" sh -c 'while :; do sleep 3600; done')
+docker exec "$container" "$linux_mount/start.sh" start
+linux_pid=$(docker exec "$container" cat "$linux_mount/data/kafka-dashboard.pid")
+linux_status=$(docker exec "$container" "$linux_mount/start.sh" status)
+printf '%s\n' "$linux_status" | grep -q 'Kafka Lens 正在运行，PID:' || fail 'Linux status did not report a running service'
 linux_address=$(docker port "$container" 3000/tcp | head -1)
 check_http "http://$linux_address" "$linux_release"
-docker kill --signal TERM "$container" >/dev/null
-attempt=0
-while [ "$(docker inspect --format '{{.State.Running}}' "$container")" = true ]; do
-    attempt=$((attempt + 1))
-    [ "$attempt" -lt 100 ] || fail 'Linux did not exit after SIGTERM'
-    sleep 0.1
-done
-[ "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0 ] || fail 'Linux SIGTERM exit was not clean'
-docker logs "$container" > "$temp/linux.log" 2>&1
-docker rm "$container" >/dev/null
+docker exec "$container" "$linux_mount/start.sh" stop
+linux_status=$(docker exec "$container" "$linux_mount/start.sh" status)
+printf '%s\n' "$linux_status" | grep -q 'Kafka Lens 未运行' || fail 'Linux status did not report a stopped service'
+docker exec "$container" sh -c '[ ! -e "$1" ] && ! kill -0 "$2" 2>/dev/null' sh \
+    "$linux_mount/data/kafka-dashboard.pid" "$linux_pid" || fail 'Linux PID file or process survived start.sh stop'
+docker rm -f "$container" >/dev/null
 container=
-echo 'Linux/amd64: health, SQLite, index, assets, SPA fallback and SIGTERM passed'
+echo 'Linux/amd64: health, SQLite, index, assets, SPA fallback and background lifecycle passed'
 echo 'Dual-platform release verification passed'
