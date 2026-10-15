@@ -91,6 +91,8 @@ unset DATABASE_URL KAFKA_DASHBOARD_WEB_DIR
 # checks after relocation. Keep C for manifest ordering and UTF-8 for the launcher.
 LC_ALL=en_US.UTF-8 NO_COLOR=1 RUST_LOG=info KAFKA_DASHBOARD_BIND=127.0.0.1:0 "$mac_release/start.sh" start
 mac_pid=$(cat "$mac_release/data/kafka-dashboard.pid")
+mac_status=$(LC_ALL=en_US.UTF-8 "$mac_release/start.sh" status) || fail 'macOS running status command failed'
+[ "$mac_status" = "Kafka Lens 正在运行，PID: $mac_pid" ] || fail 'macOS status did not report the exact running service'
 mac_log="$mac_release/data/kafka-dashboard.log"
 attempt=0
 mac_port=
@@ -127,6 +129,8 @@ check_http() {
 }
 check_http "http://127.0.0.1:$mac_port" "$mac_release"
 LC_ALL=en_US.UTF-8 "$mac_release/start.sh" stop
+mac_status=$(LC_ALL=en_US.UTF-8 "$mac_release/start.sh" status) || fail 'macOS stopped status command failed'
+[ "$mac_status" = 'Kafka Lens 未运行' ] || fail 'macOS status did not report the exact stopped state'
 [ ! -e "$mac_release/data/kafka-dashboard.pid" ] || fail 'macOS PID file survived start.sh stop'
 if kill -0 "$mac_pid" 2>/dev/null; then fail 'macOS process survived start.sh stop'; fi
 mac_pid=

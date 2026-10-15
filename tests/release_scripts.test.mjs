@@ -9,6 +9,13 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Startup includes a 1s liveness wait plus process/spawn overhead. Shutdown can
+// wait 10s, and restart adds another startup; keep bounded outer headroom.
+const launcherTimeoutMs = 10_000;
+const lifecycleTimeoutMs = 30_000;
+// These fixtures make curl return immediately: listener/health polling and stop
+// can each take 10s, reaping 2s, startup 1s. Allow subprocess scheduling overhead.
+const runtimeVerificationTimeoutMs = 60_000;
 async function executable(file, content) {
   await writeFile(file, content, { mode: 0o755 });
 }
@@ -16,6 +23,7 @@ async function fixture(t, osName = 'Darwin', arch = 'arm64') {
   const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), 'release-test-')));
   const startedPids = path.join(temp, 'started-pids');
   const events = path.join(temp, 'service-events');
+  const readyFile = path.join(temp, 'service-ready');
   const launcherPids = new Set();
   t.after(async () => {
     if (existsSync(startedPids)) {
@@ -49,16 +57,17 @@ printf '%s\\n' "$$" >> "$FAKE_PID_FILE"
 printf '%s\\n' '${platform}' "$PWD" "\${DATABASE_URL-}" "\${KAFKA_DASHBOARD_WEB_DIR-}" "$@"
 [ "\${FAKE_EXIT-}" != immediate ] || exit 17
 trap '[ -z "\${FAKE_EVENTS_FILE-}" ] || printf "TERM:%s\\n" "$$" >> "$FAKE_EVENTS_FILE"; if [ "\${FAKE_IGNORE_TERM-}" != 1 ]; then sleep 0.2; exit 0; fi' TERM
+printf '%s\\n' "$$" > "$FAKE_READY_FILE"
 while :; do sleep 1; done
 `);
   }
-  return { release, temp, commands, events, run(args = [], env = {}, location = release) {
+  return { release, temp, commands, events, readyFile, run(args = [], env = {}, location = release) {
     const cleanEnv = { ...process.env };
     delete cleanEnv.DATABASE_URL;
     delete cleanEnv.KAFKA_DASHBOARD_WEB_DIR;
     const result = spawnSync('/bin/sh', [path.join(location, 'start.sh'), ...args], {
-      cwd: temp, encoding: 'utf8', timeout: ['stop', 'restart'].includes(args[0]) ? 15000 : 3000,
-      env: { ...cleanEnv, PATH: `${commands}:${process.env.PATH}`, FAKE_PID_FILE: startedPids, FAKE_EVENTS_FILE: events, ...env },
+      cwd: temp, encoding: 'utf8', timeout: ['stop', 'restart'].includes(args[0]) ? lifecycleTimeoutMs : launcherTimeoutMs,
+      env: { ...cleanEnv, PATH: `${commands}:${process.env.PATH}`, FAKE_PID_FILE: startedPids, FAKE_EVENTS_FILE: events, FAKE_READY_FILE: readyFile, ...env },
     });
     const started = result.stdout?.match(/已在后台启动，PID: ([1-9][0-9]*)/);
     if (started) launcherPids.add(Number(started[1]));
@@ -75,6 +84,18 @@ function isRunning(pid) {
 
 async function readPid(release) {
   return Number((await readFile(path.join(release, 'data/kafka-dashboard.pid'), 'utf8')).trim());
+}
+async function serviceReady(f, pid) {
+  const deadline = Date.now() + launcherTimeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (await readFile(f.readyFile, 'utf8') === `${pid}\n`) return;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.fail(`fixture PID ${pid} did not install its TERM handler and write startup events`);
 }
 const logPath = release => path.join(release, 'data/kafka-dashboard.log');
 const pidPath = release => path.join(release, 'data/kafka-dashboard.pid');
@@ -189,6 +210,7 @@ test('stop waits for the matching service to exit and removes its pid file', asy
   const f = await fixture(t);
   assert.equal(f.run(['start']).status, 0);
   const pid = await readPid(f.release);
+  await serviceReady(f, pid);
   const stopped = f.run(['stop']);
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.equal(stopped.error, undefined);
@@ -218,6 +240,7 @@ for (const command of ['stop', 'restart']) {
     const f = await fixture(t);
     assert.equal(f.run(['start'], { FAKE_IGNORE_TERM: '1' }).status, 0);
     const pid = await readPid(f.release);
+    await serviceReady(f, pid);
     const began = Date.now();
     const result = f.run([command]);
     assert.equal(result.error, undefined, 'launcher must finish its own bounded wait');
@@ -234,9 +257,11 @@ test('restart waits for old TERM and exit before starting a new service', async 
   const f = await fixture(t);
   assert.equal(f.run(['start']).status, 0);
   const oldPid = await readPid(f.release);
+  await serviceReady(f, oldPid);
   const result = f.run(['restart']);
   assert.equal(result.status, 0, result.stderr);
   const newPid = await readPid(f.release);
+  await serviceReady(f, newPid);
   assert.notEqual(newPid, oldPid);
   assert.throws(() => process.kill(oldPid, 0), { code: 'ESRCH' });
   process.kill(newPid, 0);
@@ -248,6 +273,7 @@ test('restart preserves the pid and never starts again when its shutdown wait fa
   const f = await fixture(t);
   assert.equal(f.run(['start']).status, 0);
   const pid = await readPid(f.release);
+  await serviceReady(f, pid);
   // Let the old service exit before the failed wait returns, exercising the
   // tempting success path on the following process check.
   await executable(path.join(f.commands, 'sleep'), `#!/bin/sh
@@ -271,6 +297,7 @@ test('restart starts a service when none is running', async t => {
   const result = f.run(['restart']);
   assert.equal(result.status, 0, result.stderr);
   const pid = await readPid(f.release);
+  await serviceReady(f, pid);
   process.kill(pid, 0);
   assert.match(result.stdout, /Kafka Lens 未运行/);
   assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\n`);
@@ -357,6 +384,7 @@ for (const kind of ['exact command', 'similar first path', 'similar second path'
     const f = await fixture(t);
     assert.equal(f.run(['start']).status, 0);
     const pid = await readPid(f.release);
+    await serviceReady(f, pid);
     const binary = path.join(f.release, 'bin/kafka-dashboard-darwin-arm64');
     const command = {
       'exact command': `[qemu] ${binary} ${binary}`,
@@ -595,6 +623,27 @@ while :; do sleep 0.1; done
   await writeFile(path.join(release, 'SHA256SUMS'), manifest.replace(/^[a-f0-9]{64}(  \.\/bin\/kafka-dashboard-darwin-arm64)$/m, `${digest}$1`));
   await executable(path.join(f.temp, 'commands/file'), '#!/bin/sh\nprintf "Mach-O 64-bit executable arm64 ELF 64-bit x86-64 statically linked\\n"\n');
   await executable(path.join(f.temp, 'commands/otool'), '#!/bin/sh\nprintf "binary:\\n"\n');
+  // Trace the real launcher, keeping its startup, identity and signal handling.
+  const launcher = path.join(release, 'start.sh');
+  const launcherSource = await readFile(launcher, 'utf8');
+  await executable(launcher, launcherSource.replace('set -eu', `set -eu
+[ -z "\${MAC_EVENTS-}" ] || printf '%s\\n' "\${1-start}" >> "$MAC_EVENTS"
+if [ "\${1-}" = status ] && [ -n "\${MAC_STATUS_FAULT-}" ]; then
+    if [ -f "$(dirname "$0")/data/kafka-dashboard.pid" ]; then
+        case "$MAC_STATUS_FAULT" in
+            wrong-pid) echo 'Kafka Lens 正在运行，PID: 1'; exit 0 ;;
+            running-error) exit 17 ;;
+        esac
+    else
+        case "$MAC_STATUS_FAULT" in
+            wrong-stopped) echo 'Kafka Lens 未运行 extra'; exit 0 ;;
+            stopped-error) exit 17 ;;
+        esac
+    fi
+fi`));
+  const launcherDigest = createHash('sha256').update(await readFile(launcher)).digest('hex');
+  await writeFile(path.join(release, 'SHA256SUMS'), (await readFile(path.join(release, 'SHA256SUMS'), 'utf8'))
+    .replace(/^[a-f0-9]{64}(  \.\/start\.sh)$/m, `${launcherDigest}$1`));
   return { ...f, release };
 }
 
@@ -608,7 +657,7 @@ test('failed runtime verification reaps even a server that ignores TERM', async 
   await executable(path.join(f.temp, 'commands/docker'), '#!/bin/sh\nexit 0\n');
   await executable(path.join(f.temp, 'commands/curl'), '#!/bin/sh\nexit 1\n');
   const result = spawnSync('/bin/sh', [path.join(root, 'tools/verify-release.sh'), f.release], {
-    encoding: 'utf8', timeout: 30000,
+    encoding: 'utf8', timeout: runtimeVerificationTimeoutMs,
     env: { ...process.env, PATH: `${f.temp}/commands:${process.env.PATH}`, SERVER_PID_FILE: serverPidFile, RUST_LOG: 'error' },
   });
   serverPid = Number(await readFile(serverPidFile, 'utf8'));
@@ -618,10 +667,11 @@ test('failed runtime verification reaps even a server that ignores TERM', async 
   assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
 });
 
-test('Linux lifecycle verification executes start status and stop in a persistent container', async t => {
+async function verifyDualPlatformLifecycle(t, fault) {
   const f = await runtimeFixture(t);
   const serverPidFile = path.join(f.temp, 'server.pid');
   const dockerEvents = path.join(f.temp, 'docker-events');
+  const macEvents = path.join(f.temp, 'mac-events');
   let serverPid;
   t.after(() => {
     try { if (serverPid) process.kill(serverPid, 'SIGKILL'); } catch {}
@@ -672,11 +722,31 @@ esac
   const digest = createHash('sha256').update(await readFile(path.join(f.release, 'web/index.html'))).digest('hex');
   await writeFile(path.join(f.release, 'SHA256SUMS'), manifest.replace(/^[a-f0-9]{64}(  \.\/web\/index.html)$/m, `${digest}$1`));
   const result = spawnSync('/bin/sh', [path.join(root, 'tools/verify-release.sh'), f.release], {
-    encoding: 'utf8', timeout: 30000,
-    env: { ...process.env, PATH: `${f.temp}/commands:${process.env.PATH}`, SERVER_PID_FILE: serverPidFile, TEST_RELEASE: f.release, DOCKER_EVENTS: dockerEvents },
+    encoding: 'utf8', timeout: runtimeVerificationTimeoutMs,
+    env: { ...process.env, PATH: `${f.temp}/commands:${process.env.PATH}`, SERVER_PID_FILE: serverPidFile, TEST_RELEASE: f.release, DOCKER_EVENTS: dockerEvents, MAC_EVENTS: macEvents, MAC_STATUS_FAULT: fault },
   });
   serverPid = Number(await readFile(serverPidFile, 'utf8'));
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual((await readFile(dockerEvents, 'utf8')).trim().split('\n'), ['container', 'start', 'status', 'stop', 'status', 'remove']);
+  assert.equal(result.error, undefined);
+  if (fault) {
+    assert.notEqual(result.status, 0, `verification must reject ${fault}`);
+    const expectedError = {
+      'wrong-pid': 'macOS status did not report the exact running service',
+      'running-error': 'macOS running status command failed',
+      'wrong-stopped': 'macOS status did not report the exact stopped state',
+      'stopped-error': 'macOS stopped status command failed',
+    }[fault];
+    assert.ok(result.stderr.includes(expectedError), result.stderr);
+    assert.deepEqual((await readFile(macEvents, 'utf8')).trim().split('\n'),
+      fault.includes('stopped') ? ['start', 'status', 'stop', 'status', 'stop'] : ['start', 'status', 'stop']);
+    assert.equal(existsSync(dockerEvents), false, 'macOS status failure must prevent Linux startup');
+  } else {
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual((await readFile(macEvents, 'utf8')).trim().split('\n'), ['start', 'status', 'stop', 'status', 'stop']);
+    assert.deepEqual((await readFile(dockerEvents, 'utf8')).trim().split('\n'), ['container', 'start', 'status', 'stop', 'status', 'remove']);
+  }
   assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
-});
+}
+for (const fault of ['', 'wrong-pid', 'running-error', 'wrong-stopped', 'stopped-error']) {
+  test(`dual-platform lifecycle verification checks both macOS statuses${fault ? ` and rejects ${fault}` : ''}`,
+    t => verifyDualPlatformLifecycle(t, fault));
+}
