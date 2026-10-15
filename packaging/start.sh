@@ -123,7 +123,7 @@ stop_service() {
     while kill -0 "$service_pid" 2>/dev/null; do
         attempt=$((attempt + 1))
         [ "$attempt" -lt 100 ] || fail "Kafka Lens 在等待时间内未退出，PID 文件已保留: $pid_file"
-        sleep 0.1
+        sleep 0.1 || fail "无法等待 Kafka Lens 退出，PID 文件已保留: $pid_file"
     done
     rm -f "$pid_file" || fail '无法删除 PID 文件'
     echo 'Kafka Lens 已停止'

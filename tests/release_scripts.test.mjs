@@ -244,6 +244,28 @@ test('restart waits for old TERM and exit before starting a new service', async 
   assert.match(result.stdout, new RegExp(`Kafka Lens 已在后台启动，PID: ${newPid}`));
   assert.equal(await readFile(f.events, 'utf8'), `START:${oldPid}\nTERM:${oldPid}\nSTART:${newPid}\n`);
 });
+test('restart preserves the pid and never starts again when its shutdown wait fails', async t => {
+  const f = await fixture(t);
+  assert.equal(f.run(['start']).status, 0);
+  const pid = await readPid(f.release);
+  // Let the old service exit before the failed wait returns, exercising the
+  // tempting success path on the following process check.
+  await executable(path.join(f.commands, 'sleep'), `#!/bin/sh
+if [ "$1" = 0.1 ]; then
+    /bin/sleep 2
+    exit 19
+fi
+exec /bin/sleep "$@"
+`);
+  const result = f.run(['restart']);
+  assert.equal(result.error, undefined);
+  assert.notEqual(result.status, 0, 'a failed shutdown wait must abort restart');
+  assert.match(result.stderr, /无法等待 Kafka Lens 退出，PID 文件已保留/);
+  assert.doesNotMatch(result.stdout, /已停止|已在后台启动/);
+  assert.equal(await readPid(f.release), pid);
+  assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\nTERM:${pid}\n`);
+  assert.equal(existsSync(path.join(f.release, 'data/kafka-dashboard.lock')), false);
+});
 test('restart starts a service when none is running', async t => {
   const f = await fixture(t);
   const result = f.run(['restart']);
