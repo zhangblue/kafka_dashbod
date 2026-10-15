@@ -108,6 +108,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "dotenvy",
  "futures",
  "http-body-util",
  "percent-encoding",

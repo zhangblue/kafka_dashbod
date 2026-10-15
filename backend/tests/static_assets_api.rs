@@ -241,6 +241,7 @@ fn version_exits_without_initializing_configuration() {
 #[test]
 fn startup_rejects_missing_web_directory_or_index_before_database_initialization() {
     let parent = tempfile::tempdir().unwrap();
+    std::fs::write(parent.path().join(".env"), "").unwrap();
     let not_a_file = parent.path().join("index.html");
     std::fs::create_dir(&not_a_file).unwrap();
     for path in [
@@ -249,6 +250,7 @@ fn startup_rejects_missing_web_directory_or_index_before_database_initialization
         not_a_file,
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
+            .current_dir(parent.path())
             .env("DATABASE_URL", "invalid://not-a-database")
             .env("KAFKA_DASHBOARD_WEB_DIR", &path)
             .output()

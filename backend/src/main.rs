@@ -7,6 +7,8 @@ async fn main() -> std::io::Result<()> {
         println!("kafka-dashboard {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    dotenvy::from_path(".env")
+        .map_err(|_| std::io::Error::other("failed to load required .env configuration"))?;
     tracing_subscriber::fmt::init();
 
     let config = kafka_dashboard::config::Config::from_env()
