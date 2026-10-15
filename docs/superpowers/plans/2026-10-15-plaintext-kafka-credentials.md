@@ -126,6 +126,8 @@ git commit -m "feat: remove credential master key"
 - 修改：`tools/verify-release.sh`
 - 修改：`tests/release_scripts.test.mjs`
 - 修改：`scripts/test-e2e.sh`
+- 修改：`backend/tests/server_process.rs`
+- 修改：`backend/tests/static_assets_api.rs`
 - 修改：`README.md`
 - 修改：`AGENTS.md`
 
@@ -136,7 +138,7 @@ git commit -m "feat: remove credential master key"
 ```javascript
 test('starts without a master key or env file', async t => {
   const f = await fixture(t);
-  const result = f.run([], { KAFKA_DASHBOARD_MASTER_KEY: '' });
+  const result = f.run();
   assert.equal(result.status, 0, result.stderr);
   assert.equal(existsSync(path.join(f.release, 'data')), true);
 });
@@ -158,9 +160,11 @@ node --test tests/release_scripts.test.mjs
 
 删除 `packaging/start.sh` 的主密钥检查。`.env.example` 只保留可选的 bind、database、web-dir 示例；`packaging/README.txt` 删除密钥生成、导出和备份说明，增加“SQLite 明文保存 Kafka 凭据”的醒目警告。
 
-从 `tools/verify-release.sh` 删除 placeholder grep、随机密钥生成、容器 `-e KAFKA_DASHBOARD_MASTER_KEY` 和主密钥日志比较；改为在 macOS 与 Linux 启动前显式 `unset KAFKA_DASHBOARD_MASTER_KEY`，证明成品没有隐式依赖。保留 checksum、文件 allowlist、SQLite、健康检查、静态资源、SPA fallback 和 SIGTERM 验证。
+从 `tools/verify-release.sh` 删除 placeholder grep、随机密钥生成、容器主密钥环境注入和主密钥日志比较；macOS 与 Linux 验收进程都不提供任何主密钥配置。保留 checksum、文件 allowlist、SQLite、健康检查、静态资源、SPA fallback 和 SIGTERM 验证。
 
 从 `scripts/test-e2e.sh` 删除主密钥生成，并从日志敏感值数组移除该变量；真实 Kafka fixture 的 SASL/TLS 测试秘密仍按现有规则扫描。
+
+删除后端进程测试中为旧行为保留的主密钥环境清除调用；测试命令本身不提供主密钥。当前生产源码、测试、启动器和运维文档都不得再引用旧变量名。
 
 - [ ] **步骤 4：更新当前用户文档与维护约束**
 
@@ -184,7 +188,7 @@ git diff --check
 - [ ] **步骤 6：提交**
 
 ```bash
-git add README.md AGENTS.md packaging tools scripts tests
+git add README.md AGENTS.md packaging tools scripts tests backend/tests/server_process.rs backend/tests/static_assets_api.rs
 git commit -m "docs: remove master key deployment requirement"
 ```
 
