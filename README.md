@@ -19,15 +19,15 @@ Kafka 只读监控面板：管理集群连接配置，查看 Topic / Partition �
 
 ## 本地运行
 
-在项目根目录启动后端：
+在项目根目录创建 `.env` 后启动后端。复制发行模板后，执行 Cargo 前先编辑 `.env`：源码开发通常由 Vite 提供页面，应移除 `KAFKA_DASHBOARD_WEB_DIR=web`，或调整为含 `index.html` 的实际构建目录；将 `DATABASE_URL` 改为 `sqlite://kafka-dashboard.db?mode=rwc`，或先创建模板所需的可写 `data/` 目录。
 
 ```bash
-export DATABASE_URL='sqlite://kafka-dashboard.db'
-export KAFKA_DASHBOARD_BIND='127.0.0.1:3000'
+cp packaging/.env.example .env
+# 按上文调整 .env 后再启动
 cargo run -p backend --bin kafka-dashboard
 ```
 
-启动无需必填环境配置。**警告：SQLite 明文保存 Kafka 凭据。** 不要提交 `.env`、数据库或备份，也不要在命令输出和日志中记录其中内容。
+Rust 正常启动时必须有可读且格式有效的 `.env`，即使全部配置已由外部环境变量提供。**警告：SQLite 明文保存 Kafka 凭据。** 限制 `.env`、数据库及备份的访问权限，不要提交这些文件，也不要在命令输出和日志中记录其中内容。
 
 `DATABASE_URL` 默认 `sqlite://kafka-dashboard.db`；可指定绝对路径，例如 `sqlite:///var/lib/kafka-lens/config.db`，父目录需提前创建且可写。启动时初始化当前数据库结构；旧加密版本数据库不兼容，须按下文升级步骤手动删除后重新配置。绑定地址默认 `127.0.0.1:3000`，设为 `127.0.0.1:0` 可由系统选择临时端口；启动日志会报告地址。健康检查为 `GET /api/health`。
 
@@ -49,14 +49,14 @@ npm --prefix frontend run preview -- --host 127.0.0.1
 
 | 变量 | 默认值 / 用途 |
 | --- | --- |
-| `DATABASE_URL` | 源码运行为 `sqlite://kafka-dashboard.db`；发行启动器为 `sqlite://data/kafka-dashboard.db?mode=rwc` |
+| `DATABASE_URL` | 未设置时为 `sqlite://kafka-dashboard.db`；发行模板为 `sqlite://data/kafka-dashboard.db?mode=rwc` |
 | `KAFKA_DASHBOARD_BIND` | `127.0.0.1:3000`，HTTP 监听地址 |
-| `KAFKA_DASHBOARD_WEB_DIR` | 源码运行不设置时仅提供 API；发行启动器自动指定包内 `web/`，自定义目录必须含 `index.html` |
+| `KAFKA_DASHBOARD_WEB_DIR` | 未设置时仅提供 API；发行模板为 `web`，自定义目录必须含 `index.html` |
 | `KAFKA_DASHBOARD_API_TARGET` | Vite 开发/preview 代理目的地，默认 `http://127.0.0.1:3000` |
 | `RUST_LOG` | 可用 `info` 设置日志级别；调试时也不得输出敏感配置 |
 | `KAFKA_TEST_PORT` | 手动 Compose 测试 broker 默认宿主端口 `19092`；一键 E2E 自动选择 |
 
-应用和发行启动器均不会自动读取 `.env`，可选变量需由 shell 或服务管理器注入。`packaging/.env.example` 仅列出可选配置示例。
+Rust 正常启动时强制读取当前工作目录的 `.env`，文件缺少、不可读或格式错误会启动失败；父进程已设置的同名环境变量优先于文件中的值。`--version` 查询例外，无需 `.env`。发行启动器切换到发行目录并创建 `data/`，不设置或导出配置；`packaging/.env.example` 是可直接复制的发行配置模板。源码运行的工作目录通常为仓库根目录，相对路径均以当前工作目录为基准。
 
 ## 连接与凭据
 
@@ -139,20 +139,20 @@ kafka-dashboard/
 │   └── kafka-dashboard-linux-amd64
 ├── web/                 # 已构建的前端页面和 assets
 ├── start.sh
-├── .env.example         # 可选配置示例，不自动加载
+├── .env.example         # 启动前复制为 .env 的配置模板
 ├── README.txt           # 离线运行说明
 └── SHA256SUMS
 ```
 
-复制整个目录或解压归档到目标机器的可写位置，核验 `shasum -a 256 -c SHA256SUMS`（Linux 也可用 `sha256sum -c SHA256SUMS`），直接运行 `./start.sh`。支持 **macOS arm64 和 Linux x86_64**；启动器将 `Darwin/arm64` 映射到 `bin/kafka-dashboard-darwin-arm64`，将 `Linux/x86_64` 映射到 `bin/kafka-dashboard-linux-amd64`，其他平台拒绝启动。默认访问地址为 `http://127.0.0.1:3000`，用 `KAFKA_DASHBOARD_BIND` 修改。启动器按自身位置定位 `web/`，创建私有权限的 `data/` 并使用 `data/kafka-dashboard.db`，可整体搬移；`DATABASE_URL` 和 `KAFKA_DASHBOARD_WEB_DIR` 可覆盖默认路径。参数原样透传，实际服务配置通过环境变量提供。
+复制整个目录或解压归档到目标机器的可写位置，进入发行目录后核验 `shasum -a 256 -c SHA256SUMS`（Linux 也可用 `sha256sum -c SHA256SUMS`），执行 `cp .env.example .env`，按需编辑配置并限制权限，再运行 `./start.sh`。支持 **macOS arm64 和 Linux x86_64**；启动器将 `Darwin/arm64` 映射到 `bin/kafka-dashboard-darwin-arm64`，将 `Linux/x86_64` 映射到 `bin/kafka-dashboard-linux-amd64`，其他平台拒绝启动。模板默认访问地址为 `http://127.0.0.1:3000`，健康接口为 `/api/health`，用 `KAFKA_DASHBOARD_BIND` 修改监听地址。启动器切换到发行目录并创建私有权限的 `data/`；模板通过相对路径指定 `web/` 和 `data/kafka-dashboard.db`，可整体搬移。参数原样透传，`./start.sh --version` 无需 `.env`；Ctrl-C 或 SIGTERM 可停止服务。
 
 从旧加密凭据版本升级时，先停止服务并确认当前 `DATABASE_URL` 指向的数据库（发行包默认为 `data/kafka-dashboard.db`，源码运行默认为仓库根目录的 `kafka-dashboard.db`）。手动删除该旧数据库及同名的 `-wal`、`-shm`、`-journal` sidecar，再运行新版本并重新配置全部集群和 Lag 规则。此操作会丢弃旧配置；程序不会转换旧凭据或自动删除数据库。
 
-启动器将工作目录切换到发行目录，再使用固定的相对 SQLite URL，目录名含 `?`、`%20`、空格或中文时也不会改变数据库实际位置。显式设置的环境变量值原样保留，其中相对路径以发行目录为基准。
+启动器将工作目录切换到发行目录，模板使用固定的相对 SQLite URL，目录名含 `?`、`%20`、空格或中文时也不会改变数据库实际位置。父进程显式设置的同名环境变量优先于 `.env`，其值原样保留，其中相对路径以发行目录为基准。
 
 运行机器不需要 Node.js、Rust、系统 librdkafka 或系统 OpenSSL。Linux 二进制使用 musl，静态链接 librdkafka、SQLite 和 vendored OpenSSL；macOS 保留操作系统原生库依赖（如 libSystem），并非完全静态。Linux 包不携带宿主机 CA 信任库，私有 TLS 请在集群设置显式配置 CA PEM。网络/DNS、可写存储和操作系统执行许可仍需可用。
 
-验证命令需在构建主机执行，使用 `curl`、`file`、`shasum`、`sqlite3`、`otool` 和 Docker。它校验完整文件清单、哈希、架构和静态链接边界，在临时副本直接启动 macOS 程序与 Linux/amd64 最小容器，验证版本、SQLite 迁移、健康接口、页面/资源、SPA fallback 和 SIGTERM 退出；验证后清理临时进程和容器，不向发行目录写入数据库。
+验证命令需在构建主机执行，使用 `curl`、`file`、`shasum`、`sqlite3`、`otool` 和 Docker。它校验完整文件清单、哈希、架构和静态链接边界，在临时发行副本中复制 `.env.example` 为 `.env`，再启动 macOS 程序与 Linux/amd64 最小容器，验证版本、SQLite 迁移、健康接口、页面/资源、SPA fallback 和 SIGTERM 退出；验证后清理临时进程和容器，不向原发行目录写入 `.env` 或数据库。
 
 ## 故障排查
 
