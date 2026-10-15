@@ -133,8 +133,8 @@ test('duplicate background startup keeps the existing pid and log', async t => {
   const pid = await readPid(f.release);
   const log = await serviceLog(f.release);
   const result = f.run(['start']);
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, new RegExp(`正在运行，PID: ${pid}`));
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}${result.stderr}`, new RegExp(`Kafka Lens 已在运行，PID: ${pid}`));
   assert.equal(await readPid(f.release), pid);
   assert.equal(await readFile(logPath(f.release), 'utf8'), log);
 });
@@ -197,6 +197,36 @@ test('live pid belonging to another process is rejected without deleting it', as
     assert.equal(await readPid(f.release), process.pid);
   }
 });
+for (const kind of ['similar executable path', 'unrelated argument containing binary path']) {
+  test(`process identity rejects ${kind}`, async t => {
+    const f = await fixture(t);
+    const binary = path.join(f.release, 'bin/kafka-dashboard-darwin-arm64');
+    let child;
+    if (kind === 'similar executable path') {
+      await copyFile(binary, `${binary}.old`);
+      child = spawn('/bin/sh', [`${binary}.old`], {
+        env: { ...process.env, FAKE_PID_FILE: path.join(f.temp, 'started-pids') }, stdio: 'ignore',
+      });
+    } else {
+      child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', binary], { stdio: 'ignore' });
+    }
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    t.after(async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await exited;
+    });
+    await new Promise(resolve => child.once('spawn', resolve));
+    await mkdir(path.join(f.release, 'data'));
+    await writeFile(pidPath(f.release), `${child.pid}\n`);
+    for (const command of ['status', 'start']) {
+      const result = f.run([command]);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /进程身份不匹配/);
+      assert.equal(await readPid(f.release), child.pid);
+      process.kill(child.pid, 0);
+    }
+  });
+}
 test('failed process inspection is a pid error and preserves the pid file', async t => {
   const f = await fixture(t);
   await mkdir(path.join(f.release, 'data'));
@@ -217,6 +247,42 @@ test('existing lock rejects concurrent management without removing the lock', as
     assert.match(result.stderr, /另一个启动器管理操作正在进行/);
     assert.equal(existsSync(lock), true);
   }
+});
+test('signal exit releases its lock once and preserves a replacement owner lock', async t => {
+  const f = await fixture(t);
+  const lock = path.join(f.release, 'data/kafka-dashboard.lock');
+  const ready = path.join(f.temp, 'inspection-ready');
+  const releases = path.join(f.temp, 'lock-releases');
+  await mkdir(path.join(f.release, 'data'));
+  await writeFile(pidPath(f.release), `${process.pid}\n`);
+  await executable(path.join(f.commands, 'ps'), '#!/bin/sh\nprintf ready > "$INSPECTION_READY"\nsleep 1\n');
+  // Simulate another launcher acquiring the directory immediately after release.
+  await executable(path.join(f.commands, 'rmdir'), `#!/bin/sh
+printf 'release\\n' >> "$LOCK_RELEASES"
+/bin/rmdir "$@" || exit
+if [ ! -e "$LOCK_REPLACED" ]; then
+    : > "$LOCK_REPLACED"
+    mkdir "$@"
+fi
+`);
+  const child = spawn('/bin/sh', [path.join(f.release, 'start.sh'), 'status'], {
+    cwd: f.temp, stdio: 'ignore',
+    env: { ...process.env, PATH: `${f.commands}:${process.env.PATH}`, INSPECTION_READY: ready,
+      LOCK_RELEASES: releases, LOCK_REPLACED: path.join(f.temp, 'replacement-owner') },
+  });
+  const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited;
+  });
+  for (let attempt = 0; attempt < 100 && !existsSync(ready); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(existsSync(ready), true, 'launcher should hold the lock during inspection');
+  child.kill('SIGTERM');
+  assert.deepEqual(await exited, { code: 143, signal: null });
+  assert.equal(await readFile(releases, 'utf8'), 'release\n');
+  assert.equal(existsSync(lock), true, 'replacement owner must retain its lock');
 });
 test('version runs in the foreground without creating data, pid, or log', async t => {
   const f = await fixture(t);

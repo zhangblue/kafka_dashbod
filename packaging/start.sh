@@ -19,9 +19,9 @@ release_lock() { [ ! -d "$lock_dir" ] || rmdir "$lock_dir" 2>/dev/null || :; }
 acquire_lock() {
     mkdir "$lock_dir" 2>/dev/null || fail '无法执行操作：另一个启动器管理操作正在进行'
     trap release_lock EXIT
-    trap 'release_lock; exit 129' HUP
-    trap 'release_lock; exit 130' INT
-    trap 'release_lock; exit 143' TERM
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 }
 write_pid() {
     pid_tmp="$pid_file.$$"
@@ -46,7 +46,14 @@ inspect_process() {
         echo '无法检查进程' >&2
         return 2
     fi
-    process_command=$(printf '%s\n' "$process_table" | awk -v target="$pid" '$1 == target { print; exit }')
+    process_command=$(printf '%s\n' "$process_table" | awk -v target="$pid" '
+        $1 == target {
+            sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "")
+            # BusyBox prefixes shebang commands with a {comm} annotation.
+            sub(/^\{[^}]+\}[[:space:]]+/, "")
+            print
+            exit
+        }')
     if ! kill -0 "$pid" 2>/dev/null; then
         if [ -n "$process_command" ]; then
             echo '无法检查进程：没有访问权限' >&2
@@ -62,15 +69,17 @@ inspect_process() {
         echo '无法检查进程：命令不可读' >&2
         return 2
     fi
+    # This launcher never passes service arguments. Match the complete command,
+    # including the direct POSIX-shell interpreter form used by script binaries.
     case "$process_command" in
-        *"$binary"*) return 0 ;;
+        "$binary"|"/bin/sh $binary") return 0 ;;
         *) echo 'PID 文件对应的进程身份不匹配' >&2; return 2 ;;
     esac
 }
 start_service() {
     if inspect_process; then
-        echo "Kafka Lens 正在运行，PID: $pid"
-        return 0
+        echo "Kafka Lens 已在运行，PID: $pid" >&2
+        return 1
     else
         state=$?
         [ "$state" -eq 1 ] || return "$state"
