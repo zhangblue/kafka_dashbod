@@ -155,6 +155,24 @@ test('background startup preserves explicit database and web paths', async t => 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual((await serviceLog(f.release)).split('\n').slice(2, 4), ['sqlite:///custom.db', '/custom/web']);
 });
+test('C locale manages the complete lifecycle in a Chinese release directory', async t => {
+  const f = await fixture(t);
+  const moved = path.join(f.temp, '中文 movable release');
+  await rename(f.release, moved);
+  const env = { LC_ALL: 'C' };
+  assert.equal(f.run(['start'], env, moved).status, 0);
+  const pid = await readPid(moved);
+  const running = f.run(['status'], env, moved);
+  assert.equal(running.status, 0, running.stderr);
+  assert.equal(running.stdout.trim(), `Kafka Lens 正在运行，PID: ${pid}`);
+  const stopped = f.run(['stop'], env, moved);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.equal(isRunning(pid), false);
+  assert.equal(existsSync(pidPath(moved)), false);
+  const status = f.run(['status'], env, moved);
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(status.stdout.trim(), 'Kafka Lens 未运行');
+});
 
 test('immediate startup failure removes pid and points to the log', async t => {
   const f = await fixture(t);
@@ -361,11 +379,102 @@ for (const kind of ['similar executable path', 'unrelated argument containing bi
     }
   });
 }
+for (const reopenScript of [false, true]) {
+  test(`process identity rejects a script path and argument that concatenate to the binary path${reopenScript ? ' with a reopened script descriptor' : ''}`, async t => {
+    const f = await fixture(t);
+    const prefixScript = path.join(f.temp, 'movable');
+    await executable(prefixScript, `#!/bin/sh
+{
+  ${reopenScript ? 'exec 255<"$EXPECTED_SCRIPT"' : ':'}
+  printf ready
+  trap 'exit 0' TERM
+  while :; do sleep 0.1; done
+}
+`);
+    const child = spawn('/bin/sh', [prefixScript, 'release/bin/kafka-dashboard-darwin-arm64'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, EXPECTED_SCRIPT: path.join(f.release, 'bin/kafka-dashboard-darwin-arm64') },
+    });
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    t.after(async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await exited;
+    });
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('error', reject);
+      child.once('exit', () => reject(new Error('script fixture exited before readiness')));
+    });
+    await mkdir(path.join(f.release, 'data'));
+    await writeFile(pidPath(f.release), `${child.pid}\n`);
+    for (const command of ['status', 'start', 'stop', 'restart']) {
+      const result = f.run([command]);
+      assert.notEqual(result.status, 0, `must reject ambiguous argv during ${command}`);
+      assert.match(result.stderr, /进程身份不匹配/);
+      assert.equal(await readPid(f.release), child.pid);
+      process.kill(child.pid, 0);
+    }
+  });
+}
+test('process identity rejects a native process with the binary path forged as argv zero', async t => {
+  const f = await fixture(t);
+  const child = spawn('/bin/cat', [], {
+    argv0: path.join(f.release, 'bin/kafka-dashboard-darwin-arm64'), stdio: ['pipe', 'ignore', 'ignore'],
+  });
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited;
+  });
+  await new Promise(resolve => child.once('spawn', resolve));
+  await mkdir(path.join(f.release, 'data'));
+  await writeFile(pidPath(f.release), `${child.pid}\n`);
+  const result = f.run(['stop']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /进程身份不匹配/);
+  process.kill(child.pid, 0);
+});
+test('process identity rejects a forged native argv zero even when the target is memory mapped', async t => {
+  const f = await fixture(t);
+  const binary = path.join(f.release, 'bin/kafka-dashboard-darwin-arm64');
+  const python = spawnSync('/usr/bin/python3', ['-c', 'import sys; print(sys.prefix)'], { encoding: 'utf8' });
+  assert.equal(python.status, 0, python.stderr);
+  const pythonHome = python.stdout.trim();
+  const child = spawn(path.join(pythonHome, 'Resources/Python.app/Contents/MacOS/Python'), [], {
+    argv0: binary, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONHOME: pythonHome },
+  });
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited;
+  });
+  const ready = new Promise((resolve, reject) => {
+    child.stdout.once('data', resolve);
+    child.once('error', reject);
+    child.once('exit', () => reject(new Error(`memory-map fixture exited before readiness: ${stderr}`)));
+  });
+  child.stdin.end(`import mmap, time
+target = open(${JSON.stringify(binary)}, 'rb')
+mapping = mmap.mmap(target.fileno(), 0, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ)
+print('ready', flush=True)
+time.sleep(60)
+`);
+  await ready;
+  await mkdir(path.join(f.release, 'data'));
+  await writeFile(pidPath(f.release), `${child.pid}\n`);
+  const result = f.run(['status']);
+  assert.notEqual(result.status, 0, 'a mapping must not be accepted as the executed binary');
+  assert.match(result.stderr, /进程身份不匹配/);
+  process.kill(child.pid, 0);
+});
 test('process inspection consumes a large table without broken pipe diagnostics', async t => {
   const f = await fixture(t);
   assert.equal(f.run(['start']).status, 0);
   const pid = await readPid(f.release);
   await executable(path.join(f.commands, 'ps'), `#!/bin/sh
+[ "$1" = -e ] || exec /bin/ps "$@"
 awk 'BEGIN {
   print ENVIRON["TEST_PID"] " /bin/sh " ENVIRON["TEST_BINARY"]
   for (i = 0; i < 10000; i++) print 100000 + i " /unrelated/background-service"
@@ -380,7 +489,7 @@ awk 'BEGIN {
   assert.equal(isRunning(pid), false);
 });
 for (const kind of ['exact command', 'similar first path', 'similar second path', 'extra argument', 'unrelated prefix']) {
-  test(`QEMU process identity handles ${kind} with complete path matching`, async t => {
+  test(`QEMU process identity rejects unproven ${kind} from a process table alone`, async t => {
     const f = await fixture(t);
     assert.equal(f.run(['start']).status, 0);
     const pid = await readPid(f.release);
@@ -393,28 +502,18 @@ for (const kind of ['exact command', 'similar first path', 'similar second path'
       'extra argument': `[qemu] ${binary} ${binary} --unrelated`,
       'unrelated prefix': `wrapper [qemu] ${binary} ${binary}`,
     }[kind];
-    // Model the actual BusyBox process table boundary observed under linux/amd64
-    // emulation while keeping the PID and signals backed by a real owned service.
+    // Flattened process text cannot supply QEMU's executable or NUL argv proof.
+    // The real Linux/amd64 release verification covers the accepted QEMU process.
     await executable(path.join(f.commands, 'ps'), '#!/bin/sh\nprintf "%s {kafka-dashboard} %s\\n" "$TEST_PID" "$TEST_COMMAND"\n');
     const env = { TEST_PID: String(pid), TEST_COMMAND: command };
-    if (kind === 'exact command') {
-      const status = f.run(['status'], env);
-      assert.equal(status.status, 0, status.stderr);
-      assert.match(status.stdout, new RegExp(`Kafka Lens 正在运行，PID: ${pid}`));
-      const stopped = f.run(['stop'], env);
-      assert.equal(stopped.status, 0, stopped.stderr);
-      assert.equal(existsSync(pidPath(f.release)), false);
-      assert.equal(isRunning(pid), false);
-    } else {
-      for (const action of ['status', 'stop', 'restart']) {
-        const result = f.run([action], env);
-        assert.notEqual(result.status, 0);
-        assert.match(result.stderr, /进程身份不匹配/);
-        assert.equal(await readPid(f.release), pid);
-        assert.equal(isRunning(pid), true);
-      }
-      assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\n`);
+    for (const action of ['status', 'stop', 'restart']) {
+      const result = f.run([action], env);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /进程身份不匹配/);
+      assert.equal(await readPid(f.release), pid);
+      assert.equal(isRunning(pid), true);
     }
+    assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\n`);
   });
 }
 test('failed process inspection is a pid error and preserves the pid file', async t => {
@@ -628,6 +727,9 @@ while :; do sleep 0.1; done
   const launcherSource = await readFile(launcher, 'utf8');
   await executable(launcher, launcherSource.replace('set -eu', `set -eu
 [ -z "\${MAC_EVENTS-}" ] || printf '%s\\n' "\${1-start}" >> "$MAC_EVENTS"
+if [ -n "\${MAC_REFUSE_IDENTITY_FILE-}" ] && [ -e "$MAC_REFUSE_IDENTITY_FILE" ]; then
+    case "\${1-}" in stop|status) echo 'PID 文件对应的进程身份不匹配' >&2; exit 2 ;; esac
+fi
 if [ "\${1-}" = status ] && [ -n "\${MAC_STATUS_FAULT-}" ]; then
     if [ -f "$(dirname "$0")/data/kafka-dashboard.pid" ]; then
         case "$MAC_STATUS_FAULT" in
@@ -665,6 +767,33 @@ test('failed runtime verification reaps even a server that ignores TERM', async 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Health timeout/);
   assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
+});
+
+test('failed verification never kills a pid after the launcher refuses its identity', async t => {
+  const f = await runtimeFixture(t);
+  const serverPidFile = path.join(f.temp, 'server.pid');
+  const refusal = path.join(f.temp, 'identity-refused');
+  let serverPid;
+  t.after(async () => {
+    if (!serverPid && existsSync(serverPidFile)) serverPid = Number(await readFile(serverPidFile, 'utf8'));
+    try { if (serverPid) process.kill(serverPid, 'SIGKILL'); } catch {}
+    for (let attempt = 0; serverPid && isRunning(serverPid) && attempt < 100; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    if (serverPid) assert.equal(isRunning(serverPid), false, 'identity refusal fixture must be reaped by its owner');
+  });
+  await executable(path.join(f.temp, 'commands/docker'), '#!/bin/sh\nexit 0\n');
+  await executable(path.join(f.temp, 'commands/curl'), '#!/bin/sh\ntouch "$MAC_REFUSE_IDENTITY_FILE"\nexit 1\n');
+  const result = spawnSync('/bin/sh', [path.join(root, 'tools/verify-release.sh'), f.release], {
+    encoding: 'utf8', timeout: runtimeVerificationTimeoutMs,
+    env: { ...process.env, PATH: `${f.temp}/commands:${process.env.PATH}`, SERVER_PID_FILE: serverPidFile,
+      MAC_REFUSE_IDENTITY_FILE: refusal },
+  });
+  serverPid = Number(await readFile(serverPidFile, 'utf8'));
+  assert.equal(result.error, undefined);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Health timeout/);
+  assert.equal(isRunning(serverPid), true, 'identity refusal must prevent forced cleanup of this pid');
 });
 
 async function verifyDualPlatformLifecycle(t, fault) {

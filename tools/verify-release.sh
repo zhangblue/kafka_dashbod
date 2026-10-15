@@ -37,10 +37,20 @@ cleanup() {
         if [ -z "$mac_pid" ] && [ -f "$mac_release/data/kafka-dashboard.pid" ]; then
             mac_pid=$(cat "$mac_release/data/kafka-dashboard.pid")
         fi
-        LC_ALL=en_US.UTF-8 "$mac_release/start.sh" stop >/dev/null 2>&1 || :
+        "$mac_release/start.sh" stop >/dev/null 2>&1 || :
     fi
     if [ -n "$mac_pid" ]; then
-        if kill -0 "$mac_pid" 2>/dev/null; then kill -KILL "$mac_pid" 2>/dev/null || :; fi
+        # A cached numeric PID can have been reused. Recheck the private copy's
+        # complete identity and exact PID immediately before any forced cleanup.
+        case "$mac_release" in
+            "$temp"/*)
+                if kill -0 "$mac_pid" 2>/dev/null &&
+                    cleanup_status=$("$mac_release/start.sh" status 2>/dev/null) &&
+                    [ "$cleanup_status" = "Kafka Lens 正在运行，PID: $mac_pid" ]; then
+                    kill -KILL "$mac_pid" 2>/dev/null || :
+                fi
+                ;;
+        esac
         cleanup_attempt=0
         while kill -0 "$mac_pid" 2>/dev/null && [ "$cleanup_attempt" -lt 20 ]; do
             cleanup_attempt=$((cleanup_attempt + 1))
@@ -87,11 +97,9 @@ cp "$mac_release/.env.example" "$mac_release/.env"
 cp "$linux_release/.env.example" "$linux_release/.env"
 unset DATABASE_URL KAFKA_DASHBOARD_WEB_DIR
 # ANSI color disabled so the bound ephemeral port can be read without guessing a free port.
-# macOS ps escapes Unicode arguments in the C locale, defeating exact identity
-# checks after relocation. Keep C for manifest ordering and UTF-8 for the launcher.
-LC_ALL=en_US.UTF-8 NO_COLOR=1 RUST_LOG=info KAFKA_DASHBOARD_BIND=127.0.0.1:0 "$mac_release/start.sh" start
+NO_COLOR=1 RUST_LOG=info KAFKA_DASHBOARD_BIND=127.0.0.1:0 "$mac_release/start.sh" start
 mac_pid=$(cat "$mac_release/data/kafka-dashboard.pid")
-mac_status=$(LC_ALL=en_US.UTF-8 "$mac_release/start.sh" status) || fail 'macOS running status command failed'
+mac_status=$("$mac_release/start.sh" status) || fail 'macOS running status command failed'
 [ "$mac_status" = "Kafka Lens 正在运行，PID: $mac_pid" ] || fail 'macOS status did not report the exact running service'
 mac_log="$mac_release/data/kafka-dashboard.log"
 attempt=0
@@ -128,8 +136,8 @@ check_http() {
     [ "$(sqlite3 "$destination/data/kafka-dashboard.db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('clusters', 'lag_rules');")" = 2 ] || fail 'SQLite migrations missing'
 }
 check_http "http://127.0.0.1:$mac_port" "$mac_release"
-LC_ALL=en_US.UTF-8 "$mac_release/start.sh" stop
-mac_status=$(LC_ALL=en_US.UTF-8 "$mac_release/start.sh" status) || fail 'macOS stopped status command failed'
+"$mac_release/start.sh" stop
+mac_status=$("$mac_release/start.sh" status) || fail 'macOS stopped status command failed'
 [ "$mac_status" = 'Kafka Lens 未运行' ] || fail 'macOS status did not report the exact stopped state'
 [ ! -e "$mac_release/data/kafka-dashboard.pid" ] || fail 'macOS PID file survived start.sh stop'
 if kill -0 "$mac_pid" 2>/dev/null; then fail 'macOS process survived start.sh stop'; fi

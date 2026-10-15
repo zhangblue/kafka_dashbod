@@ -27,6 +27,95 @@ write_pid() {
     pid_tmp="$pid_file.$$"
     printf '%s\n' "$1" > "$pid_tmp" && mv "$pid_tmp" "$pid_file"
 }
+matches_process_identity() {
+    case "$platform" in
+        darwin-arm64)
+            case "$process_command" in "$binary"|"/bin/sh $binary") ;; *) return 1 ;; esac
+            # Read the kernel executable and argc/NUL argv boundaries directly.
+            # System JXA bridges libproc/sysctl without GUI automation or installs.
+            # Darwin/arm64 uses little-endian int32 and size_t64 for these calls.
+            # The argument buffer also contains the environment: never print it.
+            identity=$(LC_ALL=en_US.UTF-8 osascript -l JavaScript -e '
+                ObjC.import("Foundation");
+                ObjC.bindFunction("proc_pidpath", ["int", ["int", "void *", "uint32"]]);
+                ObjC.bindFunction("sysctl", ["int", ["void *", "uint32", "void *", "void *", "void *", "uint64"]]);
+                function latin(data) {
+                    return $.NSString.alloc.initWithDataEncoding(data, $.NSISOLatin1StringEncoding).js;
+                }
+                function uint(raw, start, count) {
+                    var value = 0;
+                    for (var i = 0; i < count; i++) value += raw.charCodeAt(start + i) * Math.pow(256, i);
+                    return value;
+                }
+                function utf8(raw) {
+                    var data = $(raw).dataUsingEncoding($.NSISOLatin1StringEncoding);
+                    return $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding).js;
+                }
+                function run(argv) {
+                    var pid = Number(argv[0]), binary = argv[1];
+                    var path = $.NSMutableData.dataWithLength(4096);
+                    var count = $.proc_pidpath(pid, path.mutableBytes, 4096);
+                    if (count <= 0 || count >= 4096) throw new Error("Unreadable executable");
+                    path.length = count;
+                    var executable = $.NSString.alloc.initWithDataEncoding(path, $.NSUTF8StringEncoding).js;
+                    var encoded = "";
+                    [1, 49, pid].forEach(function(value) {
+                        for (var i = 0; i < 4; i++) encoded += String.fromCharCode((value >>> (i * 8)) & 255);
+                    });
+                    var mib = $(encoded).dataUsingEncoding($.NSISOLatin1StringEncoding);
+                    var size = $.NSMutableData.dataWithLength(8);
+                    if ($.sysctl(mib.bytes, 3, null, size.mutableBytes, null, 0) !== 0) throw new Error("Unreadable arguments");
+                    var length = uint(latin(size), 0, 8);
+                    if (length < 5 || length > 1048576) throw new Error("Invalid argument size");
+                    var buffer = $.NSMutableData.dataWithLength(length);
+                    if ($.sysctl(mib.bytes, 3, buffer.mutableBytes, size.mutableBytes, null, 0) !== 0) throw new Error("Unreadable arguments");
+                    buffer.length = uint(latin(size), 0, 8);
+                    var raw = latin(buffer), argc = uint(raw, 0, 4), end = raw.indexOf("\0", 4);
+                    if (argc < 1 || argc > 2 || end < 0) throw new Error("Invalid arguments");
+                    var cursor = end;
+                    while (cursor < raw.length && raw.charCodeAt(cursor) === 0) cursor++;
+                    var args = [];
+                    for (var i = 0; i < argc; i++) {
+                        end = raw.indexOf("\0", cursor);
+                        if (end < 0) throw new Error("Missing argument boundary");
+                        args.push(utf8(raw.slice(cursor, end)));
+                        cursor = end + 1;
+                    }
+                    if (executable === binary && argc === 1 && args[0] === binary) return "match";
+                    if ((executable === "/bin/sh" || executable === "/bin/bash") &&
+                        argc === 2 && args[0] === "/bin/sh" && args[1] === binary) return "match";
+                    throw new Error("Identity mismatch");
+                }
+            ' "$pid" "$binary" 2>/dev/null) || return 1
+            [ "$identity" = match ]
+            ;;
+        linux-amd64)
+            process_executable=$(readlink "/proc/$pid/exe") || return 1
+            case "$process_command" in
+                "$binary")
+                    [ "$process_executable" = "$binary" ] || return 1
+                    printf '%s\000' "$binary" | cmp -s - "/proc/$pid/cmdline"
+                    ;;
+                "/bin/sh $binary")
+                    [ "$process_executable" = "$(readlink -f /bin/sh)" ] || return 1
+                    printf '%s\000' /bin/sh "$binary" | cmp -s - "/proc/$pid/cmdline"
+                    ;;
+                "[qemu] $binary $binary")
+                    # Emulation must use the same kernel executable as this
+                    # launcher, not an unrelated process merely named qemu.
+                    launcher_executable=$(readlink "/proc/$$/exe") || return 1
+                    [ "$process_executable" = "$launcher_executable" ] || return 1
+                    case "$process_executable" in
+                        */qemu-x86_64|*/qemu-x86_64-static|*/x86_64-binfmt-P) ;;
+                        *) return 1 ;;
+                    esac
+                    printf '%s\000' '[qemu]' "$binary" "$binary" | cmp -s - "/proc/$pid/cmdline"
+                    ;;
+                *) return 1 ;;
+            esac
+            ;;
+    esac
+}
 
 # 0: matching live service; 1: stopped; 2: unsafe or unreadable process state.
 inspect_process() {
@@ -42,7 +131,12 @@ inspect_process() {
     case "$pid" in
         ''|*[!0-9]*|0*) echo 'PID 文件内容无效' >&2; return 2 ;;
     esac
-    if ! process_table=$(ps -e -o pid= -o args=); then
+    if [ "$platform" = darwin-arm64 ]; then
+        process_table=$(LC_ALL=en_US.UTF-8 ps -e -o pid= -o args=) || {
+            echo '无法检查进程' >&2
+            return 2
+        }
+    elif ! process_table=$(ps -e -o pid= -o args=); then
         echo '无法检查进程' >&2
         return 2
     fi
@@ -70,14 +164,9 @@ inspect_process() {
         echo '无法检查进程：命令不可读' >&2
         return 2
     fi
-    # This launcher never passes service arguments. Match the complete command,
-    # including the direct POSIX-shell interpreter form used by script binaries.
-    # Docker linux/amd64 emulation may expose QEMU with the executable repeated.
-    # Accept only that exact observed shape, with both absolute paths identical.
-    case "$process_command" in
-        "$binary"|"/bin/sh $binary"|"[qemu] $binary $binary") return 0 ;;
-        *) echo 'PID 文件对应的进程身份不匹配' >&2; return 2 ;;
-    esac
+    if matches_process_identity; then return 0; fi
+    echo 'PID 文件对应的进程身份不匹配' >&2
+    return 2
 }
 start_service() {
     if inspect_process; then
