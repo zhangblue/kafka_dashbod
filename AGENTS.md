@@ -1,13 +1,12 @@
 # Kafka Lens：代理开发约定
 
-所有命令默认从仓库根目录执行。先阅读 `README.md` 和与任务相关的源码、测试；设计与计划位于 `docs/superpowers/`。保留用户已有变更，不把无关改动纳入提交。
+所有命令默认从仓库根目录执行。先阅读 `README.md` 和与任务相关的源码、测试；设计与计划位于 `docs/superpowers/`。历史设计和实现计划保留为决策记录，其中旧描述不作为当前操作指南。保留用户已有变更，不把无关改动纳入提交。
 
 ## 架构与职责
 
 - `backend/src/domain/`：Offset、Lag、配置和快照的领域类型与纯计算；未知值必须显式表达，不能降为 0。
 - `backend/src/api/`：Axum `/api` JSON 接口、校验与统一安全错误；`static_assets/` 负责生产静态资源。API 路径（包括未知 API）不得回退为 HTML，SPA fallback 只适用于允许的页面请求；保留静态文件路径、符号链接与目录能力的安全边界。
-- `backend/src/db/`、`backend/migrations/`：SQLite 配置仓储与迁移。只持久化集群配置、加密凭据及 Lag 规则，不存储指标历史。
-- `backend/src/crypto.rs`：主密钥解析与 AES-256-GCM 凭据加密；不得绕过仓储加密保存秘密。
+- `backend/src/db/`、`backend/migrations/`：SQLite 配置仓储与迁移。只持久化集群配置、明文 Kafka 凭据及 Lag 规则，不存储指标历史。旧加密数据库由用户停服后手动删除并重新配置，不迁移、转换或自动删除。
 - `backend/src/kafka/`：只读 librdkafka 适配和有界采集。普通应用禁止生产消息、创建 Topic、提交或重置消费位置。
 - `backend/src/sessions/`：按需客户端和 15 秒短租约。快照续租，同一会话采集互斥；5 秒清理过期会话。关闭、删除集群、取消任务及进程退出必须等待在途创建/采集/释放，不能把阻塞原生工作遗留到后台。
 - `frontend/src/api/`：唯一 HTTP 客户端、共享类型；`frontend/src/features/`：设置、概览、Topics、Consumer Groups、Lag 规则、会话及内存历史；`frontend/src/components/`：公共展示组件。
@@ -22,7 +21,7 @@ Low 是保留起点，High 是下一写入位置，非空分区最大消息 Offs
 
 ## 安全与生成文件
 
-主密钥由 `KAFKA_DASHBOARD_MASTER_KEY` 提供，标准 Base64 解码后必须恰好 32 字节；没有开发默认密钥。API 只返回凭据配置标志，不回显秘密。不要把原生 Kafka 错误、请求体、连接密码、PEM、主密钥或数据库内容写入日志、截图、测试附件或错误响应。保留 256 KiB 请求上限、Request ID 和脱敏错误。
+SQLite 含明文 Kafka 凭据，须限制数据库、sidecar 和备份的访问权限。API 只返回凭据配置标志，API/日志仍不得回显秘密。不要把原生 Kafka 错误、请求体、连接密码、PEM 或数据库内容写入日志、截图、测试附件或错误响应。保留 256 KiB 请求上限、Request ID 和脱敏错误。
 
 服务没有内置认证；默认只监听回环地址，部署需要内网或认证反向代理及 HTTPS。只使用明确授权的一次性 broker 运行写入 fixture；普通集群始终只读。
 
@@ -30,7 +29,7 @@ Low 是保留起点，High 是下一写入位置，非空分区最大消息 Offs
 
 ## 开发与验证
 
-后端启动前按 README 安全设置主密钥，然后运行 `cargo run -p backend --bin kafka-dashboard`。前端使用 `npm --prefix frontend ci`、`npm --prefix frontend run dev -- --host 127.0.0.1`。生产静态目录由 `KAFKA_DASHBOARD_WEB_DIR` 配置；开发代理地址用 `KAFKA_DASHBOARD_API_TARGET`。
+后端使用 `cargo run -p backend --bin kafka-dashboard` 启动，无必填环境配置。前端使用 `npm --prefix frontend ci`、`npm --prefix frontend run dev -- --host 127.0.0.1`。生产静态目录由 `KAFKA_DASHBOARD_WEB_DIR` 配置；开发代理地址用 `KAFKA_DASHBOARD_API_TARGET`。
 
 ```bash
 cargo fmt --all -- --check

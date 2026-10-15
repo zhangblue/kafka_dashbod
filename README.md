@@ -1,6 +1,6 @@
 # Kafka Lens
 
-Kafka 只读监控面板：管理集群连接配置，查看 Topic / Partition 水位、Consumer Group Lag、最近一小时趋势，以及集群默认和 Group / Topic 自定义 Lag 规则。后端为 Rust / Axum，前端为 React / Vite，SQLite 只保存配置与加密凭据。常规应用不会创建 Topic、生产消息或提交消费位置。
+Kafka 只读监控面板：管理集群连接配置，查看 Topic / Partition 水位、Consumer Group Lag、最近一小时趋势，以及集群默认和 Group / Topic 自定义 Lag 规则。后端为 Rust / Axum，前端为 React / Vite，SQLite 只保存配置与明文 Kafka 凭据。常规应用不会创建 Topic、生产消息或提交消费位置。
 
 当前版本没有后台常驻采集、跨页面持久化指标、消息内容浏览、消费位置重置、通知渠道或内置用户认证。数据范围受 Kafka 账户权限限制。截图约定放在 `docs/screenshots/`（当前未附截图）；如补充截图，请使用临时测试集群并隐藏连接地址及所有凭据。
 
@@ -16,15 +16,14 @@ Kafka 只读监控面板：管理集群连接配置，查看 Topic / Partition �
 在项目根目录启动后端：
 
 ```bash
-export KAFKA_DASHBOARD_MASTER_KEY="$(openssl rand -base64 32)"
 export DATABASE_URL='sqlite://kafka-dashboard.db'
 export KAFKA_DASHBOARD_BIND='127.0.0.1:3000'
 cargo run -p backend --bin kafka-dashboard
 ```
 
-主密钥必须是 **32 字节随机值的标准 Base64**。请将首次生成的值保存在安全的密钥管理位置，每次启动使用同一个值；重启时重新生成会导致已有密文无法解密。不要提交密钥、`.env` 或数据库，也不要在命令输出和日志中记录它们。缺少或格式不正确的密钥会使服务拒绝启动。
+启动无需必填环境配置。**警告：SQLite 明文保存 Kafka 凭据。** 不要提交 `.env`、数据库或备份，也不要在命令输出和日志中记录其中内容。
 
-`DATABASE_URL` 默认 `sqlite://kafka-dashboard.db`；可指定绝对路径，例如 `sqlite:///var/lib/kafka-lens/config.db`，父目录需提前创建且可写。启动时自动迁移。备份数据库时也需安全保管原主密钥。绑定地址默认 `127.0.0.1:3000`，设为 `127.0.0.1:0` 可由系统选择临时端口；启动日志会报告地址。健康检查为 `GET /api/health`。
+`DATABASE_URL` 默认 `sqlite://kafka-dashboard.db`；可指定绝对路径，例如 `sqlite:///var/lib/kafka-lens/config.db`，父目录需提前创建且可写。启动时初始化当前数据库结构；旧加密版本数据库不兼容，须按下文升级步骤手动删除后重新配置。绑定地址默认 `127.0.0.1:3000`，设为 `127.0.0.1:0` 可由系统选择临时端口；启动日志会报告地址。健康检查为 `GET /api/health`。
 
 另开终端启动前端：
 
@@ -44,7 +43,6 @@ npm --prefix frontend run preview -- --host 127.0.0.1
 
 | 变量 | 默认值 / 用途 |
 | --- | --- |
-| `KAFKA_DASHBOARD_MASTER_KEY` | 必填；32 字节随机值的标准 Base64，同一数据库重启时保持不变 |
 | `DATABASE_URL` | 源码运行为 `sqlite://kafka-dashboard.db`；发行启动器为 `sqlite://data/kafka-dashboard.db?mode=rwc` |
 | `KAFKA_DASHBOARD_BIND` | `127.0.0.1:3000`，HTTP 监听地址 |
 | `KAFKA_DASHBOARD_WEB_DIR` | 源码运行不设置时仅提供 API；发行启动器自动指定包内 `web/`，自定义目录必须含 `index.html` |
@@ -52,7 +50,7 @@ npm --prefix frontend run preview -- --host 127.0.0.1
 | `RUST_LOG` | 可用 `info` 设置日志级别；调试时也不得输出敏感配置 |
 | `KAFKA_TEST_PORT` | 手动 Compose 测试 broker 默认宿主端口 `19092`；一键 E2E 自动选择 |
 
-应用和发行启动器均不会自动读取 `.env`，需由 shell 或服务管理器注入变量。`packaging/.env.example` 是占位示例，不能直接作为真实主密钥使用。
+应用和发行启动器均不会自动读取 `.env`，可选变量需由 shell 或服务管理器注入。`packaging/.env.example` 仅列出可选配置示例。
 
 ## 连接与凭据
 
@@ -67,7 +65,7 @@ Bootstrap Servers 填写逗号分隔的 `host:port`。后端必须能访问 Kafk
 
 不支持 OAuth/OIDC、Kerberos 或任意 librdkafka 参数透传。TLS 客户端证书和私钥必须成对填写；不要把 SASL 字段配置到非 SASL 协议。
 
-密码、CA、客户端证书、私钥和私钥口令以 AES-256-GCM 加密存入 SQLite，API 只返回各字段的“已配置”标志，不回显内容。编辑时敏感字段留空或省略表示保留；使用对应的清除选项可显式移除。API 字段为 `clearPassword`、`clearCaPem`、`clearClientCertificatePem`、`clearClientKeyPem` 和 `clearClientKeyPassphrase`，设为 `true` 时清除该字段；同一字段不能同时填写新值并要求清除。保存前会校验合并后的完整配置：切换协议时须清除不适用的凭据，证书与私钥仍须成对保留，私钥口令不能脱离私钥单独存在。
+**警告：密码、CA、客户端证书、私钥和私钥口令以明文 JSON 存入 SQLite。** 任何能读取数据库、sidecar 或备份的人都能获得这些凭据；请限制文件权限并妥善保护备份。API 只返回各字段的“已配置”标志，不回显内容，日志也不得输出凭据。编辑时敏感字段留空或省略表示保留；使用对应的清除选项可显式移除。API 字段为 `clearPassword`、`clearCaPem`、`clearClientCertificatePem`、`clearClientKeyPem` 和 `clearClientKeyPassphrase`，设为 `true` 时清除该字段；同一字段不能同时填写新值并要求清除。保存前会校验合并后的完整配置：切换协议时须清除不适用的凭据，证书与私钥仍须成对保留，私钥口令不能脱离私钥单独存在。
 
 新增或编辑表单均可在保存前测试连接。新配置使用 `POST /api/clusters/test`，未保存的编辑使用 `POST /api/clusters/:id/test`，请求体均为完整表单字段；编辑草稿中省略或留空的敏感字段会复用已保存值，清除选项只影响此次测试。原有 `POST /api/clusters/:id/test` 空请求体继续测试已保存配置。测试不会写入配置，也不会创建监控会话；临时工作由会话管理器跟踪，删除集群或退出进程时会等待相关测试释放资源。请求体上限为 256 KiB，超限返回 413；连接错误及校验错误使用安全错误消息与 Request ID。
 
@@ -99,7 +97,7 @@ npm --prefix frontend run test:e2e
 git diff --check
 ```
 
-E2E 一键脚本使用独立 Compose project 和动态本地端口，启动 Apache Kafka 3.9.1 KRaft；Rust fixture 只向本次临时容器创建 `dashboard-e2e-orders` 的两个分区、在分区 0 写入 10 条消息，并为 `dashboard-e2e-reader` 提交位置 4 / 0，预期 Lag 为 6 / 0。脚本自动使用临时 SQLite、随机主密钥、后端和前端进程。Vite 直接绑定端口 0，脚本从子进程实际监听地址获取端口，并核验 PID 存活及本次运行标识，防止误用其他健康服务。正常结束、失败或收到 INT / TERM 均清理进程、容器、卷和临时文件。不要手动把 fixture 指向已有 Kafka；普通 `cargo test` 默认跳过需要 broker 的测试。
+E2E 一键脚本使用独立 Compose project 和动态本地端口，启动 Apache Kafka 3.9.1 KRaft；Rust fixture 只向本次临时容器创建 `dashboard-e2e-orders` 的两个分区、在分区 0 写入 10 条消息，并为 `dashboard-e2e-reader` 提交位置 4 / 0，预期 Lag 为 6 / 0。脚本自动使用临时 SQLite、后端和前端进程。Vite 直接绑定端口 0，脚本从子进程实际监听地址获取端口，并核验 PID 存活及本次运行标识，防止误用其他健康服务。正常结束、失败或收到 INT / TERM 均清理进程、容器、卷和临时文件。不要手动把 fixture 指向已有 Kafka；普通 `cargo test` 默认跳过需要 broker 的测试。
 
 浏览器验收覆盖集群 CRUD、测试连接、真实水位/Lag、规则保存与自定义标记、刷新频率、切换和离开时释放会话；另验证 API / 运行日志不泄漏测试秘密、超大请求、历史淘汰和隐藏时无轮询。历史测试只加速响应中的采集时间，指标仍来自 Kafka；headless 环境通过浏览器 visibility 事件模拟隐藏。Rust 测试额外覆盖采集互斥、删除释放和 SIGTERM。Playwright 默认关闭 trace / screenshot，避免持久化请求中的敏感字段。
 
@@ -113,7 +111,7 @@ docker compose -f docker-compose.test.yml -p kafka-lens-manual down --volumes --
 
 ## 部署边界
 
-当前服务没有内置用户登录或权限系统。生产环境应置于受保护的内网或带身份验证的反向代理之后；使用 HTTPS，对 `/api` 配置代理和访问控制。发行包由后端直接提供静态资源和 SPA fallback。Vite preview 仅用于本地验收。后端默认只绑定回环地址；代理请求体限制应与 256 KiB 上限一致，超时需容纳 Kafka 采集。限制数据库及密钥的文件权限，Kafka 使用最小只读权限账户，优先选择 SASL_SSL / SSL。
+当前服务没有内置用户登录或权限系统。生产环境应置于受保护的内网或带身份验证的反向代理之后；使用 HTTPS，对 `/api` 配置代理和访问控制。发行包由后端直接提供静态资源和 SPA fallback。Vite preview 仅用于本地验收。后端默认只绑定回环地址；代理请求体限制应与 256 KiB 上限一致，超时需容纳 Kafka 采集。限制数据库、sidecar 和备份的文件权限，Kafka 使用最小只读权限账户，优先选择 SASL_SSL / SSL。
 
 ## 双平台离线发行包
 
@@ -135,25 +133,27 @@ kafka-dashboard/
 │   └── kafka-dashboard-linux-amd64
 ├── web/                 # 已构建的前端页面和 assets
 ├── start.sh
-├── .env.example         # 占位示例，不自动加载
+├── .env.example         # 可选配置示例，不自动加载
 ├── README.txt           # 离线运行说明
 └── SHA256SUMS
 ```
 
-复制整个目录或解压归档到目标机器的可写位置，核验 `shasum -a 256 -c SHA256SUMS`（Linux 也可用 `sha256sum -c SHA256SUMS`），在 shell 或服务管理器中安全设置此前说明的 `KAFKA_DASHBOARD_MASTER_KEY`，运行 `./start.sh`。支持 **macOS arm64 和 Linux x86_64**；启动器自动选择二进制，默认访问地址为 `http://127.0.0.1:3000`，用 `KAFKA_DASHBOARD_BIND` 修改。启动器按自身位置定位 `web/`，创建私有权限的 `data/` 并使用 `data/kafka-dashboard.db`，可整体搬移；`DATABASE_URL` 和 `KAFKA_DASHBOARD_WEB_DIR` 可覆盖默认路径。参数原样透传，实际服务配置通过环境变量提供。
+复制整个目录或解压归档到目标机器的可写位置，核验 `shasum -a 256 -c SHA256SUMS`（Linux 也可用 `sha256sum -c SHA256SUMS`），直接运行 `./start.sh`。支持 **macOS arm64 和 Linux x86_64**；启动器将 `Darwin/arm64` 映射到 `bin/kafka-dashboard-darwin-arm64`，将 `Linux/x86_64` 映射到 `bin/kafka-dashboard-linux-amd64`，其他平台拒绝启动。默认访问地址为 `http://127.0.0.1:3000`，用 `KAFKA_DASHBOARD_BIND` 修改。启动器按自身位置定位 `web/`，创建私有权限的 `data/` 并使用 `data/kafka-dashboard.db`，可整体搬移；`DATABASE_URL` 和 `KAFKA_DASHBOARD_WEB_DIR` 可覆盖默认路径。参数原样透传，实际服务配置通过环境变量提供。
+
+从旧加密凭据版本升级时，先停止服务并确认当前 `DATABASE_URL` 指向的数据库（发行包默认为 `data/kafka-dashboard.db`，源码运行默认为仓库根目录的 `kafka-dashboard.db`）。手动删除该旧数据库及同名的 `-wal`、`-shm`、`-journal` sidecar，再运行新版本并重新配置全部集群和 Lag 规则。此操作会丢弃旧配置；程序不会转换旧凭据或自动删除数据库。
 
 启动器将工作目录切换到发行目录，再使用固定的相对 SQLite URL，目录名含 `?`、`%20`、空格或中文时也不会改变数据库实际位置。显式设置的环境变量值原样保留，其中相对路径以发行目录为基准。
 
 运行机器不需要 Node.js、Rust、系统 librdkafka 或系统 OpenSSL。Linux 二进制使用 musl，静态链接 librdkafka、SQLite 和 vendored OpenSSL；macOS 保留操作系统原生库依赖（如 libSystem），并非完全静态。Linux 包不携带宿主机 CA 信任库，私有 TLS 请在集群设置显式配置 CA PEM。网络/DNS、可写存储和操作系统执行许可仍需可用。
 
-验证命令需在构建主机执行，使用 `curl`、`file`、`shasum`、`sqlite3`、`otool`、`openssl` 和 Docker。它校验完整文件清单、哈希、架构和静态链接边界，在临时副本运行 macOS 程序与 Linux/amd64 最小容器，验证版本、SQLite 迁移、健康接口、页面/资源、SPA fallback 和 SIGTERM 退出；验证后清理临时进程和容器，不向发行目录写入数据库。
+验证命令需在构建主机执行，使用 `curl`、`file`、`shasum`、`sqlite3`、`otool` 和 Docker。它校验完整文件清单、哈希、架构和静态链接边界，在临时副本直接启动 macOS 程序与 Linux/amd64 最小容器，验证版本、SQLite 迁移、健康接口、页面/资源、SPA fallback 和 SIGTERM 退出；验证后清理临时进程和容器，不向发行目录写入数据库。
 
 ## 故障排查
 
 | 现象 | 检查方法 |
 | --- | --- |
-| 启动提示主密钥无效或读取旧凭据失败 | 确认 Base64 解码后为 32 字节，并使用该数据库最初的密钥；不要通过重新生成密钥修复已有密文 |
-| 无法初始化数据库 | 检查 SQLite URL、父目录是否存在以及运行账户读写权限；移动发行包时保留 `data/` 与原密钥 |
+| 启动提示配置数据库不兼容 | 停止服务，确认数据库路径，手动删除旧 DB 和 sidecar 后重新启动并配置集群与 Lag 规则；旧加密数据不自动转换 |
+| 无法初始化数据库 | 检查 SQLite URL、父目录是否存在以及运行账户读写权限；移动当前版本发行包时保留 `data/` 并保护其明文凭据 |
 | 连接超时或 DNS 错误 | 从后端所在机器检查 Bootstrap Servers 和所有 advertised listeners 是否可达，核对 DNS、防火墙与连接超时配置 |
 | SASL/TLS 失败 | 核对四类协议、SASL mechanism、账户权限和证书信任链；双向 TLS 证书/私钥须配对；Linux 发行包不含宿主 CA 信任库 |
 | 数据未知、陈旧或缺少消费组 | 查看页面安全错误及 Request ID，检查只读账户的元数据/消费组权限；未提交 Offset 不等于 Lag 为 0；部分失败不会覆盖旧值为 0 |

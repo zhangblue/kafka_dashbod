@@ -23,7 +23,6 @@ fn symlink_index_reports_web_dir_before_database_initialization() {
     std::fs::write(web.path().join("page.html"), "<main>test</main>").unwrap();
     std::os::unix::fs::symlink("page.html", web.path().join("index.html")).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
-        .env_remove("KAFKA_DASHBOARD_MASTER_KEY")
         .env("KAFKA_DASHBOARD_WEB_DIR", web.path())
         .env(
             "DATABASE_URL",
@@ -51,7 +50,6 @@ fn configured_listener_serves_health_and_sigterm_exits_successfully() {
         Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
             .env("KAFKA_DASHBOARD_BIND", address.to_string())
             .env("DATABASE_URL", "sqlite::memory:")
-            .env_remove("KAFKA_DASHBOARD_MASTER_KEY")
             .env_remove("KAFKA_DASHBOARD_WEB_DIR")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -121,7 +119,6 @@ async fn incompatible_database_exits_with_safe_reconfiguration_instruction() {
     pool.close().await;
     let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
         .env("DATABASE_URL", database_url)
-        .env_remove("KAFKA_DASHBOARD_MASTER_KEY")
         .env_remove("KAFKA_DASHBOARD_WEB_DIR")
         .output()
         .unwrap();

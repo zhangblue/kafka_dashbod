@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const key = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 async function executable(file, content) {
   await writeFile(file, content, { mode: 0o755 });
 }
@@ -31,7 +30,7 @@ async function fixture(t, osName = 'Darwin', arch = 'arm64') {
     delete cleanEnv.DATABASE_URL;
     delete cleanEnv.KAFKA_DASHBOARD_WEB_DIR;
     return spawnSync('/bin/sh', [path.join(location, 'start.sh'), ...args], {
-      cwd: temp, encoding: 'utf8', env: { ...cleanEnv, PATH: `${commands}:${process.env.PATH}`, KAFKA_DASHBOARD_MASTER_KEY: key, ...env },
+      cwd: temp, encoding: 'utf8', env: { ...cleanEnv, PATH: `${commands}:${process.env.PATH}`, ...env },
     });
   } };
 }
@@ -46,13 +45,11 @@ for (const [osName, arch, platform] of [['Darwin', 'arm64', 'darwin-arm64'], ['L
     assert.equal((await stat(path.join(f.release, 'data'))).isDirectory(), true);
   });
 }
-test('missing master key refuses startup without loading .env', async t => {
+test('starts without a master key or env file', async t => {
   const f = await fixture(t);
-  await writeFile(path.join(f.release, '.env'), `KAFKA_DASHBOARD_MASTER_KEY=${key}\n`);
-  const result = f.run([], { KAFKA_DASHBOARD_MASTER_KEY: '' });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /KAFKA_DASHBOARD_MASTER_KEY/);
-  assert.equal(result.stdout, '');
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(path.join(f.release, 'data')), true);
 });
 test('unsupported platform reports both supported platforms', async t => {
   const f = await fixture(t, 'Linux', 'aarch64');
@@ -88,7 +85,7 @@ for (const directory of ['release?query', 'release%20encoded', 'release with spa
     await writeFile(path.join(f.release, 'web/index.html'), '<html>relocated release</html>');
     const moved = path.join(f.temp, directory);
     await rename(f.release, moved);
-    const env = { ...process.env, KAFKA_DASHBOARD_MASTER_KEY: key, KAFKA_DASHBOARD_BIND: '127.0.0.1:0', RUST_LOG: 'info', NO_COLOR: '1' };
+    const env = { ...process.env, KAFKA_DASHBOARD_BIND: '127.0.0.1:0', RUST_LOG: 'info', NO_COLOR: '1' };
     delete env.DATABASE_URL;
     delete env.KAFKA_DASHBOARD_WEB_DIR;
     const child = spawn('/bin/sh', [path.join(moved, 'start.sh')], { cwd: f.temp, env, stdio: ['ignore', 'pipe', 'pipe'] });

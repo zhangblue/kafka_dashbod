@@ -221,7 +221,6 @@ async fn range_and_conditional_get_keep_file_response_semantics() {
 fn version_exits_without_initializing_configuration() {
     let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
         .arg("--version")
-        .env_remove("KAFKA_DASHBOARD_MASTER_KEY")
         .env("DATABASE_URL", "invalid://not-a-database")
         .env("KAFKA_DASHBOARD_WEB_DIR", "/does/not/exist")
         .output()
@@ -250,7 +249,6 @@ fn startup_rejects_missing_web_directory_or_index_before_database_initialization
         not_a_file,
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
-            .env_remove("KAFKA_DASHBOARD_MASTER_KEY")
             .env("DATABASE_URL", "invalid://not-a-database")
             .env("KAFKA_DASHBOARD_WEB_DIR", &path)
             .output()

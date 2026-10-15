@@ -35,7 +35,7 @@ check_logs() {
 import fs from 'node:fs'
 import path from 'node:path'
 const dir = process.env.E2E_LOG_DIR
-const secrets = [process.env.E2E_FIXTURE_SECRET, process.env.KAFKA_DASHBOARD_MASTER_KEY].filter(Boolean)
+const secrets = [process.env.E2E_FIXTURE_SECRET].filter(Boolean)
 for (const file of fs.readdirSync(dir).filter(name => name.endsWith('.log'))) {
   const log = fs.readFileSync(path.join(dir, file), 'utf8')
   if (secrets.some(secret => log.includes(secret))) {
@@ -70,7 +70,6 @@ export E2E_KAFKA_BROKERS="127.0.0.1:$KAFKA_TEST_PORT"
 export E2E_KAFKA_WRITE_PERMIT=disposable-compose
 export E2E_RUN_ID="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
 export E2E_FIXTURE_SECRET="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
-export KAFKA_DASHBOARD_MASTER_KEY="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))')"
 export DATABASE_URL="sqlite://$run_dir/dashboard.db"
 export KAFKA_DASHBOARD_BIND=127.0.0.1:0
 export RUST_LOG=info

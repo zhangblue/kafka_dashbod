@@ -67,7 +67,6 @@ done
 if grep -REl -- '-----BEGIN .*PRIVATE KEY-----|AKIA[0-9A-Z]{16}' "$release/web" "$release/.env.example" >/dev/null; then
     fail 'Potential secret material in release'
 fi
-grep -qx 'KAFKA_DASHBOARD_MASTER_KEY=REPLACE_WITH_BASE64_ENCODED_32_RANDOM_BYTES' "$release/.env.example" || fail 'Example master key must remain a placeholder'
 "$release/bin/kafka-dashboard-darwin-arm64" --version
 runtime_image=busybox:1.37.0
 docker run --rm --platform linux/amd64 -v "$release:/release:ro" "$runtime_image" /release/bin/kafka-dashboard-linux-amd64 --version
@@ -77,8 +76,6 @@ linux_release="$temp/linux release?%20中文"
 linux_mount='/release?%20 中文'
 cp -R "$release" "$mac_release"
 cp -R "$release" "$linux_release"
-KAFKA_DASHBOARD_MASTER_KEY=$(openssl rand -base64 32)
-export KAFKA_DASHBOARD_MASTER_KEY
 unset DATABASE_URL KAFKA_DASHBOARD_WEB_DIR
 # ANSI color disabled so the bound ephemeral port can be read without guessing a free port.
 NO_COLOR=1 RUST_LOG=info KAFKA_DASHBOARD_BIND=127.0.0.1:0 "$mac_release/start.sh" > "$temp/mac.log" 2>&1 &
@@ -130,7 +127,7 @@ echo 'macOS: health, SQLite, index, assets, SPA fallback and SIGTERM passed'
 
 container=$(docker run -d --platform linux/amd64 \
     -v "$linux_release:$linux_mount" -p 127.0.0.1::3000 \
-    -e KAFKA_DASHBOARD_MASTER_KEY -e KAFKA_DASHBOARD_BIND=0.0.0.0:3000 \
+    -e KAFKA_DASHBOARD_BIND=0.0.0.0:3000 \
     "$runtime_image" "$linux_mount/start.sh")
 linux_address=$(docker port "$container" 3000/tcp | head -1)
 check_http "http://$linux_address" "$linux_release"
@@ -143,7 +140,6 @@ while [ "$(docker inspect --format '{{.State.Running}}' "$container")" = true ];
 done
 [ "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0 ] || fail 'Linux SIGTERM exit was not clean'
 docker logs "$container" > "$temp/linux.log" 2>&1
-if grep -Fq "$KAFKA_DASHBOARD_MASTER_KEY" "$temp/mac.log" "$temp/linux.log"; then fail 'Master key leaked into runtime logs'; fi
 docker rm "$container" >/dev/null
 container=
 echo 'Linux/amd64: health, SQLite, index, assets, SPA fallback and SIGTERM passed'
