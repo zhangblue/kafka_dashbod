@@ -109,9 +109,29 @@ status_service() {
         echo 'Kafka Lens 未运行'
     fi
 }
-# The following lifecycle operations are implemented by the next task.
-stop_service() { fail '停止命令尚未实现'; }
-restart_service() { fail '重启命令尚未实现'; }
+stop_service() {
+    if inspect_process; then
+        service_pid=$pid
+    else
+        state=$?
+        [ "$state" -eq 1 ] || return "$state"
+        echo 'Kafka Lens 未运行'
+        return 0
+    fi
+    kill -TERM "$service_pid" || fail "无法停止 Kafka Lens，PID: $service_pid"
+    attempt=0
+    while kill -0 "$service_pid" 2>/dev/null; do
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 100 ] || fail "Kafka Lens 在等待时间内未退出，PID 文件已保留: $pid_file"
+        sleep 0.1
+    done
+    rm -f "$pid_file" || fail '无法删除 PID 文件'
+    echo 'Kafka Lens 已停止'
+}
+restart_service() {
+    stop_service || return "$?"
+    start_service
+}
 
 [ "$#" -le 1 ] || { usage; exit 1; }
 command=${1-start}

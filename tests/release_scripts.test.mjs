@@ -15,6 +15,7 @@ async function executable(file, content) {
 async function fixture(t, osName = 'Darwin', arch = 'arm64') {
   const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), 'release-test-')));
   const startedPids = path.join(temp, 'started-pids');
+  const events = path.join(temp, 'service-events');
   const launcherPids = new Set();
   t.after(async () => {
     if (existsSync(startedPids)) {
@@ -24,6 +25,12 @@ async function fixture(t, osName = 'Darwin', arch = 'arm64') {
     }
     for (const pid of launcherPids) {
       try { process.kill(pid, 'SIGKILL'); } catch {}
+    }
+    for (const pid of launcherPids) {
+      for (let attempt = 0; attempt < 100 && isRunning(pid); attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      assert.equal(isRunning(pid), false, `fixture leaked service PID ${pid}`);
     }
     await rm(temp, { recursive: true, force: true });
   });
@@ -38,24 +45,32 @@ async function fixture(t, osName = 'Darwin', arch = 'arm64') {
     await executable(path.join(release, 'bin', `kafka-dashboard-${platform}`), `#!/bin/sh
 [ "\${1-}" != --version ] || { echo 'kafka-dashboard 0.1.0'; exit 0; }
 printf '%s\\n' "$$" >> "$FAKE_PID_FILE"
+[ -z "\${FAKE_EVENTS_FILE-}" ] || printf 'START:%s\\n' "$$" >> "$FAKE_EVENTS_FILE"
 printf '%s\\n' '${platform}' "$PWD" "\${DATABASE_URL-}" "\${KAFKA_DASHBOARD_WEB_DIR-}" "$@"
 [ "\${FAKE_EXIT-}" != immediate ] || exit 17
-trap 'exit 0' TERM
+trap '[ -z "\${FAKE_EVENTS_FILE-}" ] || printf "TERM:%s\\n" "$$" >> "$FAKE_EVENTS_FILE"; if [ "\${FAKE_IGNORE_TERM-}" != 1 ]; then sleep 0.2; exit 0; fi' TERM
 while :; do sleep 1; done
 `);
   }
-  return { release, temp, commands, run(args = [], env = {}, location = release) {
+  return { release, temp, commands, events, run(args = [], env = {}, location = release) {
     const cleanEnv = { ...process.env };
     delete cleanEnv.DATABASE_URL;
     delete cleanEnv.KAFKA_DASHBOARD_WEB_DIR;
     const result = spawnSync('/bin/sh', [path.join(location, 'start.sh'), ...args], {
-      cwd: temp, encoding: 'utf8', timeout: 3000,
-      env: { ...cleanEnv, PATH: `${commands}:${process.env.PATH}`, FAKE_PID_FILE: startedPids, ...env },
+      cwd: temp, encoding: 'utf8', timeout: ['stop', 'restart'].includes(args[0]) ? 15000 : 3000,
+      env: { ...cleanEnv, PATH: `${commands}:${process.env.PATH}`, FAKE_PID_FILE: startedPids, FAKE_EVENTS_FILE: events, ...env },
     });
     const started = result.stdout?.match(/已在后台启动，PID: ([1-9][0-9]*)/);
     if (started) launcherPids.add(Number(started[1]));
     return result;
   } };
+}
+
+function isRunning(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    throw error;
+  }
 }
 
 async function readPid(release) {
@@ -168,6 +183,76 @@ test('status clears a stale pid and reports stopped', async t => {
   assert.match(result.stdout, /^Kafka Lens 未运行/m);
   assert.equal(existsSync(pidPath(f.release)), false);
 });
+
+// Catch early success, repeated signals, forced kills, and starting before a successful stop.
+test('stop waits for the matching service to exit and removes its pid file', async t => {
+  const f = await fixture(t);
+  assert.equal(f.run(['start']).status, 0);
+  const pid = await readPid(f.release);
+  const stopped = f.run(['stop']);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.equal(stopped.error, undefined);
+  assert.match(stopped.stdout, /Kafka Lens 已停止/);
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  assert.equal(existsSync(pidPath(f.release)), false);
+  assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\nTERM:${pid}\n`);
+});
+for (const stale of [false, true]) {
+  test(`stop succeeds when ${stale ? 'a stale pid is present' : 'the service has not started'}`, async t => {
+    const f = await fixture(t);
+    if (stale) {
+      const child = spawn('/bin/sh', ['-c', 'exit 0']);
+      await new Promise(resolve => child.once('exit', resolve));
+      await mkdir(path.join(f.release, 'data'));
+      await writeFile(pidPath(f.release), `${child.pid}\n`);
+    }
+    const stopped = f.run(['stop']);
+    assert.equal(stopped.status, 0, stopped.stderr);
+    assert.match(stopped.stdout, /Kafka Lens 未运行/);
+    assert.equal(existsSync(pidPath(f.release)), false);
+    assert.equal(existsSync(f.events), false);
+  });
+}
+for (const command of ['stop', 'restart']) {
+  test(`${command} timeout sends TERM once, preserves the live pid, and never starts again`, async t => {
+    const f = await fixture(t);
+    assert.equal(f.run(['start'], { FAKE_IGNORE_TERM: '1' }).status, 0);
+    const pid = await readPid(f.release);
+    const began = Date.now();
+    const result = f.run([command]);
+    assert.equal(result.error, undefined, 'launcher must finish its own bounded wait');
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /在等待时间内未退出，PID 文件已保留/);
+    assert.ok(Date.now() - began >= 9000, 'stop must allow the configured graceful shutdown wait');
+    process.kill(pid, 0);
+    assert.equal(await readPid(f.release), pid);
+    assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\nTERM:${pid}\n`);
+    assert.equal(existsSync(path.join(f.release, 'data/kafka-dashboard.lock')), false);
+  });
+}
+test('restart waits for old TERM and exit before starting a new service', async t => {
+  const f = await fixture(t);
+  assert.equal(f.run(['start']).status, 0);
+  const oldPid = await readPid(f.release);
+  const result = f.run(['restart']);
+  assert.equal(result.status, 0, result.stderr);
+  const newPid = await readPid(f.release);
+  assert.notEqual(newPid, oldPid);
+  assert.throws(() => process.kill(oldPid, 0), { code: 'ESRCH' });
+  process.kill(newPid, 0);
+  assert.match(result.stdout, /Kafka Lens 已停止/);
+  assert.match(result.stdout, new RegExp(`Kafka Lens 已在后台启动，PID: ${newPid}`));
+  assert.equal(await readFile(f.events, 'utf8'), `START:${oldPid}\nTERM:${oldPid}\nSTART:${newPid}\n`);
+});
+test('restart starts a service when none is running', async t => {
+  const f = await fixture(t);
+  const result = f.run(['restart']);
+  assert.equal(result.status, 0, result.stderr);
+  const pid = await readPid(f.release);
+  process.kill(pid, 0);
+  assert.match(result.stdout, /Kafka Lens 未运行/);
+  assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\n`);
+});
 for (const content of ['not-a-pid\n', '0\n', '-1\n', '12\n34\n', '']) {
   test(`invalid pid ${JSON.stringify(content)} is an explicit script error`, async t => {
     const f = await fixture(t);
@@ -190,7 +275,7 @@ test('live pid belonging to another process is rejected without deleting it', as
   const f = await fixture(t);
   await mkdir(path.join(f.release, 'data'));
   await writeFile(pidPath(f.release), `${process.pid}\n`);
-  for (const command of ['status', 'start']) {
+  for (const command of ['status', 'start', 'stop', 'restart']) {
     const result = f.run([command]);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /进程身份不匹配/);
@@ -218,7 +303,7 @@ for (const kind of ['similar executable path', 'unrelated argument containing bi
     await new Promise(resolve => child.once('spawn', resolve));
     await mkdir(path.join(f.release, 'data'));
     await writeFile(pidPath(f.release), `${child.pid}\n`);
-    for (const command of ['status', 'start']) {
+    for (const command of ['status', 'start', 'stop', 'restart']) {
       const result = f.run([command]);
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /进程身份不匹配/);
@@ -232,10 +317,12 @@ test('failed process inspection is a pid error and preserves the pid file', asyn
   await mkdir(path.join(f.release, 'data'));
   await writeFile(pidPath(f.release), `${process.pid}\n`);
   await executable(path.join(f.commands, 'ps'), '#!/bin/sh\nexit 19\n');
-  const result = f.run(['status']);
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /无法检查进程/);
-  assert.equal(await readPid(f.release), process.pid);
+  for (const command of ['status', 'stop', 'restart']) {
+    const result = f.run([command]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /无法检查进程/);
+    assert.equal(await readPid(f.release), process.pid);
+  }
 });
 test('existing lock rejects concurrent management without removing the lock', async t => {
   const f = await fixture(t);
