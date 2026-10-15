@@ -56,7 +56,7 @@ npm --prefix frontend run preview -- --host 127.0.0.1
 | `RUST_LOG` | 可用 `info` 设置日志级别；调试时也不得输出敏感配置 |
 | `KAFKA_TEST_PORT` | 手动 Compose 测试 broker 默认宿主端口 `19092`；一键 E2E 自动选择 |
 
-Rust 正常启动时强制读取当前工作目录的 `.env`，文件缺少、不可读或格式错误会启动失败；父进程已设置的同名环境变量优先于文件中的值。`--version` 查询例外，无需 `.env`。发行启动器切换到发行目录并创建 `data/`，不设置或导出配置；`packaging/.env.example` 是可直接复制的发行配置模板。源码运行的工作目录通常为仓库根目录，相对路径均以当前工作目录为基准。
+Rust 正常启动时强制读取当前工作目录的 `.env`，文件缺少、不可读或格式错误会启动失败；父进程已设置的同名环境变量优先于文件中的值。`--version` 查询例外，无需 `.env`。发行启动器切换到发行目录并创建 `data/`，不解析、设置或导出配置，也不透传运行参数；`packaging/.env.example` 是可直接复制的发行配置模板。源码运行的工作目录通常为仓库根目录，相对路径均以当前工作目录为基准。
 
 ## 连接与凭据
 
@@ -141,10 +141,26 @@ kafka-dashboard/
 ├── start.sh
 ├── .env.example         # 启动前复制为 .env 的配置模板
 ├── README.txt           # 离线运行说明
-└── SHA256SUMS
+├── SHA256SUMS
+└── data/                # 首次启动后创建，不进入发行归档
+    ├── kafka-dashboard.pid
+    ├── kafka-dashboard.log
+    └── kafka-dashboard.db  # 模板配置的 SQLite 数据库
 ```
 
-复制整个目录或解压归档到目标机器的可写位置，进入发行目录后核验 `shasum -a 256 -c SHA256SUMS`（Linux 也可用 `sha256sum -c SHA256SUMS`），执行 `cp .env.example .env`，按需编辑配置并限制权限，再运行 `./start.sh`。支持 **macOS arm64 和 Linux x86_64**；启动器将 `Darwin/arm64` 映射到 `bin/kafka-dashboard-darwin-arm64`，将 `Linux/x86_64` 映射到 `bin/kafka-dashboard-linux-amd64`，其他平台拒绝启动。模板默认访问地址为 `http://127.0.0.1:3000`，健康接口为 `/api/health`，用 `KAFKA_DASHBOARD_BIND` 修改监听地址。启动器切换到发行目录并创建私有权限的 `data/`；模板通过相对路径指定 `web/` 和 `data/kafka-dashboard.db`，可整体搬移。参数原样透传，`./start.sh --version` 无需 `.env`；Ctrl-C 或 SIGTERM 可停止服务。
+复制整个目录或解压归档到目标机器的可写位置，进入发行目录后核验 `shasum -a 256 -c SHA256SUMS`（Linux 也可用 `sha256sum -c SHA256SUMS`），执行 `cp .env.example .env`，按需编辑配置并执行 `chmod 600 .env` 限制权限。支持 **macOS arm64 和 Linux x86_64**；启动器将 `Darwin/arm64` 映射到 `bin/kafka-dashboard-darwin-arm64`，将 `Linux/x86_64` 映射到 `bin/kafka-dashboard-linux-amd64`，其他平台拒绝启动。
+
+```bash
+./start.sh                 # 后台启动，等同于 ./start.sh start
+./start.sh status          # 输出“Kafka Lens 正在运行，PID: …”或“Kafka Lens 未运行”
+./start.sh stop            # 发送 SIGTERM 并等待正常退出
+./start.sh restart         # 正常停止后重新启动
+./start.sh --version       # 前台显示版本，无需 .env
+```
+
+`status` 通过文本表达业务状态，运行中与未运行均以退出码 0 结束；PID 无效、身份不匹配等管理错误以非零退出码结束。重复启动会返回非零退出码并明确输出 `Kafka Lens 已在运行，PID: <pid>`。启动器固定使用 `data/kafka-dashboard.pid` 和 `data/kafka-dashboard.log`；日志追加写入，不自动轮转，启动失败时先查看此日志。`stop` 只发送 SIGTERM 并有界等待程序释放在途 Kafka 工作和会话，超时返回非零退出码、保留 PID 文件，不会自动发送 SIGKILL；`restart` 仅在 `stop` 成功后启动。生产部署应配置系统日志轮转，或使用服务管理器管理进程与日志。
+
+模板默认访问地址为 `http://127.0.0.1:3000`，健康接口为 `/api/health`，用 `KAFKA_DASHBOARD_BIND` 修改监听地址。启动器切换到发行目录并创建私有权限的 `data/`；模板通过相对路径指定 `web/` 和 `data/kafka-dashboard.db`，可整体搬移。正常启动仍由 Rust 强制读取发行目录中可读且格式有效的 `.env`；启动器不解析、设置或导出配置，不透传运行参数。
 
 从旧加密凭据版本升级时，先停止服务并确认当前 `DATABASE_URL` 指向的数据库（发行包默认为 `data/kafka-dashboard.db`，源码运行默认为仓库根目录的 `kafka-dashboard.db`）。手动删除该旧数据库及同名的 `-wal`、`-shm`、`-journal` sidecar，再运行新版本并重新配置全部集群和 Lag 规则。此操作会丢弃旧配置；程序不会转换旧凭据或自动删除数据库。
 
@@ -152,7 +168,7 @@ kafka-dashboard/
 
 运行机器不需要 Node.js、Rust、系统 librdkafka 或系统 OpenSSL。Linux 二进制使用 musl，静态链接 librdkafka、SQLite 和 vendored OpenSSL；macOS 保留操作系统原生库依赖（如 libSystem），并非完全静态。Linux 包不携带宿主机 CA 信任库，私有 TLS 请在集群设置显式配置 CA PEM。网络/DNS、可写存储和操作系统执行许可仍需可用。
 
-验证命令需在构建主机执行，使用 `curl`、`file`、`shasum`、`sqlite3`、`otool` 和 Docker。它校验完整文件清单、哈希、架构和静态链接边界，在临时发行副本中复制 `.env.example` 为 `.env`，再启动 macOS 程序与 Linux/amd64 最小容器，验证版本、SQLite 迁移、健康接口、页面/资源、SPA fallback 和 SIGTERM 退出；验证后清理临时进程和容器，不向原发行目录写入 `.env` 或数据库。
+验证命令需在构建主机执行，使用 `curl`、`file`、`shasum`、`sqlite3`、`otool` 和 Docker。它校验完整文件清单、哈希、架构和静态链接边界，在临时发行副本中复制 `.env.example` 为 `.env`，通过 `start/status/stop` 管理 macOS 与 Linux/amd64 容器中的真实程序，验证版本、后台生命周期、SQLite 迁移、健康接口、页面/资源、SPA fallback 和正常停止；验证后清理临时进程和容器，不向原发行目录写入 `.env`、数据库、PID 或日志。
 
 ## 故障排查
 

@@ -35,13 +35,16 @@ SQLite 含明文 Kafka 凭据，须限制数据库、sidecar 和备份的访问�
 
 服务没有内置认证；默认只监听回环地址，部署需要内网或认证反向代理及 HTTPS。只使用明确授权的一次性 broker 运行写入 fixture；普通集群始终只读。
 
-禁止提交 `dist/`、`frontend/dist/`、`target/`、`node_modules/`、SQLite 文件及 sidecar、`.env`、私钥、真实证书、日志、Playwright 报告/trace。`packaging/.env.example` 只含占位符，可以提交。锁文件 `Cargo.lock`、`frontend/package-lock.json` 必须保留。生成产物从源码重建，不手改发布文件；`.superpowers/` 是本地工作记录，不属于交付源码。
+禁止提交 `dist/`、`frontend/dist/`、`target/`、`node_modules/`、SQLite 文件及 sidecar、`.env`、私钥、真实证书、日志、PID 文件、启动器锁目录、Playwright 报告/trace。`packaging/.env.example` 只含占位符，可以提交。锁文件 `Cargo.lock`、`frontend/package-lock.json` 必须保留。生成产物从源码重建，不手改发布文件；`.superpowers/` 是本地工作记录，不属于交付源码。
 
 ## 开发与验证
 
 后端使用 `cargo run -p backend --bin kafka-dashboard` 启动，正常启动必须读取当前工作目录中可读且格式有效的 `.env`；可先执行 `cp packaging/.env.example .env`，源码开发时按需调整或移除发行静态目录配置 `KAFKA_DASHBOARD_WEB_DIR=web`，并调整数据库路径或创建模板所需的可写 `data/` 目录。父进程已设置的同名环境变量优先于 `.env`；`--version` 查询例外，无需 `.env`。前端使用 `npm --prefix frontend ci`、`npm --prefix frontend run dev -- --host 127.0.0.1`。生产静态目录由 `KAFKA_DASHBOARD_WEB_DIR` 配置；开发代理地址用 `KAFKA_DASHBOARD_API_TARGET`。
 
+`packaging/start.sh` 无参数或 `start` 必须后台启动，固定使用发行目录下的 `data/kafka-dashboard.pid` 和追加写入、不自动轮转的 `data/kafka-dashboard.log`。管理操作须持锁，并安全校验 PID 与完整进程身份，不得向无关进程发送信号。`status` 明确输出“Kafka Lens 正在运行，PID: …”或“Kafka Lens 未运行”，两种业务状态均退出 0，管理错误退出非零；重复启动须退出非零并输出 `Kafka Lens 已在运行，PID: <pid>`。`stop` 仅发送 SIGTERM 并有界等待，超时保留 PID 文件，不得自动 SIGKILL；`restart` 仅在停止成功后启动。正常启动仍由 Rust 强制读取发行目录 `.env`，启动器不解析、设置或导出配置，不透传运行参数；`--version` 前台执行且无需 `.env`。发行验证通过 `start/status/stop` 管理真实程序，运行生成的 `data/` 不进入发行归档；生产日志轮转由系统配置或服务管理器负责。
+
 ```bash
+sh -n packaging/start.sh tools/verify-release.sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
