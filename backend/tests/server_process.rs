@@ -103,6 +103,28 @@ fn malformed_dotenv_exits_without_echoing_values() {
     assert!(!stderr.contains("dotenv-secret"), "{stderr}");
 }
 
+// Passing a NUL-containing value to set_var panics and exposes its full contents.
+#[test]
+fn nul_dotenv_exits_without_echoing_values_or_panicking() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut command = command_with_dotenv(directory.path(), "DATABASE_URL=nul-secret\0suffix\n");
+    let output = output_before_timeout(&mut command);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("nul-secret"),
+        "startup diagnostics exposed the configuration value"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "invalid configuration must return a safe error rather than panic"
+    );
+    assert!(
+        stderr.contains("required .env"),
+        "startup diagnostics omitted the safe configuration error"
+    );
+}
+
 // A symlink index must fail with the setting name before opening the database.
 #[test]
 fn symlink_index_reports_web_dir_before_database_initialization() {

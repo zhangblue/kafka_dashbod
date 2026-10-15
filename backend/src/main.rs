@@ -7,8 +7,13 @@ async fn main() -> std::io::Result<()> {
         println!("kafka-dashboard {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    dotenvy::from_path(".env")
-        .map_err(|_| std::io::Error::other("failed to load required .env configuration"))?;
+    let invalid_dotenv = || std::io::Error::other("failed to load required .env configuration");
+    let dotenv = std::fs::read(".env").map_err(|_| invalid_dotenv())?;
+    // dotenvy passes values to set_var, whose NUL panic would expose configuration values.
+    if dotenv.contains(&0) {
+        return Err(invalid_dotenv());
+    }
+    dotenvy::from_read(dotenv.as_slice()).map_err(|_| invalid_dotenv())?;
     tracing_subscriber::fmt::init();
 
     let config = kafka_dashboard::config::Config::from_env()
