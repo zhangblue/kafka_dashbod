@@ -14,7 +14,19 @@ async function executable(file, content) {
 }
 async function fixture(t, osName = 'Darwin', arch = 'arm64') {
   const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), 'release-test-')));
-  t.after(() => rm(temp, { recursive: true, force: true }));
+  const startedPids = path.join(temp, 'started-pids');
+  const launcherPids = new Set();
+  t.after(async () => {
+    if (existsSync(startedPids)) {
+      for (const pid of (await readFile(startedPids, 'utf8')).trim().split('\n').map(Number).filter(pid => Number.isSafeInteger(pid) && pid > 0)) {
+        launcherPids.add(pid);
+      }
+    }
+    for (const pid of launcherPids) {
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+    }
+    await rm(temp, { recursive: true, force: true });
+  });
   const release = path.join(temp, 'movable release');
   const commands = path.join(temp, 'commands');
   await mkdir(path.join(release, 'bin'), { recursive: true });
@@ -23,34 +35,68 @@ async function fixture(t, osName = 'Darwin', arch = 'arm64') {
   await copyFile(path.join(root, 'packaging/start.sh'), path.join(release, 'start.sh'));
   await executable(path.join(commands, 'uname'), `#!/bin/sh\ncase "$1" in -s) echo '${osName}';; -m) echo '${arch}';; esac\n`);
   for (const platform of ['darwin-arm64', 'linux-amd64']) {
-    await executable(path.join(release, 'bin', `kafka-dashboard-${platform}`), `#!/bin/sh\nprintf '%s\\n' '${platform}' "$PWD" "\${DATABASE_URL-}" "\${KAFKA_DASHBOARD_WEB_DIR-}" "$@"\n` + 'exit "${FAKE_EXIT:-0}"\n');
+    await executable(path.join(release, 'bin', `kafka-dashboard-${platform}`), `#!/bin/sh
+[ "\${1-}" != --version ] || { echo 'kafka-dashboard 0.1.0'; exit 0; }
+printf '%s\\n' "$$" >> "$FAKE_PID_FILE"
+printf '%s\\n' '${platform}' "$PWD" "\${DATABASE_URL-}" "\${KAFKA_DASHBOARD_WEB_DIR-}" "$@"
+[ "\${FAKE_EXIT-}" != immediate ] || exit 17
+trap 'exit 0' TERM
+while :; do sleep 1; done
+`);
   }
-  return { release, temp, run(args = [], env = {}, location = release) {
+  return { release, temp, commands, run(args = [], env = {}, location = release) {
     const cleanEnv = { ...process.env };
     delete cleanEnv.DATABASE_URL;
     delete cleanEnv.KAFKA_DASHBOARD_WEB_DIR;
-    return spawnSync('/bin/sh', [path.join(location, 'start.sh'), ...args], {
-      cwd: temp, encoding: 'utf8', env: { ...cleanEnv, PATH: `${commands}:${process.env.PATH}`, ...env },
+    const result = spawnSync('/bin/sh', [path.join(location, 'start.sh'), ...args], {
+      cwd: temp, encoding: 'utf8', timeout: 3000,
+      env: { ...cleanEnv, PATH: `${commands}:${process.env.PATH}`, FAKE_PID_FILE: startedPids, ...env },
     });
+    const started = result.stdout?.match(/已在后台启动，PID: ([1-9][0-9]*)/);
+    if (started) launcherPids.add(Number(started[1]));
+    return result;
   } };
 }
 
-// Detect injected configuration, a wrong working directory or binary, and lost argument boundaries.
+async function readPid(release) {
+  return Number((await readFile(path.join(release, 'data/kafka-dashboard.pid'), 'utf8')).trim());
+}
+const logPath = release => path.join(release, 'data/kafka-dashboard.log');
+const pidPath = release => path.join(release, 'data/kafka-dashboard.pid');
+async function serviceLog(release) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const log = await readFile(logPath(release), 'utf8');
+    if (log.includes(`${release}\n`)) return log;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.fail('service did not write its startup log');
+}
+
+// Detect foreground blocking, injected configuration, and a wrong working directory or binary.
 for (const [osName, arch, platform] of [['Darwin', 'arm64', 'darwin-arm64'], ['Linux', 'x86_64', 'linux-amd64']]) {
-  test(`${osName}/${arch} selects its binary and preserves argv`, async t => {
+  test(`${osName}/${arch} background start selects its binary and working directory`, async t => {
     const f = await fixture(t, osName, arch);
-    const result = f.run(['--bind', '127.0.0.1:9090', 'argument with spaces', '']);
+    const result = f.run(['start']);
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(result.stdout.split('\n'), [platform, f.release, '', '', '--bind', '127.0.0.1:9090', 'argument with spaces', '', '']);
+    assert.equal(result.error, undefined, 'start should return without waiting for service exit');
+    const pid = await readPid(f.release);
+    assert.ok(Number.isSafeInteger(pid) && pid > 0);
+    process.kill(pid, 0);
+    assert.match(result.stdout, new RegExp(`Kafka Lens 已在后台启动，PID: ${pid}`));
+    assert.deepEqual((await serviceLog(f.release)).split('\n'), [platform, f.release, '', '', '']);
     assert.equal((await stat(path.join(f.release, 'data'))).isDirectory(), true);
+    for (const file of ['data', 'data/kafka-dashboard.pid', 'data/kafka-dashboard.log']) {
+      assert.equal((await stat(path.join(f.release, file))).mode & 0o077, 0, file);
+    }
   });
 }
-test('launcher does not require or read an env file', async t => {
+test('default command starts in background without reading an env file', async t => {
   const f = await fixture(t);
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.split('\n')[0], 'darwin-arm64');
-  assert.equal(existsSync(path.join(f.release, 'data')), true);
+  process.kill(await readPid(f.release), 0);
+  assert.match(result.stdout, /Kafka Lens 已在后台启动，PID: [1-9][0-9]*/);
+  assert.equal((await serviceLog(f.release)).split('\n')[0], 'darwin-arm64');
 });
 test('unsupported platform reports both supported platforms', async t => {
   const f = await fixture(t, 'Linux', 'aarch64');
@@ -59,20 +105,135 @@ test('unsupported platform reports both supported platforms', async t => {
   assert.match(result.stderr, /Darwin\/arm64/);
   assert.match(result.stderr, /Linux\/x86_64/);
 });
-test('moved package resolves paths relative to start.sh and propagates exit status', async t => {
+test('moved package background startup resolves its working directory', async t => {
   const f = await fixture(t);
   const moved = path.join(f.temp, 'new location');
   await rename(f.release, moved);
-  const result = f.run([], { FAKE_EXIT: '17' }, moved);
-  assert.equal(result.status, 17);
-  assert.equal(result.stdout.split('\n')[1], moved);
+  const result = f.run([], {}, moved);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal((await serviceLog(moved)).split('\n')[1], moved);
 });
-test('explicit database and web paths remain configurable', async t => {
+test('background startup preserves explicit database and web paths', async t => {
   const f = await fixture(t);
   const result = f.run([], { DATABASE_URL: 'sqlite:///custom.db', KAFKA_DASHBOARD_WEB_DIR: '/custom/web' });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(result.stdout.split('\n').slice(2, 4), ['sqlite:///custom.db', '/custom/web']);
+  assert.deepEqual((await serviceLog(f.release)).split('\n').slice(2, 4), ['sqlite:///custom.db', '/custom/web']);
 });
+
+test('immediate startup failure removes pid and points to the log', async t => {
+  const f = await fixture(t);
+  const result = f.run([], { FAKE_EXIT: 'immediate' });
+  assert.notEqual(result.status, 0);
+  assert.equal(existsSync(pidPath(f.release)), false);
+  assert.match(result.stderr, /启动失败.*日志/);
+});
+test('duplicate background startup keeps the existing pid and log', async t => {
+  const f = await fixture(t);
+  assert.equal(f.run().status, 0);
+  const pid = await readPid(f.release);
+  const log = await serviceLog(f.release);
+  const result = f.run(['start']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, new RegExp(`正在运行，PID: ${pid}`));
+  assert.equal(await readPid(f.release), pid);
+  assert.equal(await readFile(logPath(f.release), 'utf8'), log);
+});
+test('background startup uses an append-only log', async t => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.release, 'data'));
+  await writeFile(logPath(f.release), 'previous run\n');
+  assert.equal(f.run().status, 0);
+  assert.match(await serviceLog(f.release), /^previous run\ndarwin-arm64\n/);
+});
+
+test('status describes both running and stopped states with exit code zero', async t => {
+  const f = await fixture(t);
+  const stopped = f.run(['status']);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.match(stopped.stdout, /^Kafka Lens 未运行/m);
+  assert.equal(f.run(['start']).status, 0);
+  const pid = await readPid(f.release);
+  const running = f.run(['status']);
+  assert.equal(running.status, 0, running.stderr);
+  assert.match(running.stdout, new RegExp(`Kafka Lens 正在运行，PID: ${pid}`));
+});
+test('status clears a stale pid and reports stopped', async t => {
+  const f = await fixture(t);
+  const child = spawn('/bin/sh', ['-c', 'exit 0']);
+  await new Promise(resolve => child.once('exit', resolve));
+  await mkdir(path.join(f.release, 'data'));
+  await writeFile(pidPath(f.release), `${child.pid}\n`);
+  const result = f.run(['status']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^Kafka Lens 未运行/m);
+  assert.equal(existsSync(pidPath(f.release)), false);
+});
+for (const content of ['not-a-pid\n', '0\n', '-1\n', '12\n34\n', '']) {
+  test(`invalid pid ${JSON.stringify(content)} is an explicit script error`, async t => {
+    const f = await fixture(t);
+    await mkdir(path.join(f.release, 'data'));
+    await writeFile(pidPath(f.release), content);
+    const result = f.run(['status']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /PID 文件内容无效/);
+    assert.equal(await readFile(pidPath(f.release), 'utf8'), content);
+  });
+}
+test('unreadable pid path is an explicit script error', async t => {
+  const f = await fixture(t);
+  await mkdir(pidPath(f.release), { recursive: true });
+  const result = f.run(['status']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /无法读取 PID 文件/);
+});
+test('live pid belonging to another process is rejected without deleting it', async t => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.release, 'data'));
+  await writeFile(pidPath(f.release), `${process.pid}\n`);
+  for (const command of ['status', 'start']) {
+    const result = f.run([command]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /进程身份不匹配/);
+    assert.equal(await readPid(f.release), process.pid);
+  }
+});
+test('failed process inspection is a pid error and preserves the pid file', async t => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.release, 'data'));
+  await writeFile(pidPath(f.release), `${process.pid}\n`);
+  await executable(path.join(f.commands, 'ps'), '#!/bin/sh\nexit 19\n');
+  const result = f.run(['status']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /无法检查进程/);
+  assert.equal(await readPid(f.release), process.pid);
+});
+test('existing lock rejects concurrent management without removing the lock', async t => {
+  const f = await fixture(t);
+  const lock = path.join(f.release, 'data/kafka-dashboard.lock');
+  await mkdir(lock, { recursive: true });
+  for (const command of ['start', 'status']) {
+    const result = f.run([command]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /另一个启动器管理操作正在进行/);
+    assert.equal(existsSync(lock), true);
+  }
+});
+test('version runs in the foreground without creating data, pid, or log', async t => {
+  const f = await fixture(t);
+  const result = f.run(['--version']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'kafka-dashboard 0.1.0\n');
+  assert.equal(existsSync(path.join(f.release, 'data')), false);
+});
+for (const args of [['unknown'], ['--bind', '127.0.0.1:9090'], ['start', 'extra'], ['--version', 'extra']]) {
+  test(`unknown argument ${JSON.stringify(args)} reports Chinese usage`, async t => {
+    const f = await fixture(t);
+    const result = f.run(args);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /用法: .*start\|stop\|status\|restart\|--version/);
+    assert.equal(existsSync(path.join(f.release, 'data')), false);
+  });
+}
 
 // Exercise SQLx's real URI parser: literal '?' and '%20' must remain directory names.
 const nativeBinary = path.join(root, 'dist/kafka-dashboard/bin/kafka-dashboard-darwin-arm64');
@@ -91,36 +252,31 @@ for (const directory of ['release?query', 'release%20encoded', 'release with spa
     ].join('\n'));
     const moved = path.join(f.temp, directory);
     await rename(f.release, moved);
-    const env = { ...process.env, KAFKA_DASHBOARD_BIND: '127.0.0.1:0', RUST_LOG: 'info', NO_COLOR: '1' };
-    delete env.DATABASE_URL;
-    delete env.KAFKA_DASHBOARD_WEB_DIR;
-    const child = spawn('/bin/sh', [path.join(moved, 'start.sh')], { cwd: f.temp, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
+    const started = f.run([], { KAFKA_DASHBOARD_BIND: '127.0.0.1:0', RUST_LOG: 'info', NO_COLOR: '1' }, moved);
+    assert.equal(started.status, 0, started.stderr);
+    const pid = await readPid(moved);
     try {
       let port;
       for (let attempt = 0; attempt < 100; attempt++) {
-        if (child.exitCode !== null || child.signalCode !== null) break;
-        port = stdout.match(/address=127\.0\.0\.1:(\d+)/)?.[1];
+        port = (await readFile(logPath(moved), 'utf8')).match(/address=127\.0\.0\.1:(\d+)/)?.[1];
         if (port) break;
         await new Promise(resolve => setTimeout(resolve, 50));
       }
-      assert.ok(port, `server failed to start: ${stderr}`);
+      assert.ok(port, 'server failed to log its listening port');
       const response = await fetch(`http://127.0.0.1:${port}/api/health`);
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), { status: 'ok' });
       const db = await readFile(path.join(moved, 'data/kafka-dashboard.db'));
       assert.equal(db.subarray(0, 16).toString(), 'SQLite format 3\0');
       assert.equal(existsSync(path.join(f.temp, 'data/kafka-dashboard.db')), false);
-      child.kill('SIGTERM');
-      const result = await Promise.race([exited, new Promise(resolve => setTimeout(() => resolve('timeout'), 5000).unref())]);
-      assert.deepEqual(result, { code: 0, signal: null });
+      process.kill(pid, 'SIGTERM');
+      for (let attempt = 0; attempt < 100; attempt++) {
+        try { process.kill(pid, 0); } catch { break; }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
     } finally {
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      await exited;
+      try { process.kill(pid, 'SIGKILL'); } catch {}
     }
   });
 }
