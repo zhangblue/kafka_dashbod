@@ -74,13 +74,14 @@ fn startup_requires_dotenv_in_current_directory() {
     assert!(stderr.contains("required .env"), "{stderr}");
 }
 
-// The version branch must stay before required dotenv loading.
+// Version queries must not load dotenv or initialize Tokio, even with invalid runtime settings.
 #[test]
 fn version_does_not_require_dotenv() {
     let directory = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
         .current_dir(directory.path())
         .arg("--version")
+        .env("TOKIO_WORKER_THREADS", "0")
         .output()
         .unwrap();
     assert!(
@@ -89,6 +90,20 @@ fn version_does_not_require_dotenv() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("kafka-dashboard "));
+}
+
+// Creating Tokio first would panic on its worker count and bypass the safe dotenv error.
+#[test]
+fn dotenv_failure_precedes_runtime_initialization() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut command = command_with_dotenv(directory.path(), "DATABASE_URL='dotenv-secret\n");
+    command.env("TOKIO_WORKER_THREADS", "0");
+    let output = output_before_timeout(&mut command);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("required .env"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(!stderr.contains("dotenv-secret"), "{stderr}");
 }
 
 // Raw parser errors must not echo dotenv values in startup diagnostics.
@@ -157,7 +172,7 @@ fn configured_listener_serves_health_and_sigterm_exits_successfully() {
     let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = reservation.local_addr().unwrap();
     drop(reservation);
-    let dotenv = format!("KAFKA_DASHBOARD_BIND={address}\nDATABASE_URL=sqlite::memory:\n");
+    let dotenv = format!("\u{feff}KAFKA_DASHBOARD_BIND={address}\nDATABASE_URL=sqlite::memory:\n");
     let mut command = command_with_dotenv(directory.path(), &dotenv);
     let server = Server(
         command
@@ -187,6 +202,32 @@ fn external_environment_overrides_dotenv() {
             .unwrap(),
     );
     assert_health_and_sigterm(server, address);
+}
+
+// env::var treats non-UTF-8 values as absent and would replace the external path with dotenv.
+#[test]
+fn non_utf8_external_web_directory_is_not_replaced_by_dotenv() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let web = directory.path().join("web");
+    std::fs::create_dir(&web).unwrap();
+    std::fs::write(web.join("index.html"), "<main>dotenv web root</main>").unwrap();
+    let mut command = command_with_dotenv(
+        directory.path(),
+        "KAFKA_DASHBOARD_WEB_DIR=web\nDATABASE_URL=sqlite::memory:\nKAFKA_DASHBOARD_BIND=127.0.0.1:0\n",
+    );
+    // This path is intentionally absent; macOS cannot create non-UTF-8 filenames.
+    command.env(
+        "KAFKA_DASHBOARD_WEB_DIR",
+        std::ffi::OsStr::from_bytes(b"missing-web-\xff"),
+    );
+    let output = output_before_timeout(&mut command);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("KAFKA_DASHBOARD_WEB_DIR"), "{stderr}");
+    assert!(!stderr.contains("required .env"), "{stderr}");
+    assert!(!stderr.contains("missing-web"), "{stderr}");
 }
 
 fn assert_health_and_sigterm(mut server: Server, address: std::net::SocketAddr) {

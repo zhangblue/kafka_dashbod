@@ -83,6 +83,8 @@ cargo build -p backend --bin kafka-dashboard
 touch "$run_dir/.env"
 (
   cd "$run_dir"
+  # Vite serves the UI; inherited asset paths may be relative to the repository.
+  unset KAFKA_DASHBOARD_WEB_DIR
   exec "$repo_dir/target/debug/kafka-dashboard"
 ) >"$run_dir/backend.log" 2>&1 &
 backend_pid=$!

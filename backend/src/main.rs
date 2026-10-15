@@ -1,5 +1,4 @@
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--version")
@@ -9,13 +8,30 @@ async fn main() -> std::io::Result<()> {
     }
     let invalid_dotenv = || std::io::Error::other("failed to load required .env configuration");
     let dotenv = std::fs::read(".env").map_err(|_| invalid_dotenv())?;
-    // dotenvy passes values to set_var, whose NUL panic would expose configuration values.
+    // set_var's NUL panic would expose configuration values.
     if dotenv.contains(&0) {
         return Err(invalid_dotenv());
     }
-    dotenvy::from_read(dotenv.as_slice()).map_err(|_| invalid_dotenv())?;
+    // Unlike from_read, dotenvy's iterator does not strip the UTF-8 BOM.
+    let dotenv = dotenv.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&dotenv);
+    for item in dotenvy::from_read_iter(dotenv) {
+        let (key, value) = item.map_err(|_| invalid_dotenv())?;
+        if std::env::var_os(&key).is_none() {
+            // SAFETY: This synchronous entry point has only inspected arguments, read the
+            // file and parsed dotenv, none of which starts threads. Logging, Tokio, SQLx
+            // and Kafka initialization happen below, after every environment write.
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
     tracing_subscriber::fmt::init();
 
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> std::io::Result<()> {
     let config = kafka_dashboard::config::Config::from_env()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let pool = kafka_dashboard::db::connect(&config.database_url)

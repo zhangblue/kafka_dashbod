@@ -62,6 +62,7 @@ fs.writeFileSync(process.env.E2E_STARTUP_OBSERVATION, JSON.stringify({
   dotenv: fs.existsSync(dotenv) ? fs.readFileSync(dotenv, 'utf8') : null,
   databaseUrl: process.env.DATABASE_URL,
   bind: process.env.KAFKA_DASHBOARD_BIND,
+  webDir: process.env.KAFKA_DASHBOARD_WEB_DIR ?? null,
 }))
 // Stop before frontend/browser work; the real shell lifecycle must clean up this failed child.
 process.exit(66)
@@ -75,6 +76,7 @@ process.exit(66)
         PATH: `${commands}:${process.env.PATH}`,
         TMPDIR: runtimeParent,
         E2E_STARTUP_OBSERVATION: observation,
+        KAFKA_DASHBOARD_WEB_DIR: 'frontend/dist',
       },
     })
     assert.equal(result.error, undefined)
@@ -85,6 +87,7 @@ process.exit(66)
     assert.equal(observed.dotenv, '', 'backend needs a valid dotenv without test secrets')
     assert.equal(observed.databaseUrl, `sqlite://${observed.cwd}/dashboard.db`)
     assert.equal(observed.bind, '127.0.0.1:0')
+    assert.equal(observed.webDir, null, 'Vite serves E2E pages; backend must not inherit a relative web directory')
     assert.equal(existsSync(observed.cwd), false, 'script cleanup must remove its runtime directory')
     if (existingDotenv) assert.equal(await readFile(path.join(repository, '.env'), 'utf8'), 'USER_SETTING=keep-this-file\n')
     else assert.equal(existsSync(path.join(repository, '.env')), false)
