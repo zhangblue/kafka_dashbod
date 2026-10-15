@@ -44,7 +44,7 @@ it('sorts by numeric lag descending and filters by group, topic and evaluated st
   show()
   const table = screen.getByRole('table', { name: 'Consumer Groups 汇总' })
   expect(within(table).getAllByRole('row').slice(1).map(item => within(item).getAllByRole('cell')[0].textContent))
-    .toEqual(['展开 flink-orders', '展开 busy-worker', '展开 new-worker', '展开 low-worker'])
+    .toEqual(['› flink-orders', '› busy-worker', '› new-worker', '› low-worker'])
   await user.type(screen.getByRole('searchbox', { name: '搜索 Consumer Group 或 Topic' }), 'ORDERS')
   expect(within(table).getAllByRole('row')).toHaveLength(2)
   await user.clear(screen.getByRole('searchbox'))

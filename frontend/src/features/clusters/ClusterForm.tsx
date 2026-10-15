@@ -49,7 +49,7 @@ export function ClusterForm({ cluster, onSave, onTest, onCancel, saving = false,
   const valid = !!value.name.trim() && !!value.bootstrapServers.trim()
     && numeric.every(key => value[key] !== '' && Number.isSafeInteger(Number(value[key])) && Number(value[key]) >= 0)
     && Number(value.connectionTimeoutMs) > 0 && Number(value.defaultHighLagMin) > Number(value.defaultNormalLagMax)
-  const field = (key: keyof typeof value, label: string, type = 'text') => <label htmlFor={`${id}-${key}`}>{label}
+  const field = (key: keyof typeof value, label: string, type = 'text') => <label className={key === 'bootstrapServers' ? 'field full' : 'field'} htmlFor={`${id}-${key}`}>{label}
     <input id={`${id}-${key}`} type={type} autoComplete={type === 'password' ? 'new-password' : 'off'} disabled={cleared.has(key)}
       value={value[key]} min={type === 'number' ? 0 : undefined} step={type === 'number' ? 1 : undefined}
       aria-invalid={error instanceof ApiError && !!error.fields[key]}
@@ -68,23 +68,25 @@ export function ClusterForm({ cluster, onSave, onTest, onCancel, saving = false,
     }
     return input
   }
-  return <form onSubmit={event => {
+  return <form className="cluster-form" onSubmit={event => {
     event.preventDefault()
     if (!valid || busy) return
     test.reset()
     onSave(input())
   }}>
-    <fieldset disabled={busy}><legend>{cluster ? '编辑集群' : '新增集群'}</legend>
-      {field('name', '集群名称')}{field('bootstrapServers', 'Bootstrap Servers')}
-      <label htmlFor={`${id}-protocol`}>安全协议</label>
-      <select id={`${id}-protocol`} value={value.securityProtocol}
-        aria-invalid={error instanceof ApiError && !!error.fields.securityProtocol}
-        aria-describedby={error instanceof ApiError && error.fields.securityProtocol ? `${id}-error-securityProtocol` : undefined}
-        onChange={event => update('securityProtocol', event.target.value)}>
-        {['PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL'].map(protocol => <option key={protocol}>{protocol}</option>)}
-      </select>
+    <fieldset className="form-grid" disabled={busy}><legend className="sr-only">{cluster ? '编辑集群' : '新增集群'}</legend>
+      {field('name', '集群名称')}
+      <label htmlFor={`${id}-protocol`}>安全协议
+        <select id={`${id}-protocol`} value={value.securityProtocol}
+          aria-invalid={error instanceof ApiError && !!error.fields.securityProtocol}
+          aria-describedby={error instanceof ApiError && error.fields.securityProtocol ? `${id}-error-securityProtocol` : undefined}
+          onChange={event => update('securityProtocol', event.target.value)}>
+          {['PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL'].map(protocol => <option key={protocol}>{protocol}</option>)}
+        </select>
+      </label>
+      {field('bootstrapServers', 'Bootstrap Servers')}
       {field('saslMechanism', 'SASL Mechanism')}{field('username', '用户名')}
-      {secrets.map(({ key, label }) => <div key={key}>
+      {secrets.map(({ key, label }) => <div className="secret-field" key={key}>
         {key === 'password' || key === 'clientKeyPassphrase' ? field(key, label, 'password') : <label htmlFor={`${id}-${key}`}>
         {label}
         <textarea id={`${id}-${key}`} value={value[key]} autoComplete="off" disabled={cleared.has(key)}
@@ -102,14 +104,13 @@ export function ClusterForm({ cluster, onSave, onTest, onCancel, saving = false,
           }} />清除已保存的{label}</label>
         </>}
       </div>)}
-      {cluster && <p>密码、证书、私钥与口令不回显；留空保留已保存的敏感字段，勾选清除后在保存时删除。</p>}
+      {cluster && <p className="form-note full">密码、证书、私钥与口令不回显；留空保留已保存的敏感字段，勾选清除后在保存时删除。</p>}
       {field('connectionTimeoutMs', '连接超时（毫秒）', 'number')}
       {field('defaultNormalLagMax', '默认正常上限', 'number')}
       {field('defaultHighLagMin', '默认高 Lag 起始值', 'number')}
       {field('defaultOverLimitSeconds', '默认持续超限时间（秒）', 'number')}
-      <button type="button" disabled={!valid || busy} onClick={() => test.mutate(input())}>测试当前配置</button>
-      <button type="submit" disabled={!valid || busy}>保存集群</button>
-      {onCancel && <button type="button" onClick={onCancel}>取消</button>}
+      <div className="modal-actions full"><button type="button" disabled={!valid || busy} onClick={() => test.mutate(input())}>测试当前配置</button>
+      <div>{onCancel && <button type="button" onClick={onCancel}>取消</button>}<button type="submit" disabled={!valid || busy}>保存集群</button></div></div>
     </fieldset>
     {test.isPending && <p role="status">正在测试当前配置…</p>}
     {test.isSuccess && <p role="status">当前配置连接成功：{test.data.brokerCount} Broker，{test.data.topicCount} Topic，耗时 {test.data.elapsedMs} ms</p>}

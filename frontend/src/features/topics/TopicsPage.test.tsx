@@ -62,8 +62,8 @@ it('expands authoritative partition offsets and preserves empty partitions', asy
   await user.click(screen.getByRole('button', { name: '展开 order-events' }))
   const table = screen.getByRole('table', { name: 'order-events Partitions' })
   const rows = within(table).getAllByRole('row')
-  expect(within(rows[1]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['0', '10', '105,102', '105,101'])
-  expect(within(rows[3]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['2', '20', '20', '—'])
+  expect(within(rows[1]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['0', '10', '105,102', '105,101', '105,092'])
+  expect(within(rows[3]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['2', '20', '20', '—', '0'])
   expect(screen.getByRole('button', { name: '收起 order-events' })).toHaveAttribute('aria-expanded', 'true')
   await user.click(screen.getByRole('button', { name: '收起 order-events' }))
   expect(screen.queryByRole('table', { name: 'order-events Partitions' })).not.toBeInTheDocument()
@@ -81,7 +81,7 @@ it('marks partial data and shows unavailable offsets as dashes', async () => {
   expect(screen.getByText(/部分数据采集失败/)).toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: '展开 order-events' }))
   const rows = within(screen.getByRole('table', { name: 'order-events Partitions' })).getAllByRole('row')
-  expect(within(rows[2]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['1', '—', '—', '—'])
+  expect(within(rows[2]).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['1', '—', '—', '—', '—'])
 })
 
 // Catches keyboard/screen reader regressions and missing definitions or formula boundaries.

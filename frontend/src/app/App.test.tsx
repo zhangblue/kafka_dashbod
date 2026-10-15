@@ -14,6 +14,8 @@ it('renders the dashboard navigation', () => {
   vi.spyOn(clustersApi, 'list').mockResolvedValue([])
   render(<App />)
   expect(screen.getByText('Kafka Lens')).toBeInTheDocument()
+  expect(screen.getByText('Cluster observability')).toBeInTheDocument()
+  expect(screen.getByRole('complementary', { name: 'Kafka Lens' })).toHaveTextContent('只读模式')
   expect(screen.getByRole('navigation')).toBeInTheDocument()
   expect(screen.getByRole('link', { name: '概览' })).toBeInTheDocument()
   expect(screen.getByText('Topics')).toBeInTheDocument()
@@ -132,7 +134,8 @@ it('retains failed resource display values across overview, topics and groups wh
   expect(chartRows.at(-1)).toHaveTextContent('未知 / 不完整')
   fireEvent.click(screen.getByRole('link', { name: 'worker / orders' }))
   expect(screen.getByRole('table', { name: 'worker / orders Partitions' })).toHaveTextContent('50')
-  expect(screen.getByRole('row', { name: /收起 worker orders/ })).toHaveTextContent('70')
+  expect(screen.getByRole('row', { name: /worker orders/ })).toHaveTextContent('70')
+  expect(screen.getByRole('button', { name: '收起 worker / orders' })).toHaveAttribute('aria-expanded', 'true')
 
   await collect({ ...complete, collectedAt: at(20), partialFailures: [{ scope: 'watermark', resource: 'orders:0', code: 'KAFKA_TIMEOUT', message: 'timeout' }],
     topics: [{ ...complete.topics[0], low: 10, latestMessageOffset: 119, retainedOffsetSpan: 110, incomplete: true, partitions: [

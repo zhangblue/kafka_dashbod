@@ -25,18 +25,40 @@ export function LagLineChart({ samples, series, stale, label }: { samples?: LagS
     const newest = times.at(-1)
     instance.current?.setOption({
       animation: false,
-      tooltip: { trigger: 'axis' },
-      legend: { type: 'scroll', data: lines.map(line => line.name) },
-      grid: { left: 64, right: 24, top: 40, bottom: 36 },
-      xAxis: { type: 'time', min: newest === undefined ? undefined : newest - 3_600_000, max: newest },
-      yAxis: { type: 'value', min: 0 },
-      series: lines.map(line => ({ name: line.name, type: 'line', showSymbol: true, connectNulls: false,
+      textStyle: { color: '#8997ad' },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#151e2f',
+        borderColor: '#243147',
+        textStyle: { color: '#d8e2f1' },
+      },
+      legend: { type: 'scroll', top: 4, right: 8, data: lines.map(line => line.name), textStyle: { color: '#8997ad' } },
+      grid: { left: 48, right: 18, top: 38, bottom: 30 },
+      xAxis: {
+        type: 'time',
+        min: newest === undefined ? undefined : newest - 3_600_000,
+        max: newest,
+        axisLine: { lineStyle: { color: '#34425a' } },
+        axisLabel: { color: '#8997ad' },
+        splitLine: { lineStyle: { color: '#1d283a' } },
+      },
+      yAxis: {
+        type: 'value',
+        min: 0,
+        axisLine: { lineStyle: { color: '#34425a' } },
+        axisLabel: { color: '#8997ad' },
+        splitLine: { lineStyle: { color: '#1d283a' } },
+      },
+      series: lines.map((line, index) => ({ name: line.name, type: 'line', showSymbol: line.samples.length === 1, connectNulls: false,
+        lineStyle: { width: 2 },
+        itemStyle: { color: ['#35c8e6', '#4f7cff', '#2dd4a0', '#f6b94a', '#fb7185'][index % 5] },
+        areaStyle: lines.length === 1 ? { opacity: 0.12 } : undefined,
         data: line.samples.map(sample => [sample.at, sample.lag]) })),
     }, true)
   }, [lines, times])
   return <figure>
-    <figcaption>{label ? `最近 1 小时 ${label}` : '最近 1 小时总 Lag'}{stale && <span aria-label="图表数据已陈旧"> ⚠ 数据已陈旧</span>}</figcaption>
-    <div ref={container} role="img" aria-label={label ? `${label}折线图` : '总 Lag 折线图'} style={{ width: '100%', height: 280 }} />
+    <figcaption>{label ? `最近 1 小时 ${label}` : '总 Lag · 最近 1 小时'}{stale && <span aria-label="图表数据已陈旧"> ⚠ 数据已陈旧</span>}</figcaption>
+    <div ref={container} role="img" aria-label={label ? `${label}折线图` : '总 Lag 折线图'} style={{ width: '100%', height: 230 }} />
     {!times.length && <p>尚无历史样本。</p>}
     <details><summary>查看图表数据</summary><table aria-label={label ? `${label}数据` : '最近 1 小时总 Lag 数据'}>
       <thead><tr><th scope="col">采集时间</th>{lines.map(line => <th key={line.name} scope="col">{line.name}</th>)}</tr></thead>

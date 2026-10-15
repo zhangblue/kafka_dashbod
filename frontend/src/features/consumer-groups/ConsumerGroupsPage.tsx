@@ -34,25 +34,30 @@ function PartitionTable({ row, snapshot, staleResources }: { row: ConsumerGroupT
 function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId: string; monitor: MonitorSession; evaluatedRows: ConsumerGroupLagRow[] }) {
   const [params] = useSearchParams()
   const [search, setSearch] = useState('')
-  const [filter, setFilter] = useState<LagStatus | 'all'>('all')
+  const [filter, setFilter] = useState<LagStatus | 'all' | 'abnormal'>('all')
+  const { cluster } = useDashboard()
   const [expanded, setExpanded] = useState<Set<string>>(() => {
     const groupId = params.get('groupId'), topic = params.get('topic')
     return new Set(groupId && topic ? [lagRowKey(clusterId, groupId, topic)] : [])
   })
   const id = useId()
   const { snapshot, status } = monitor
-  const rows = evaluatedRows.filter(({ row, state }) => (filter === 'all' || state.status === filter)
+  const rows = evaluatedRows.filter(({ row, state }) => (filter === 'all' || (filter === 'abnormal' ? state.status !== 'normal' : state.status === filter))
     && `${row.groupId}\n${row.topic}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))
     .sort((a, b) => (b.displayRow ?? b.row).lag - (a.displayRow ?? a.row).lag || a.key.localeCompare(b.key))
   return <>
-    <label>搜索 Consumer Group 或 Topic <input type="search" value={search} onChange={event => setSearch(event.target.value)} /></label>
-    <label>状态筛选 <select value={filter} onChange={event => setFilter(event.target.value as LagStatus | 'all')}>
-      <option value="all">全部状态</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-    </select></label>
+    <div className="page-head"><div><h2>Consumer Groups</h2><p>按 Lag 排序，查看消费进度和分区明细</p></div>
+    <div className="toolbar"><label className="search-label"><span className="sr-only">搜索 Consumer Group 或 Topic</span><input type="search" placeholder="搜索消费组或 Topic…" value={search} onChange={event => setSearch(event.target.value)} /></label>
+    <div className="filter-tabs" aria-label="快捷状态筛选">{([['all', '全部'], ['abnormal', '异常'], ['uncommitted', '未提交']] as const).map(([value, label]) => <button type="button" key={value} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}</button>)}</div>
+    </div></div>
+    <div className="offset-note rules-note"><span>默认区间：正常 ≤ {cluster?.defaultNormalLagMax.toLocaleString('en-US')} · 高 Lag ≥ {cluster?.defaultHighLagMin.toLocaleString('en-US')} · 连续超限 {cluster?.defaultOverLimitSeconds} 秒后变色；自定义规则另有标记。</span>
+    <label><span className="sr-only">状态筛选</span><select value={filter} onChange={event => setFilter(event.target.value as typeof filter)}>
+      <option value="all">全部状态</option><option value="abnormal">全部异常</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+    </select></label></div>
     {status !== 'connected' && <p role="status">当前未持续采样，暂停计时；显示最后一次快照，恢复后重新累计。</p>}
     {!!snapshot?.partialFailures.length && <p role="status">部分数据采集失败；仅展示已发现的 Consumer Group / Topic，未知值不代表 0。</p>}
     {!snapshot ? <p>尚未采集 Consumer Groups 数据。</p> : <>
-      <table aria-label="Consumer Groups 汇总"><thead><tr>
+      <div className="panel table-scroll"><table aria-label="Consumer Groups 汇总"><thead><tr>
         <th scope="col">Consumer Group</th><th scope="col">Topic</th>
         <th scope="col">状态 <MetricHelp label="状态">优先级：采集异常 &gt; 未提交 &gt; 高 Lag &gt; 积压 &gt; 正常。正常为 Lag ≤ 正常上限，积压为超过正常上限且低于高 Lag 起始值，高 Lag 为达到起始值。连续超限达到规则时长前仍为正常；回到正常区间立即重置。只累计页面可见且连续成功采样的时间，隐藏、刷新页面、切换集群或会话重建会重置。</MetricHelp></th>
         <th scope="col">有效分区 <MetricHelp label="有效分区">同时取得 High watermark 和有效提交位置、可计算 Lag 的分区数量；不是消费者成员数。</MetricHelp></th>
@@ -63,16 +68,16 @@ function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId:
         const open = expanded.has(key)
         const detailsId = `${id}-partitions-${index}`
         return <Fragment key={key}><tr>
-          <td><button type="button" aria-label={`${open ? '收起' : '展开'} ${row.groupId} / ${row.topic}`} aria-expanded={open} aria-controls={open ? detailsId : undefined}
-            onClick={() => setExpanded(previous => { const next = new Set(previous); if (open) next.delete(key); else next.add(key); return next })}>{open ? '收起' : '展开'}</button> <span>{row.groupId}</span></td>
+          <td><button className="expand-button" type="button" aria-label={`${open ? '收起' : '展开'} ${row.groupId} / ${row.topic}`} aria-expanded={open} aria-controls={open ? detailsId : undefined}
+            onClick={() => setExpanded(previous => { const next = new Set(previous); if (open) next.delete(key); else next.add(key); return next })}>{open ? '⌄' : '›'}</button> <span className="name">{row.groupId}</span></td>
           <td>{row.topic}</td><td><StatusBadge status={state.status} />{staleAt && <StaleNotice at={staleAt} />}{resolved.custom && <span> <MetricHelp trigger="自定义规则" label={`自定义规则 ${row.groupId} / ${row.topic}`}>
             正常上限：{format(resolved.rule.normalMax)}；高 Lag 起始值：{format(resolved.rule.highMin)}；持续超限时间：{resolved.rule.overLimitSeconds} 秒。
           </MetricHelp></span>}</td>
           <td>{health.validCount}</td><td>{health.uncommittedCount}</td>
           <td>{format(displayRow.lag)}{row.unknownPartitionCount > 0 ? ` + ${row.unknownPartitionCount} 未知` : ''}{health.collectionError ? '（不完整）' : ''}</td>
           <td>{trend ? <span aria-label={`Lag ${trend === 'up' ? '上升' : trend === 'down' ? '下降' : '持平'}`}>{trend === 'up' ? '↑' : trend === 'down' ? '↓' : '→'}</span> : '—'}</td>
-        </tr>{open && <tr><td colSpan={7} id={detailsId}><PartitionTable row={displayRow} snapshot={monitor.displaySnapshot ?? snapshot} staleResources={monitor.staleResources} /></td></tr>}</Fragment>
-      })}</tbody></table>
+        </tr>{open && <tr className="detail-row"><td colSpan={7} id={detailsId}><PartitionTable row={displayRow} snapshot={monitor.displaySnapshot ?? snapshot} staleResources={monitor.staleResources} /></td></tr>}</Fragment>
+      })}</tbody></table></div>
       {!rows.length && <p>{snapshot.consumerGroups.length ? '没有匹配的 Consumer Group / Topic。' : '暂无 Consumer Group / Topic 数据。'}</p>}
     </>}
   </>
@@ -82,7 +87,8 @@ export function ConsumerGroupsPage() {
   const { cluster, monitor, refreshSeconds } = useDashboard()
   const stale = useSnapshotStale(monitor, refreshSeconds)
   const lag = useConsumerGroupLag()
-  return <section aria-label="Consumer Groups 内容"><h2>Consumer Groups</h2>
+  return <section className="page-panel" aria-label="Consumer Groups 内容">
+    {!lag.ready && <div className="page-head"><div><h2>Consumer Groups</h2><p>按 Lag 排序，查看消费进度和分区明细</p></div></div>}
     {stale && <p role="status" aria-label="Consumer Groups 数据已陈旧">数据已陈旧</p>}
     {!cluster ? <p>请选择集群。</p> : <>
       {lag.isPending && <p role="status">正在加载 Lag 规则…</p>}

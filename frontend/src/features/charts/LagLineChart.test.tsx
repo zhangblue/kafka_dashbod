@@ -21,7 +21,11 @@ it('initializes once, updates samples without joining unknown gaps, observes siz
   expect(init).toHaveBeenCalledTimes(1)
   expect(observe).toHaveBeenCalledWith(screen.getByLabelText('总 Lag 折线图'))
   expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({
-    xAxis: { type: 'time', min: -3599000, max: 1000 },
+    textStyle: { color: '#8997ad' },
+    tooltip: expect.objectContaining({ backgroundColor: '#151e2f', borderColor: '#243147' }),
+    legend: expect.objectContaining({ textStyle: { color: '#8997ad' } }),
+    xAxis: expect.objectContaining({ type: 'time', min: -3599000, max: 1000, axisLabel: { color: '#8997ad' } }),
+    yAxis: expect.objectContaining({ type: 'value', min: 0, axisLabel: { color: '#8997ad' } }),
     series: [expect.objectContaining({ data: [[1000, 12]], connectNulls: false })],
   }), true)
   rerender(<LagLineChart samples={[{ at: 1000, lag: 12 }, { at: 2000, lag: null }]} stale />)

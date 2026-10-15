@@ -98,6 +98,16 @@ it('shows no fabricated zero total when discovery fails without any known rows',
   expect(card).toHaveTextContent('不完整')
 })
 
+it('groups distribution by consumer group across topics and labels unknown lag instead of treating it as zero', async () => {
+  const snapshot = fixture()
+  snapshot.consumerGroups.push({ ...row('high', 200), topic: 'secondary' })
+  mount(snapshot)
+  const distribution = await screen.findByRole('region', { name: 'Lag 分布' })
+  expect(within(distribution).getByText('6,200')).toBeInTheDocument()
+  expect(within(distribution).getAllByText('high')).toHaveLength(1)
+  expect(distribution).toHaveTextContent('未知')
+})
+
 it('distinguishes fresh uncommitted data from stale collection failures', async () => {
   const snapshot = fixture()
   snapshot.consumerGroups = [snapshot.consumerGroups[3]]

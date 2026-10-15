@@ -11,25 +11,30 @@ function App() {
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
   return (
     <QueryClientProvider client={client}><BrowserRouter>
-    <main>
-      <h1>Kafka Lens</h1>
-      <nav aria-label="主要导航">
-        <ul>
-          <li><NavLink to="/" end>概览</NavLink></li>
-          <li><NavLink to="/topics">Topics</NavLink></li>
-          <li><NavLink to="/consumer-groups">Consumer Groups</NavLink></li>
-          <li><NavLink to="/settings">集群设置</NavLink></li>
-        </ul>
-      </nav>
-      <Routes>
-        <Route element={<DashboardLayout />}>
-          <Route index element={<OverviewPage />} />
-          <Route path="topics" element={<TopicsPage />} />
-          <Route path="consumer-groups" element={<ConsumerGroupsPage />} />
-        </Route>
-        <Route path="settings" element={<ClustersPage />} />
-      </Routes>
-    </main>
+    <div className="app-shell">
+      <aside className="sidebar" aria-label="Kafka Lens">
+        <div className="brand"><span className="brandmark" aria-hidden="true">K</span><div><b>Kafka Lens</b><small>Cluster observability</small></div></div>
+        <nav aria-label="主要导航">
+          <ul>
+            <li><NavLink to="/" end><i aria-hidden="true">⌁</i><span>概览</span></NavLink></li>
+            <li><NavLink to="/topics"><i aria-hidden="true">◫</i><span>Topics</span></NavLink></li>
+            <li><NavLink to="/consumer-groups"><i aria-hidden="true">◉</i><span>Consumer Groups</span></NavLink></li>
+            <li><NavLink to="/settings"><i aria-hidden="true">⚙</i><span>集群设置</span></NavLink></li>
+          </ul>
+        </nav>
+        <div className="sidebar-footer">只读模式<br />数据仅在页面打开时采集</div>
+      </aside>
+      <main className="app-main">
+        <Routes>
+          <Route element={<DashboardLayout />}>
+            <Route index element={<OverviewPage />} />
+            <Route path="topics" element={<TopicsPage />} />
+            <Route path="consumer-groups" element={<ConsumerGroupsPage />} />
+          </Route>
+          <Route path="settings" element={<ClustersPage />} />
+        </Routes>
+      </main>
+    </div>
     </BrowserRouter></QueryClientProvider>
   )
 }

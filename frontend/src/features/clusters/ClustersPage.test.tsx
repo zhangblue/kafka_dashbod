@@ -23,6 +23,16 @@ function renderPage(snapshot: ClusterSnapshot | null = snapshotFixture) {
 }
 
 describe('cluster settings', () => {
+  it('groups the security protocol label and control for consistent form layout', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(screen.getByRole('button', { name: '新增集群' }))
+    expect(screen.getByLabelText('安全协议').closest('label')).not.toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Kafka 集群配置' })).toContainElement(screen.getByLabelText('安全协议'))
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
   it('tests a new unsaved draft without persisting and invalidates the result when edited', async () => {
     const user = userEvent.setup()
     let tested: Record<string, unknown> | undefined

@@ -7,6 +7,7 @@ import { ClusterForm, ApiErrorNotice } from './ClusterForm'
 import { LagRulesForm } from '../lag-rules/LagRulesForm'
 import { snapshotUnavailable } from '../lag-rules/snapshotAvailability'
 import { sessionTransition } from '../dashboard/sessionTransitions'
+import { Modal } from '../../components/Modal'
 
 function ConfigurationSession({ clusterId, onReconnect, children }: {
   clusterId: string
@@ -116,7 +117,7 @@ function RulesEditor({ cluster, snapshot, onClose }: { cluster: ClusterDto; snap
     fieldErrors={save.error instanceof ApiError ? save.error.fields : {}} fieldErrorIdPrefix={fieldErrorIdPrefix}
     onSave={value => save.mutate(value)} saving={save.isPending} />
   return <section aria-label={`${cluster.name} Lag 规则`}>
-    <h2>{cluster.name} · Lag 状态判断区间</h2>
+    <p className="rules-description">{cluster.name} · 自定义规则精确匹配 Consumer Group + Topic，覆盖集群默认区间与持续时间。</p>
     {rules.isPending && <p role="status">正在加载规则…</p>}
     <ApiErrorNotice error={save.error ?? rules.error} fieldIdPrefix={fieldErrorIdPrefix} />
     {snapshot && (attempt === 0 || !snapshotUnavailable(snapshot)) ? <>
@@ -159,25 +160,30 @@ export function ClustersPage({ snapshot = null }: ClustersPageProps) {
   } })
   const test = useMutation({ mutationFn: (id: string) => clustersApi.test(id) })
 
-  return <section aria-label="集群设置">
-    <h1>集群设置</h1>
-    <button type="button" disabled={savingSettings} onClick={() => { save.reset(); setRulesClusterId(null); setEditing('new') }}>新增集群</button>
+  const addCluster = () => { save.reset(); setRulesClusterId(null); setEditing('new') }
+  return <><header className="topbar settings-topbar"><span>Kafka Lens <span className="breadcrumb-separator">/</span> 集群设置</span><span className="muted">连接与 Lag 状态规则</span></header>
+    <section className="page-content settings-page" aria-label="集群设置">
+    <div className="page-head"><div><h1>集群设置</h1><p>管理 Kafka 连接与各集群的 Lag 状态规则</p></div>
+    <button className="primary" type="button" disabled={savingSettings} onClick={addCluster}>新增集群</button></div>
     {clusters.isPending && <p role="status">正在加载集群…</p>}
     <ApiErrorNotice error={clusters.error ?? remove.error ?? test.error} />
     {clusters.data?.length === 0 && <p>尚未配置集群，请新增集群。</p>}
-    {clusters.data?.map(cluster => <fieldset key={cluster.id} aria-label={cluster.name}>
-      <legend>{cluster.name}</legend><p>{cluster.bootstrapServers}</p><p>{cluster.securityProtocol}</p>
+    <div className="settings-grid">{clusters.data?.map(cluster => <fieldset className="cluster-card" key={cluster.id} aria-label={cluster.name}>
+      <div className="cluster-card-top"><h3>{cluster.name}</h3><span className="protocol-badge">{cluster.securityProtocol}</span></div>
+      <div className="cluster-meta"><p>{cluster.bootstrapServers}</p><p>{cluster.saslMechanism || 'Kafka 集群连接'}</p></div>
+      <div className="threshold-summary">默认 Lag 阈值：正常 ≤ {cluster.defaultNormalLagMax.toLocaleString('en-US')} · 高 Lag ≥ {cluster.defaultHighLagMin.toLocaleString('en-US')}<br />持续超限 {cluster.defaultOverLimitSeconds} 秒</div>
+      <div className="cluster-card-actions">
       <button type="button" disabled={savingSettings} onClick={() => { save.reset(); setRulesClusterId(null); setEditing(cluster) }}>编辑</button>
       <button type="button" disabled={test.isPending} onClick={() => { setTestedId(cluster.id); test.mutate(cluster.id) }}>测试连接</button>
       <button type="button" disabled={savingSettings} onClick={() => { setEditing(null); setRulesClusterId(cluster.id) }}>配置 Lag 规则</button>
-      <button type="button" disabled={remove.isPending || savingSettings} onClick={() => remove.mutate(cluster.id)}>删除</button>
+      <button className="danger-button" type="button" disabled={remove.isPending || savingSettings} onClick={() => remove.mutate(cluster.id)}>删除</button></div>
       {test.isSuccess && testedId === cluster.id && <p role="status">连接成功：{test.data.brokerCount} Broker，{test.data.topicCount} Topic，耗时 {test.data.elapsedMs} ms</p>}
-    </fieldset>)}
-    {editing && <ClusterForm key={editing === 'new' ? 'new' : editing.id} cluster={editing === 'new' ? undefined : editing}
+    </fieldset>)}<button className="empty-add" type="button" disabled={savingSettings} onClick={addCluster}><span aria-hidden="true">＋</span>添加 Kafka 集群</button></div>
+    {editing && <Modal title="Kafka 集群配置" description="配置连接信息与默认 Lag 状态判断区间" busy={savingSettings} onClose={() => setEditing(null)}><ClusterForm key={editing === 'new' ? 'new' : editing.id} cluster={editing === 'new' ? undefined : editing}
       saving={save.isPending} error={save.error} onCancel={() => setEditing(null)}
       onTest={value => clustersApi.testDraft(value, editing === 'new' ? undefined : editing.id)}
-      onSave={value => save.mutate({ id: editing === 'new' ? undefined : editing.id, value })} />}
-    {rulesCluster && <RulesEditor key={rulesCluster.id} cluster={rulesCluster}
-      snapshot={snapshot?.clusterId === rulesCluster.id ? snapshot : null} onClose={() => setRulesClusterId(null)} />}
-  </section>
+      onSave={value => save.mutate({ id: editing === 'new' ? undefined : editing.id, value })} /></Modal>}
+    {rulesCluster && <Modal title="Lag 状态判断区间" wide busy={savingSettings} onClose={() => setRulesClusterId(null)}><RulesEditor key={rulesCluster.id} cluster={rulesCluster}
+      snapshot={snapshot?.clusterId === rulesCluster.id ? snapshot : null} onClose={() => setRulesClusterId(null)} /></Modal>}
+  </section></>
 }

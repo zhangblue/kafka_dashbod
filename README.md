@@ -11,6 +11,12 @@ Kafka 只读监控面板：管理集群连接配置，查看 Topic / Partition �
 - 可访问的 Kafka broker；测试需要 Docker Engine/Desktop 和支持 `up --wait` 的 Docker Compose v2。
 - 浏览器：现代 Chromium、Firefox 或 Safari；自动化验收使用 Playwright Chromium。
 
+## 页面视觉基准
+
+所有页面统一遵循已确认的 [Kafka Dashboard Demo](docs/ui/approved-dashboard-demo.html)：桌面左侧导航、单行顶部控制栏、四张概览指标卡、Lag 趋势与分布双栏、紧凑可展开表格，以及集群卡片与配置弹窗。原稿仅作为样式参考，里面的模拟数值和历史配置文案不代表当前程序行为。
+
+正式页面使用实时采集数据；Lag 分布按 Consumer Group 汇总多个 Topic，未知分区明确标注。进入集群设置会释放仪表盘会话；打开 Lag 规则弹窗才按需连接，关闭后释放。窄屏保留顶部导航并允许表格内部横向滚动。
+
 ## 本地运行
 
 在项目根目录启动后端：

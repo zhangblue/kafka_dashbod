@@ -51,11 +51,16 @@ export function LagRulesForm({ clusterId, snapshot, value, onChange, onSave, sav
     'aria-invalid': !!fieldErrors[path],
   })
 
-  return <form onSubmit={event => { event.preventDefault(); if (valid && !saving) onSave?.(value) }}>
-    <fieldset disabled={saving || !available}>
+  return <form className="lag-rules-form" onSubmit={event => { event.preventDefault(); if (valid && !saving) onSave?.(value) }}>
+    <fieldset className="default-rules" disabled={saving || !available}>
       <legend>集群默认规则</legend>
       <ThresholdFields value={value.defaults} getAttributes={key => fieldAttributes(`defaults.${key}`)} onChange={defaults => onChange({ ...value, defaults })} />
     </fieldset>
+    {validThresholds(value.defaults) && <div className="range-summary">
+      <div className="range-bar" aria-hidden="true"><i /><i /><i /></div>
+      <div className="range-labels"><span>正常 · 0–{value.defaults.normalMax.toLocaleString('en-US')}</span><span>积压 · {value.defaults.highMin === value.defaults.normalMax + 1 ? '无整数区间' : `${(value.defaults.normalMax + 1).toLocaleString('en-US')}–${(value.defaults.highMin - 1).toLocaleString('en-US')}`}</span><span>高 Lag · ≥{value.defaults.highMin.toLocaleString('en-US')}</span></div>
+    </div>}
+    <p className="form-note">持续超限只延迟“积压”和“高 Lag”的状态切换。Lag 恢复正常后计时清零；采集异常与未提交立即生效。</p>
     <section aria-labelledby={`${id}-title`}>
       <h3 id={`${id}-title`}>自定义Lag状态判定区间</h3>
       {!available && <p role="status">集群不可达，请重新连接后新增或更换 Consumer Group / Topic。</p>}
@@ -67,26 +72,26 @@ export function LagRulesForm({ clusterId, snapshot, value, onChange, onSave, sav
         const groupMissing = !!rule.groupId && !groups.includes(rule.groupId)
         const topicMissing = !!rule.topic && !topics.includes(rule.topic)
         const unavailable = !available || groupMissing || topicMissing
-        return <fieldset key={rule.id ?? index}>
+        return <fieldset className="rule-row" key={rule.id ?? index}>
           <legend>规则 {index + 1}</legend>
-          <label htmlFor={`${id}-group-${index}`}>Consumer Group</label>
-          <select id={`${id}-group-${index}`} value={rule.groupId} disabled={unavailable || saving}
+          <label htmlFor={`${id}-group-${index}`}>Consumer Group
+          <select id={`${id}-group-${index}`} aria-label="Consumer Group" value={rule.groupId} disabled={unavailable || saving}
             {...fieldAttributes(`overrides.${index}.groupId`)}
             onChange={event => updateRule(index, { groupId: event.target.value, topic: '' })}>
             <option value="">请选择 Consumer Group</option>
             {groupMissing && <option value={rule.groupId} disabled>{rule.groupId}（当前不可用）</option>}
             {groups.map(group => <option key={group} value={group}>{group}</option>)}
-          </select>
-          <label htmlFor={`${id}-topic-${index}`}>Topic</label>
-          <select id={`${id}-topic-${index}`} value={rule.topic} disabled={unavailable || !rule.groupId || saving}
+          </select></label>
+          <label htmlFor={`${id}-topic-${index}`}>Topic
+          <select id={`${id}-topic-${index}`} aria-label="Topic" value={rule.topic} disabled={unavailable || !rule.groupId || saving}
             {...fieldAttributes(`overrides.${index}.topic`)}
             onChange={event => updateRule(index, { topic: event.target.value })}>
             <option value="">请选择 Topic</option>
             {topicMissing && <option value={rule.topic} disabled>{rule.topic}（当前不可用）</option>}
             {topics.map(topic => <option key={topic} value={topic}>{topic}</option>)}
-          </select>
+          </select></label>
           <ThresholdFields value={rule} getAttributes={key => fieldAttributes(`overrides.${index}.${key}`)} disabled={unavailable || saving} onChange={thresholds => updateRule(index, thresholds)} />
-          <button type="button" disabled={saving} onClick={() => onChange({ ...value, overrides: value.overrides.filter((_, i) => i !== index) })}>删除规则</button>
+          <button type="button" className="danger-button" disabled={saving} onClick={() => onChange({ ...value, overrides: value.overrides.filter((_, i) => i !== index) })}>删除规则</button>
         </fieldset>
       })}
       <button type="button" disabled={!available || saving} onClick={() => onChange({ ...value,
