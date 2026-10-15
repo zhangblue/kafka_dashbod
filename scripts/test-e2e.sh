@@ -80,7 +80,11 @@ printf '%s\n' 'Starting disposable Kafka fixture…'
 "${compose[@]}" up --wait --wait-timeout 180
 cargo test -p backend --test kafka_fixture seed_disposable_kafka -- --ignored --exact
 cargo build -p backend --bin kafka-dashboard
-"$repo_dir/target/debug/kafka-dashboard" >"$run_dir/backend.log" 2>&1 &
+touch "$run_dir/.env"
+(
+  cd "$run_dir"
+  exec "$repo_dir/target/debug/kafka-dashboard"
+) >"$run_dir/backend.log" 2>&1 &
 backend_pid=$!
 ready=false
 for ((attempt=0; attempt<200; attempt++)); do
