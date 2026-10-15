@@ -23,7 +23,7 @@ async function fixture(t, osName = 'Darwin', arch = 'arm64') {
   await copyFile(path.join(root, 'packaging/start.sh'), path.join(release, 'start.sh'));
   await executable(path.join(commands, 'uname'), `#!/bin/sh\ncase "$1" in -s) echo '${osName}';; -m) echo '${arch}';; esac\n`);
   for (const platform of ['darwin-arm64', 'linux-amd64']) {
-    await executable(path.join(release, 'bin', `kafka-dashboard-${platform}`), `#!/bin/sh\nprintf '%s\\n' '${platform}' "$DATABASE_URL" "$KAFKA_DASHBOARD_WEB_DIR" "$@"\n` + 'exit "${FAKE_EXIT:-0}"\n');
+    await executable(path.join(release, 'bin', `kafka-dashboard-${platform}`), `#!/bin/sh\nprintf '%s\\n' '${platform}' "$PWD" "\${DATABASE_URL-}" "\${KAFKA_DASHBOARD_WEB_DIR-}" "$@"\n` + 'exit "${FAKE_EXIT:-0}"\n');
   }
   return { release, temp, run(args = [], env = {}, location = release) {
     const cleanEnv = { ...process.env };
@@ -35,20 +35,21 @@ async function fixture(t, osName = 'Darwin', arch = 'arm64') {
   } };
 }
 
-// Detect selecting the wrong binary or losing argument boundaries.
+// Detect injected configuration, a wrong working directory or binary, and lost argument boundaries.
 for (const [osName, arch, platform] of [['Darwin', 'arm64', 'darwin-arm64'], ['Linux', 'x86_64', 'linux-amd64']]) {
   test(`${osName}/${arch} selects its binary and preserves argv`, async t => {
     const f = await fixture(t, osName, arch);
     const result = f.run(['--bind', '127.0.0.1:9090', 'argument with spaces', '']);
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(result.stdout.split('\n'), [platform, 'sqlite://data/kafka-dashboard.db?mode=rwc', `${f.release}/web`, '--bind', '127.0.0.1:9090', 'argument with spaces', '', '']);
+    assert.deepEqual(result.stdout.split('\n'), [platform, f.release, '', '', '--bind', '127.0.0.1:9090', 'argument with spaces', '', '']);
     assert.equal((await stat(path.join(f.release, 'data'))).isDirectory(), true);
   });
 }
-test('starts without a master key or env file', async t => {
+test('launcher does not require or read an env file', async t => {
   const f = await fixture(t);
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.split('\n')[0], 'darwin-arm64');
   assert.equal(existsSync(path.join(f.release, 'data')), true);
 });
 test('unsupported platform reports both supported platforms', async t => {
@@ -64,13 +65,13 @@ test('moved package resolves paths relative to start.sh and propagates exit stat
   await rename(f.release, moved);
   const result = f.run([], { FAKE_EXIT: '17' }, moved);
   assert.equal(result.status, 17);
-  assert.match(result.stdout, new RegExp(`${moved}/web`));
+  assert.equal(result.stdout.split('\n')[1], moved);
 });
 test('explicit database and web paths remain configurable', async t => {
   const f = await fixture(t);
   const result = f.run([], { DATABASE_URL: 'sqlite:///custom.db', KAFKA_DASHBOARD_WEB_DIR: '/custom/web' });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(result.stdout.split('\n').slice(1, 3), ['sqlite:///custom.db', '/custom/web']);
+  assert.deepEqual(result.stdout.split('\n').slice(2, 4), ['sqlite:///custom.db', '/custom/web']);
 });
 
 // Exercise SQLx's real URI parser: literal '?' and '%20' must remain directory names.
@@ -83,6 +84,11 @@ for (const directory of ['release?query', 'release%20encoded', 'release with spa
     const f = await fixture(t);
     await copyFile(nativeBinary, path.join(f.release, 'bin/kafka-dashboard-darwin-arm64'));
     await writeFile(path.join(f.release, 'web/index.html'), '<html>relocated release</html>');
+    await writeFile(path.join(f.release, '.env'), [
+      'DATABASE_URL=sqlite://data/kafka-dashboard.db?mode=rwc',
+      'KAFKA_DASHBOARD_WEB_DIR=web',
+      '',
+    ].join('\n'));
     const moved = path.join(f.temp, directory);
     await rename(f.release, moved);
     const env = { ...process.env, KAFKA_DASHBOARD_BIND: '127.0.0.1:0', RUST_LOG: 'info', NO_COLOR: '1' };

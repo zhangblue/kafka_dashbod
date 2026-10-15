@@ -76,6 +76,8 @@ linux_release="$temp/linux release?%20中文"
 linux_mount='/release?%20 中文'
 cp -R "$release" "$mac_release"
 cp -R "$release" "$linux_release"
+cp "$mac_release/.env.example" "$mac_release/.env"
+cp "$linux_release/.env.example" "$linux_release/.env"
 unset DATABASE_URL KAFKA_DASHBOARD_WEB_DIR
 # ANSI color disabled so the bound ephemeral port can be read without guessing a free port.
 NO_COLOR=1 RUST_LOG=info KAFKA_DASHBOARD_BIND=127.0.0.1:0 "$mac_release/start.sh" > "$temp/mac.log" 2>&1 &

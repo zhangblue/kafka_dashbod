@@ -10,8 +10,4 @@ esac
 cd "$release_dir"
 umask 077
 mkdir -p "$release_dir/data"
-# Keep directory names out of the SQLite URI: '?' and '%xx' are URI syntax.
-DATABASE_URL=${DATABASE_URL:-'sqlite://data/kafka-dashboard.db?mode=rwc'}
-KAFKA_DASHBOARD_WEB_DIR=${KAFKA_DASHBOARD_WEB_DIR:-"$release_dir/web"}
-export DATABASE_URL KAFKA_DASHBOARD_WEB_DIR
 exec "$release_dir/bin/kafka-dashboard-$platform" "$@"
