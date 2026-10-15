@@ -136,3 +136,39 @@ async fn incompatible_database_exits_with_safe_reconfiguration_instruction() {
         assert!(!stderr.contains(private_detail), "{stderr}");
     }
 }
+
+// Ordinary connection failures must not suggest deleting configuration or expose native details.
+#[test]
+fn unavailable_database_exits_with_safe_initialization_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory
+        .path()
+        .join("missing-parent/fixture-unavailable.db");
+    let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
+        .env(
+            "DATABASE_URL",
+            format!("sqlite://{}?mode=rwc", database.display()),
+        )
+        .env_remove("KAFKA_DASHBOARD_WEB_DIR")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to initialize configuration database"),
+        "{stderr}"
+    );
+    for private_detail in [
+        "configuration database is incompatible",
+        "delete it",
+        "SELECT",
+        "SQLite",
+        "sqlite",
+        "sqlx",
+        "unable to open database file",
+        "fixture-unavailable",
+        directory.path().to_str().unwrap(),
+    ] {
+        assert!(!stderr.contains(private_detail), "{stderr}");
+    }
+}

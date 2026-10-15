@@ -65,7 +65,7 @@ Bootstrap Servers 填写逗号分隔的 `host:port`。后端必须能访问 Kafk
 
 不支持 OAuth/OIDC、Kerberos 或任意 librdkafka 参数透传。TLS 客户端证书和私钥必须成对填写；不要把 SASL 字段配置到非 SASL 协议。
 
-**警告：密码、CA、客户端证书、私钥和私钥口令以明文 JSON 存入 SQLite。** 任何能读取数据库、sidecar 或备份的人都能获得这些凭据；请限制文件权限并妥善保护备份。API 只返回各字段的“已配置”标志，不回显内容，日志也不得输出凭据。编辑时敏感字段留空或省略表示保留；使用对应的清除选项可显式移除。API 字段为 `clearPassword`、`clearCaPem`、`clearClientCertificatePem`、`clearClientKeyPem` 和 `clearClientKeyPassphrase`，设为 `true` 时清除该字段；同一字段不能同时填写新值并要求清除。保存前会校验合并后的完整配置：切换协议时须清除不适用的凭据，证书与私钥仍须成对保留，私钥口令不能脱离私钥单独存在。
+**警告：密码、CA、客户端证书、私钥和私钥口令以明文 JSON 存入 SQLite。** 任何能读取数据库、sidecar 或备份的人都能获得这些凭据；请限制文件权限并将备份保存在访问受控的位置；建议启用磁盘加密。API 只返回各字段的“已配置”标志，不回显内容，日志也不得输出凭据。编辑时敏感字段留空或省略表示保留；使用对应的清除选项可显式移除。API 字段为 `clearPassword`、`clearCaPem`、`clearClientCertificatePem`、`clearClientKeyPem` 和 `clearClientKeyPassphrase`，设为 `true` 时清除该字段；同一字段不能同时填写新值并要求清除。保存前会校验合并后的完整配置：切换协议时须清除不适用的凭据，证书与私钥仍须成对保留，私钥口令不能脱离私钥单独存在。
 
 新增或编辑表单均可在保存前测试连接。新配置使用 `POST /api/clusters/test`，未保存的编辑使用 `POST /api/clusters/:id/test`，请求体均为完整表单字段；编辑草稿中省略或留空的敏感字段会复用已保存值，清除选项只影响此次测试。原有 `POST /api/clusters/:id/test` 空请求体继续测试已保存配置。测试不会写入配置，也不会创建监控会话；临时工作由会话管理器跟踪，删除集群或退出进程时会等待相关测试释放资源。请求体上限为 256 KiB，超限返回 413；连接错误及校验错误使用安全错误消息与 Request ID。
 
@@ -111,7 +111,7 @@ docker compose -f docker-compose.test.yml -p kafka-lens-manual down --volumes --
 
 ## 部署边界
 
-当前服务没有内置用户登录或权限系统。生产环境应置于受保护的内网或带身份验证的反向代理之后；使用 HTTPS，对 `/api` 配置代理和访问控制。发行包由后端直接提供静态资源和 SPA fallback。Vite preview 仅用于本地验收。后端默认只绑定回环地址；代理请求体限制应与 256 KiB 上限一致，超时需容纳 Kafka 采集。限制数据库、sidecar 和备份的文件权限，Kafka 使用最小只读权限账户，优先选择 SASL_SSL / SSL。
+当前服务没有内置用户登录或权限系统。生产环境应置于受保护的内网或带身份验证的反向代理之后；使用 HTTPS，对 `/api` 配置代理和访问控制。发行包由后端直接提供静态资源和 SPA fallback。Vite preview 仅用于本地验收。后端默认只绑定回环地址；代理请求体限制应与 256 KiB 上限一致，超时需容纳 Kafka 采集。限制数据库、sidecar 和备份的文件权限，受控保存备份；建议启用磁盘加密。Kafka 使用最小只读权限账户，优先选择 SASL_SSL / SSL。
 
 ## 双平台离线发行包
 
