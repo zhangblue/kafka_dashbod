@@ -6,11 +6,10 @@ use axum::{
     http::{Request, StatusCode},
     response::Response,
 };
-use kafka_dashboard::{api::AppState, crypto::SecretCipher};
+use kafka_dashboard::api::AppState;
 use tower::ServiceExt;
 
 const INDEX: &str = "<main>dashboard</main>";
-const KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 
 fn web_root() -> tempfile::TempDir {
     let web = tempfile::tempdir().unwrap();
@@ -25,7 +24,7 @@ async fn app(web: &Path) -> Router {
     let pool = kafka_dashboard::db::connect("sqlite::memory:")
         .await
         .unwrap();
-    let state = AppState::new(pool, SecretCipher::from_base64_key(KEY).unwrap());
+    let state = AppState::new(pool);
     kafka_dashboard::api::router_with_state_and_web_root(state, Some(web.to_owned())).unwrap()
 }
 
@@ -217,7 +216,7 @@ async fn range_and_conditional_get_keep_file_response_semantics() {
     }
 }
 
-// Fails if version processing requires a database, a valid key, or a web directory.
+// Fails if version processing requires a database or a web directory.
 #[test]
 fn version_exits_without_initializing_configuration() {
     let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
@@ -251,7 +250,7 @@ fn startup_rejects_missing_web_directory_or_index_before_database_initialization
         not_a_file,
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
-            .env("KAFKA_DASHBOARD_MASTER_KEY", KEY)
+            .env_remove("KAFKA_DASHBOARD_MASTER_KEY")
             .env("DATABASE_URL", "invalid://not-a-database")
             .env("KAFKA_DASHBOARD_WEB_DIR", &path)
             .output()

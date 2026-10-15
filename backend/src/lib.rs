@@ -1,6 +1,5 @@
 pub mod api;
 pub mod config;
-pub mod crypto;
 pub mod db;
 pub mod domain;
 pub mod error;

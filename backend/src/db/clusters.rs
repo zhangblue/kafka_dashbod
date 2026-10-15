@@ -1,6 +1,5 @@
 use super::RepositoryError;
 use crate::{
-    crypto::SecretCipher,
     domain::cluster::{
         ClusterDto, ClusterInput, DecryptedClusterConfig, SecretClears, SecurityProtocol,
     },
@@ -14,7 +13,6 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct ClusterRepository {
     pool: SqlitePool,
-    cipher: SecretCipher,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -96,7 +94,7 @@ struct ClusterRow {
     security_protocol: String,
     sasl_mechanism: Option<String>,
     username: Option<String>,
-    encrypted_secrets: Option<Vec<u8>>,
+    secrets_json: Option<Vec<u8>>,
     connection_timeout_ms: i64,
     default_normal_lag_max: i64,
     default_high_lag_min: i64,
@@ -139,27 +137,24 @@ impl ClusterRow {
 // Secret values remain private; public reads expose only configured flags.
 macro_rules! public_columns {
     ($prefix:literal, $suffix:literal) => {
-        concat!($prefix, "id, name, bootstrap_servers, security_protocol, sasl_mechanism, username, encrypted_secrets, connection_timeout_ms, default_normal_lag_max, default_high_lag_min, default_over_limit_seconds, created_at, updated_at", $suffix)
+        concat!($prefix, "id, name, bootstrap_servers, security_protocol, sasl_mechanism, username, secrets_json, connection_timeout_ms, default_normal_lag_max, default_high_lag_min, default_over_limit_seconds, created_at, updated_at", $suffix)
     };
 }
 
 impl ClusterRepository {
-    pub fn new(pool: SqlitePool, cipher: SecretCipher) -> Self {
-        Self { pool, cipher }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 
-    fn encrypt_secrets(&self, secrets: &ClusterSecrets) -> Result<Vec<u8>, RepositoryError> {
-        let plaintext = serde_json::to_vec(secrets).map_err(|_| RepositoryError::InvalidInput)?;
-        Ok(self.cipher.encrypt(&plaintext)?)
+    fn encode_secrets(&self, secrets: &ClusterSecrets) -> Result<Vec<u8>, RepositoryError> {
+        serde_json::to_vec(secrets).map_err(|_| RepositoryError::InvalidInput)
     }
 
-    fn decrypt_secrets(
-        &self,
-        encrypted: Option<Vec<u8>>,
-    ) -> Result<ClusterSecrets, RepositoryError> {
-        match encrypted {
-            Some(bytes) => serde_json::from_slice(&self.cipher.decrypt(&bytes)?)
-                .map_err(|_| RepositoryError::InvalidStoredConfig),
+    fn decode_secrets(&self, stored: Option<Vec<u8>>) -> Result<ClusterSecrets, RepositoryError> {
+        match stored {
+            Some(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|_| RepositoryError::InvalidStoredConfig)
+            }
             None => Ok(ClusterSecrets::default()),
         }
     }
@@ -176,11 +171,11 @@ impl ClusterRepository {
     ) -> Result<ClusterDto, RepositoryError> {
         let secrets = ClusterSecrets::default().merge(input, clears)?;
         secrets.config(input)?;
-        let encrypted = self.encrypt_secrets(&secrets)?;
+        let stored = self.encode_secrets(&secrets)?;
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let sql = public_columns!(
-            "INSERT INTO clusters (id, name, bootstrap_servers, security_protocol, sasl_mechanism, username, encrypted_secrets, connection_timeout_ms, default_normal_lag_max, default_high_lag_min, default_over_limit_seconds, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ",
+            "INSERT INTO clusters (id, name, bootstrap_servers, security_protocol, sasl_mechanism, username, secrets_json, connection_timeout_ms, default_normal_lag_max, default_high_lag_min, default_over_limit_seconds, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ",
             ""
         );
         let row: ClusterRow = sqlx::query_as(sql)
@@ -190,7 +185,7 @@ impl ClusterRepository {
             .bind(input.security_protocol.as_str())
             .bind(&input.sasl_mechanism)
             .bind(&input.username)
-            .bind(encrypted)
+            .bind(stored)
             .bind(input.connection_timeout_ms)
             .bind(input.default_normal_lag_max)
             .bind(input.default_high_lag_min)
@@ -209,7 +204,7 @@ impl ClusterRepository {
             .fetch_optional(&self.pool)
             .await?;
         row.map(|mut row| {
-            let secrets = self.decrypt_secrets(row.encrypted_secrets.take())?;
+            let secrets = self.decode_secrets(row.secrets_json.take())?;
             row.into_dto(&secrets)
         })
         .transpose()
@@ -220,7 +215,7 @@ impl ClusterRepository {
         let rows: Vec<ClusterRow> = sqlx::query_as(sql).fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|mut row| {
-                let secrets = self.decrypt_secrets(row.encrypted_secrets.take())?;
+                let secrets = self.decode_secrets(row.secrets_json.take())?;
                 row.into_dto(&secrets)
             })
             .collect()
@@ -245,18 +240,18 @@ impl ClusterRepository {
     ) -> Result<Option<ClusterDto>, RepositoryError> {
         let mut tx = self.pool.begin().await?;
         let previous: Option<Option<Vec<u8>>> =
-            sqlx::query_scalar("SELECT encrypted_secrets FROM clusters WHERE id = ?")
+            sqlx::query_scalar("SELECT secrets_json FROM clusters WHERE id = ?")
                 .bind(id)
                 .fetch_optional(&mut *tx)
                 .await?;
         let Some(previous) = previous else {
             return Ok(None);
         };
-        let merged = self.decrypt_secrets(previous)?.merge(input, clears)?;
+        let merged = self.decode_secrets(previous)?.merge(input, clears)?;
         merged.config(input)?;
-        let encrypted = self.encrypt_secrets(&merged)?;
+        let stored = self.encode_secrets(&merged)?;
         let sql = public_columns!(
-            "UPDATE clusters SET name = ?, bootstrap_servers = ?, security_protocol = ?, sasl_mechanism = ?, username = ?, encrypted_secrets = ?, connection_timeout_ms = ?, default_normal_lag_max = ?, default_high_lag_min = ?, default_over_limit_seconds = ?, updated_at = ? WHERE id = ? RETURNING ",
+            "UPDATE clusters SET name = ?, bootstrap_servers = ?, security_protocol = ?, sasl_mechanism = ?, username = ?, secrets_json = ?, connection_timeout_ms = ?, default_normal_lag_max = ?, default_high_lag_min = ?, default_over_limit_seconds = ?, updated_at = ? WHERE id = ? RETURNING ",
             ""
         );
         let row: Option<ClusterRow> = sqlx::query_as(sql)
@@ -265,7 +260,7 @@ impl ClusterRepository {
             .bind(input.security_protocol.as_str())
             .bind(&input.sasl_mechanism)
             .bind(&input.username)
-            .bind(encrypted)
+            .bind(stored)
             .bind(input.connection_timeout_ms)
             .bind(input.default_normal_lag_max)
             .bind(input.default_high_lag_min)
@@ -296,15 +291,15 @@ impl ClusterRepository {
         clears: SecretClears,
     ) -> Result<Option<DecryptedClusterConfig>, RepositoryError> {
         let secrets = if let Some(id) = id {
-            let encrypted: Option<Option<Vec<u8>>> =
-                sqlx::query_scalar("SELECT encrypted_secrets FROM clusters WHERE id = ?")
+            let stored: Option<Option<Vec<u8>>> =
+                sqlx::query_scalar("SELECT secrets_json FROM clusters WHERE id = ?")
                     .bind(id)
                     .fetch_optional(&self.pool)
                     .await?;
-            let Some(encrypted) = encrypted else {
+            let Some(stored) = stored else {
                 return Ok(None);
             };
-            self.decrypt_secrets(encrypted)?
+            self.decode_secrets(stored)?
         } else {
             ClusterSecrets::default()
         };
@@ -325,7 +320,7 @@ impl ClusterRepository {
         let Some(mut row) = row else {
             return Ok(None);
         };
-        let secrets = self.decrypt_secrets(row.encrypted_secrets.take())?;
+        let secrets = self.decode_secrets(row.secrets_json.take())?;
         let public = row.into_dto(&secrets)?;
         let timeout = u64::try_from(public.connection_timeout_ms)
             .map_err(|_| RepositoryError::InvalidStoredConfig)?;

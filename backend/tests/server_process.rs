@@ -23,10 +23,7 @@ fn symlink_index_reports_web_dir_before_database_initialization() {
     std::fs::write(web.path().join("page.html"), "<main>test</main>").unwrap();
     std::os::unix::fs::symlink("page.html", web.path().join("index.html")).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
-        .env(
-            "KAFKA_DASHBOARD_MASTER_KEY",
-            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
-        )
+        .env_remove("KAFKA_DASHBOARD_MASTER_KEY")
         .env("KAFKA_DASHBOARD_WEB_DIR", web.path())
         .env(
             "DATABASE_URL",
@@ -54,10 +51,8 @@ fn configured_listener_serves_health_and_sigterm_exits_successfully() {
         Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
             .env("KAFKA_DASHBOARD_BIND", address.to_string())
             .env("DATABASE_URL", "sqlite::memory:")
-            .env(
-                "KAFKA_DASHBOARD_MASTER_KEY",
-                "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
-            )
+            .env_remove("KAFKA_DASHBOARD_MASTER_KEY")
+            .env_remove("KAFKA_DASHBOARD_WEB_DIR")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -107,5 +102,40 @@ fn configured_listener_serves_health_and_sigterm_exits_successfully() {
         }
         assert!(Instant::now() < deadline, "graceful shutdown timed out");
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+// Migration checksum mismatches require a safe recovery instruction, without SQL details.
+#[tokio::test]
+async fn incompatible_database_exits_with_safe_reconfiguration_instruction() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("configuration.db").display()
+    );
+    let pool = kafka_dashboard::db::connect(&database_url).await.unwrap();
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = x'00' WHERE version = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
+        .env("DATABASE_URL", database_url)
+        .env_remove("KAFKA_DASHBOARD_MASTER_KEY")
+        .env_remove("KAFKA_DASHBOARD_WEB_DIR")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("configuration database is incompatible"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("delete it and configure clusters again"),
+        "{stderr}"
+    );
+    for private_detail in ["checksum", "SELECT", "_sqlx_migrations", "x'00'"] {
+        assert!(!stderr.contains(private_detail), "{stderr}");
     }
 }

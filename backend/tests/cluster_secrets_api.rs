@@ -1,6 +1,6 @@
 mod support;
 
-use kafka_dashboard::{crypto::SecretCipher, kafka::config::build_client_properties};
+use kafka_dashboard::kafka::config::build_client_properties;
 use serde_json::{Value, json};
 use support::*;
 
@@ -21,19 +21,18 @@ fn secure_edit(name: &str) -> Value {
 }
 
 async fn saved_secret_json(ctx: &TestApp, id: &str) -> (Vec<u8>, Value) {
-    let encrypted: Vec<u8> =
-        sqlx::query_scalar("SELECT encrypted_secrets FROM clusters WHERE id = ?")
-            .bind(id)
-            .fetch_one(&ctx.pool)
-            .await
-            .unwrap();
-    let decrypted = SecretCipher::from_key([7; 32]).decrypt(&encrypted).unwrap();
-    (encrypted, serde_json::from_slice(&decrypted).unwrap())
+    let stored: Vec<u8> = sqlx::query_scalar("SELECT secrets_json FROM clusters WHERE id = ?")
+        .bind(id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    let secrets = serde_json::from_slice(&stored).unwrap();
+    (stored, secrets)
 }
 
 // Missing passphrase persistence/mapping would make password-protected TLS keys unusable.
 #[tokio::test]
-async fn key_passphrase_is_encrypted_preserved_replaced_and_mapped_without_public_echo() {
+async fn key_passphrase_is_stored_preserved_replaced_and_mapped_without_public_echo() {
     let ctx = test_app().await;
     let response = request(
         &ctx.app,
@@ -72,13 +71,8 @@ async fn key_passphrase_is_encrypted_preserved_replaced_and_mapped_without_publi
         } else {
             "fixture-passphrase"
         };
-        let (encrypted, secrets) = saved_secret_json(&ctx, id).await;
+        let (_, secrets) = saved_secret_json(&ctx, id).await;
         assert_eq!(secrets["client_key_passphrase"], expected);
-        assert!(
-            !encrypted
-                .windows(expected.len())
-                .any(|part| part == expected.as_bytes())
-        );
         let config = ctx.clusters.decrypted_config(id).await.unwrap().unwrap();
         assert_eq!(
             build_client_properties(&config)

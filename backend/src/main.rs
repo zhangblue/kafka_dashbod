@@ -13,8 +13,8 @@ async fn main() -> std::io::Result<()> {
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let pool = kafka_dashboard::db::connect(&config.database_url)
         .await
-        .map_err(|_| std::io::Error::other("failed to initialize configuration database"))?;
-    let state = kafka_dashboard::api::AppState::new(pool, config.cipher);
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let state = kafka_dashboard::api::AppState::new(pool);
     let sessions = state.sessions.clone();
     let state_cleanup = sessions.clone();
     let app = kafka_dashboard::api::router_with_state_and_web_root(state, config.web_dir)?;

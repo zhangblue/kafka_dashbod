@@ -1,6 +1,4 @@
-use kafka_dashboard::crypto::SecretCipher;
 use kafka_dashboard::{
-    config::Config,
     db::{self, clusters::ClusterRepository, lag_rules::LagRuleRepository},
     domain::{
         cluster::{ClusterInput, DecryptedClusterConfig, SecurityProtocol},
@@ -31,7 +29,7 @@ fn cluster_edit(name: &str) -> ClusterInput {
 
 async fn repositories() -> (sqlx::SqlitePool, ClusterRepository, LagRuleRepository) {
     let pool = db::connect("sqlite::memory:").await.unwrap();
-    let clusters = ClusterRepository::new(pool.clone(), SecretCipher::from_key([7; 32]));
+    let clusters = ClusterRepository::new(pool.clone());
     let rules = LagRuleRepository::new(pool.clone());
     (pool, clusters, rules)
 }
@@ -46,11 +44,12 @@ fn rule(group: &str, topic: &str) -> LagRuleInput {
     }
 }
 
-// Secrets leaking into any public DTO, Debug, or stored plaintext breaks this test.
+// Missing plaintext persistence or secrets leaking into public output breaks this contract.
 #[tokio::test]
-async fn clusters_round_trip_encrypted_secrets_and_expose_only_safe_dtos() {
+async fn clusters_store_plaintext_secret_json_but_public_reads_only_expose_flags() {
     let (pool, clusters, _) = repositories().await;
-    let input = cluster_input("fixture-cluster");
+    let mut input = cluster_input("fixture-cluster");
+    input.client_key_passphrase = Some("fixture-passphrase".into());
     let created = clusters.create(&input).await.unwrap();
     let dto = clusters.get(&created.id).await.unwrap().unwrap();
     assert_eq!(dto.name, "fixture-cluster");
@@ -70,7 +69,8 @@ async fn clusters_round_trip_encrypted_secrets_and_expose_only_safe_dtos() {
         "caPem",
         "clientCertificatePem",
         "clientKeyPem",
-        "encryptedSecrets",
+        "clientKeyPassphrase",
+        "secretsJson",
     ] {
         assert!(json.get(field).is_none());
     }
@@ -90,25 +90,26 @@ async fn clusters_round_trip_encrypted_secrets_and_expose_only_safe_dtos() {
         decrypted.connection_timeout,
         std::time::Duration::from_secs(10)
     );
-    let stored: Vec<u8> = sqlx::query("SELECT encrypted_secrets FROM clusters WHERE id = ?")
+    assert_eq!(json["passwordConfigured"], true);
+    assert_eq!(json["clientKeyPassphraseConfigured"], true);
+    let stored: Vec<u8> = sqlx::query("SELECT secrets_json FROM clusters WHERE id = ?")
         .bind(&dto.id)
         .fetch_one(&pool)
         .await
         .unwrap()
         .get(0);
+    let secrets: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(secrets["password"], "fixture-password");
+    assert_eq!(secrets["client_key_passphrase"], "fixture-passphrase");
     let public_output = format!("{input:?} {decrypted:?} {dto:?} {json}");
     for secret in [
         "fixture-password",
         "fixture-ca",
         "fixture-certificate",
         "fixture-key",
+        "fixture-passphrase",
     ] {
         assert!(!public_output.contains(secret));
-        assert!(
-            !stored
-                .windows(secret.len())
-                .any(|window| window == secret.as_bytes())
-        );
     }
 }
 
@@ -380,7 +381,7 @@ async fn migration_defaults_and_foreign_key_cascade_are_applied() {
 }
 
 #[test]
-fn plaintext_config_has_no_credentials_and_config_requires_a_valid_master_key() {
+fn plaintext_connection_config_has_no_credentials() {
     let plaintext = DecryptedClusterConfig::plaintext("broker:9092");
     assert_eq!(plaintext.bootstrap_servers, "broker:9092");
     assert_eq!(plaintext.security_protocol, SecurityProtocol::Plaintext);
@@ -389,54 +390,4 @@ fn plaintext_config_has_no_credentials_and_config_requires_a_valid_master_key() 
         plaintext.connection_timeout,
         std::time::Duration::from_secs(10)
     );
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let config = Config::from_values("sqlite::memory:", &STANDARD.encode([7; 32])).unwrap();
-    assert_eq!(config.database_url, "sqlite::memory:");
-    assert!(Config::from_values("sqlite::memory:", "fixture-invalid-key").is_err());
-    assert!(!format!("{config:?}").contains(&STANDARD.encode([7; 32])));
-}
-
-// A fixed nonce would make repeated plaintext encrypt identically.
-#[test]
-fn ciphertext_round_trips_and_uses_unique_nonce() {
-    let cipher = SecretCipher::from_key([7_u8; 32]);
-    let first = cipher.encrypt(b"fixture-secret").unwrap();
-    let second = cipher.encrypt(b"fixture-secret").unwrap();
-    assert_ne!(&first[1..13], &second[1..13]);
-    assert_eq!(first[0], 1);
-    assert_eq!(first.len(), 1 + 12 + 14 + 16);
-    assert_eq!(cipher.decrypt(&first).unwrap(), b"fixture-secret");
-}
-
-// Missing framing or authentication checks must never yield plaintext.
-#[test]
-fn cipher_rejects_unknown_short_tampered_and_wrong_key_ciphertexts() {
-    let cipher = SecretCipher::from_key([7_u8; 32]);
-    for length in 0..29 {
-        assert!(cipher.decrypt(&vec![1; length]).is_err());
-    }
-    let encrypted = cipher.encrypt(b"fixture-secret").unwrap();
-    let mut unknown = encrypted.clone();
-    unknown[0] = 2;
-    assert!(cipher.decrypt(&unknown).is_err());
-    let mut tampered = encrypted.clone();
-    *tampered.last_mut().unwrap() ^= 1;
-    assert!(cipher.decrypt(&tampered).is_err());
-    assert!(SecretCipher::from_key([8; 32]).decrypt(&encrypted).is_err());
-    assert!(!format!("{cipher:?}").contains("fixture-secret"));
-}
-
-#[test]
-fn master_key_requires_exactly_32_base64_decoded_bytes() {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let cipher = SecretCipher::from_base64_key(&STANDARD.encode([7_u8; 32])).unwrap();
-    assert!(cipher.decrypt(&cipher.encrypt(b"fixture").unwrap()).is_ok());
-    for invalid in [
-        "fixture-invalid-base64".to_string(),
-        STANDARD.encode([7_u8; 31]),
-        STANDARD.encode([7_u8; 33]),
-    ] {
-        let error = SecretCipher::from_base64_key(&invalid).unwrap_err();
-        assert!(!format!("{error:?} {error}").contains(&invalid));
-    }
 }

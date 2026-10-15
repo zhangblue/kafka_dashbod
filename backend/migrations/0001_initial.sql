@@ -5,7 +5,7 @@ CREATE TABLE clusters (
   security_protocol TEXT NOT NULL,
   sasl_mechanism TEXT,
   username TEXT,
-  encrypted_secrets BLOB,
+  secrets_json BLOB,
   connection_timeout_ms INTEGER NOT NULL DEFAULT 10000 CHECK (connection_timeout_ms > 0),
   default_normal_lag_max INTEGER NOT NULL DEFAULT 999 CHECK (default_normal_lag_max >= 0),
   default_high_lag_min INTEGER NOT NULL DEFAULT 5000 CHECK (default_high_lag_min > default_normal_lag_max),

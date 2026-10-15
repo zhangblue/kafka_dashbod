@@ -7,7 +7,6 @@ pub mod static_assets;
 use std::path::PathBuf;
 
 use crate::{
-    crypto::SecretCipher,
     db::{clusters::ClusterRepository, lag_rules::LagRuleRepository},
     error,
     sessions::manager::{
@@ -29,9 +28,9 @@ pub struct AppState<F: SessionClientFactory = KafkaSessionClientFactory> {
 }
 
 impl AppState<KafkaSessionClientFactory> {
-    pub fn new(pool: sqlx::SqlitePool, cipher: SecretCipher) -> Self {
+    pub fn new(pool: sqlx::SqlitePool) -> Self {
         Self {
-            clusters: ClusterRepository::new(pool.clone(), cipher),
+            clusters: ClusterRepository::new(pool.clone()),
             lag_rules: LagRuleRepository::new(pool),
             sessions: SessionManager::new(LEASE_DURATION, KafkaSessionClientFactory),
         }

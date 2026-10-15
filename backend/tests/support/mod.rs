@@ -6,10 +6,7 @@ use axum::{
     http::{Request, header::CONTENT_TYPE},
     response::Response,
 };
-use kafka_dashboard::{
-    crypto::SecretCipher,
-    db::{self, clusters::ClusterRepository},
-};
+use kafka_dashboard::db::{self, clusters::ClusterRepository};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -21,11 +18,9 @@ pub struct TestApp {
 
 pub async fn test_app() -> TestApp {
     let pool = db::connect("sqlite::memory:").await.unwrap();
-    let clusters = ClusterRepository::new(pool.clone(), SecretCipher::from_key([7; 32]));
-    let app = kafka_dashboard::api::router_with_state(kafka_dashboard::api::AppState::new(
-        pool.clone(),
-        SecretCipher::from_key([7; 32]),
-    ));
+    let clusters = ClusterRepository::new(pool.clone());
+    let app =
+        kafka_dashboard::api::router_with_state(kafka_dashboard::api::AppState::new(pool.clone()));
     TestApp {
         app,
         pool,

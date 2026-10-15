@@ -2,7 +2,6 @@ mod support;
 
 use kafka_dashboard::{
     api::{AppState, router_with_state},
-    crypto::SecretCipher,
     db,
     domain::{cluster::DecryptedClusterConfig, snapshot::ClusterSnapshot},
     sessions::manager::{SessionClientFactory, SessionError, SessionManager},
@@ -61,11 +60,8 @@ async fn snapshot_api_renews_rejects_overlap_and_close_waits_after_http_cancella
         drops: Arc::new(AtomicUsize::new(0)),
     };
     let sessions = SessionManager::new(Duration::from_secs(15), factory.clone());
-    let state = AppState::new(
-        db::connect("sqlite::memory:").await.unwrap(),
-        SecretCipher::from_key([7; 32]),
-    )
-    .with_session_manager(sessions.clone());
+    let state = AppState::new(db::connect("sqlite::memory:").await.unwrap())
+        .with_session_manager(sessions.clone());
     let app = router_with_state(state);
     let cluster_id = create_cluster(&app, "snapshot").await;
     let created = response_json(

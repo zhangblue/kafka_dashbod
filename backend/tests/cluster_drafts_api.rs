@@ -6,7 +6,6 @@ use axum::{
 };
 use kafka_dashboard::{
     api::{AppState, router_with_state},
-    crypto::SecretCipher,
     db,
     domain::cluster::DecryptedClusterConfig,
     kafka::client::ConnectionTestResult,
@@ -43,9 +42,10 @@ impl SessionClientFactory for Factory {
 async fn app() -> (TestApp, Factory) {
     let factory = Factory::default();
     let pool = db::connect("sqlite::memory:").await.unwrap();
-    let state = AppState::new(pool.clone(), SecretCipher::from_key([7; 32])).with_session_manager(
-        SessionManager::new(Duration::from_secs(15), factory.clone()),
-    );
+    let state = AppState::new(pool.clone()).with_session_manager(SessionManager::new(
+        Duration::from_secs(15),
+        factory.clone(),
+    ));
     let clusters = state.clusters.clone();
     (
         TestApp {
