@@ -32,6 +32,109 @@ async function createCluster(page: Page, name: string) {
   return (await response.json()).id as string
 }
 
+// Catches credential redisplay, invalid rule saves, cross-cluster drafts and
+// broken narrow-screen controls. Only notification delivery is substituted.
+test('Feishu settings save real rules, hide saved tokens and isolate cluster drafts', async ({ page, request }) => {
+  const token = secret
+  let notificationFails = false
+  await page.route('**/api/clusters/*/feishu-alert/test', async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    await route.fulfill({ status: notificationFails ? 502 : 200, contentType: 'application/json',
+      body: JSON.stringify(notificationFails ? { code: 'NOTIFICATION_FAILED', message: 'Notification unavailable', requestId: 'e2e-safe' } : { ok: true }) })
+  })
+  await page.goto('/settings')
+  const first = await createCluster(page, 'E2E Feishu first')
+  const second = await createCluster(page, 'E2E Feishu second')
+  const card = page.getByRole('group', { name: 'E2E Feishu first', exact: true })
+  const dialog = page.getByRole('dialog', { name: '配置飞书告警', exact: true })
+  try {
+    await expect(card.getByText('飞书告警：未配置', { exact: true })).toBeVisible()
+    await card.getByRole('button', { name: '配置飞书告警', exact: true }).click()
+    const tokenInput = dialog.getByLabel('更新 Token', { exact: true })
+    await expect(tokenInput).toHaveAttribute('type', 'password')
+    await expect(dialog.getByRole('button', { name: '显示 Token', exact: true })).toBeDisabled()
+    await tokenInput.fill(token)
+    await dialog.getByRole('button', { name: '显示 Token', exact: true }).click()
+    // Avoid putting fixture token values into matcher diagnostics or artifacts.
+    expect(await tokenInput.evaluate((input: HTMLInputElement) => input.type === 'text' && input.value.length > 0)).toBe(true)
+    await dialog.getByRole('button', { name: '隐藏 Token', exact: true }).click()
+    await expect(tokenInput).toHaveAttribute('type', 'password')
+    await dialog.getByRole('button', { name: '测试通知', exact: true }).click()
+    await expect(dialog.getByText('测试通知已发送', { exact: true })).toBeVisible()
+    notificationFails = true
+    await dialog.getByRole('button', { name: '测试通知', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toHaveText('测试通知发送失败，请检查 Token 和飞书机器人设置后重试。')
+    await expect(dialog.getByRole('button', { name: '新增规则', exact: true })).toBeEnabled()
+    await dialog.getByRole('button', { name: '新增规则', exact: true }).click()
+    const rule = dialog.getByRole('group', { name: '告警规则 1', exact: true })
+    await rule.getByLabel('Consumer Group', { exact: true }).selectOption(group)
+    await rule.getByLabel('Topic', { exact: true }).selectOption(topic)
+    const threshold = rule.getByLabel('Lag 阈值', { exact: true })
+    const duration = rule.getByLabel('持续时间（秒）', { exact: true })
+    await expect(threshold).toHaveAttribute('min', '0')
+    await expect(duration).toHaveAttribute('min', '10')
+    await threshold.fill('-1')
+    await expect(dialog.getByRole('button', { name: '保存配置', exact: true })).toBeDisabled()
+    await threshold.fill('0')
+    await expect(dialog.getByRole('button', { name: '保存配置', exact: true })).toBeEnabled()
+    await duration.fill('9')
+    await expect(dialog.getByRole('button', { name: '保存配置', exact: true })).toBeDisabled()
+    await expect(dialog.getByRole('alert')).toHaveText('持续时间必须是整数且至少为 10 秒。')
+    await duration.fill('10')
+    // Keep backend monitoring below the threshold; never send a real notification.
+    await threshold.fill('9007199254740991')
+    const controls = rule.locator('.feishu-control')
+    await expect(controls).toHaveCount(4)
+    expect(await controls.evaluateAll(inputs => inputs.map(input => Math.round(input.getBoundingClientRect().height)))).toEqual([42, 42, 42, 42])
+    const saved = page.waitForResponse(response => response.url().endsWith(`/api/clusters/${first}/feishu-alert`) && response.request().method() === 'PUT')
+    await dialog.getByRole('button', { name: '保存配置', exact: true }).click()
+    const response = await saved
+    expect(response.status()).toBe(200)
+    expect((await response.text()).includes(token)).toBe(false)
+    await expect(dialog.getByText('飞书告警配置已保存', { exact: true })).toBeVisible()
+    await expect(tokenInput).toHaveValue('')
+    await expect(dialog.getByRole('button', { name: '显示 Token', exact: true })).toBeDisabled()
+    const settings = await (await request.get(`/api/clusters/${first}/feishu-alert`)).json()
+    expect(JSON.stringify(settings).includes(token)).toBe(false)
+    expect(settings.accessTokenConfigured).toBe(true)
+    expect(settings.rules).toEqual([expect.objectContaining({ groupId: group, topic, lagThreshold: 9007199254740991, growthSeconds: 10, enabled: true })])
+    await expect(dialog.getByText(settings.maskedAccessToken, { exact: true })).toBeVisible()
+    await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+    await card.getByRole('button', { name: '配置飞书告警', exact: true }).click()
+    await expect(tokenInput).toHaveValue('')
+    await expect(dialog.getByText(settings.maskedAccessToken, { exact: true })).toBeVisible()
+    await tokenInput.fill(randomUUID())
+    await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+    const secondCard = page.getByRole('group', { name: 'E2E Feishu second', exact: true })
+    await secondCard.getByRole('button', { name: '配置飞书告警', exact: true }).click()
+    await expect(tokenInput).toHaveValue('')
+    await expect(dialog.getByText('暂无飞书告警规则。', { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: '测试通知', exact: true })).toBeDisabled()
+    await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+    await page.setViewportSize({ width: 390, height: 844 })
+    await card.getByRole('button', { name: '配置飞书告警', exact: true }).click()
+    await expect(rule.getByLabel('Consumer Group', { exact: true })).toHaveValue(group)
+    await expect(rule.getByLabel('Topic', { exact: true })).toHaveValue(topic)
+    const scroll = dialog.getByRole('region', { name: '飞书告警规则表', exact: true })
+    expect(await scroll.evaluate(element => element.scrollWidth > element.clientWidth && getComputedStyle(element).overflowX === 'auto')).toBe(true)
+    expect(await dialog.evaluate(element => element.getBoundingClientRect().right <= window.innerWidth)).toBe(true)
+    await dialog.getByRole('checkbox', { name: '启用规则', exact: true }).uncheck()
+    await dialog.getByRole('checkbox', { name: '清除已保存 Token', exact: true }).check()
+    await dialog.getByRole('button', { name: '保存配置', exact: true }).click()
+    await expect(dialog.getByText('飞书告警配置已保存', { exact: true })).toBeVisible()
+    await expect(card.getByText('飞书告警：未配置 · 1 条 Topic + Group 规则', { exact: true })).toBeVisible()
+    const cleared = await (await request.get(`/api/clusters/${first}/feishu-alert`)).json()
+    expect(cleared.accessTokenConfigured).toBe(false)
+    expect(cleared.maskedAccessToken).toBeNull()
+    expect(cleared.rules[0].enabled).toBe(false)
+  } finally {
+    // Discard credential drafts before Playwright can create failure context.
+    await page.goto('/settings')
+    expect((await request.delete(`/api/clusters/${first}`)).status()).toBe(204)
+    expect((await request.delete(`/api/clusters/${second}`)).status()).toBe(204)
+  }
+})
+
 // Breaks if UI saves, real Kafka collection, rules, or lease release stop working.
 test('cluster CRUD, connection, partitions, lag rules and session lifecycle', async ({ page, request }) => {
   await page.goto('/settings')

@@ -7,5 +7,5 @@ export default defineConfig({
   timeout: 120_000,
   expect: { timeout: 20_000 },
   reporter: 'list',
-  use: { baseURL: process.env.E2E_BASE_URL, browserName: 'chromium', trace: 'off', screenshot: 'off' },
+  use: { baseURL: process.env.E2E_BASE_URL, browserName: 'chromium', trace: 'off', screenshot: 'off', video: 'off' },
 })
