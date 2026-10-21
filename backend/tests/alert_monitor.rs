@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -83,6 +83,8 @@ struct FakeFactory {
     active: Arc<AtomicUsize>,
     max_active: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
+    live: Arc<AtomicUsize>,
+    max_live: Arc<AtomicUsize>,
     create_gate: Option<Arc<Semaphore>>,
     sample_gate: Option<Arc<Semaphore>>,
     drop_gate: Option<Arc<DropGate>>,
@@ -102,6 +104,7 @@ impl Drop for FakeClient {
             }
         }
         self.factory.dropped.fetch_add(1, Ordering::SeqCst);
+        self.factory.live.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -109,6 +112,8 @@ impl SessionClientFactory for FakeFactory {
     type Client = FakeClient;
 
     async fn create(&self, config: DecryptedClusterConfig) -> Result<FakeClient, SessionError> {
+        let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_live.fetch_max(live, Ordering::SeqCst);
         self.configs.lock().unwrap().push(config);
         if let Some(gate) = &self.create_gate {
             gate.acquire().await.unwrap().forget();
@@ -140,6 +145,40 @@ impl SessionClientFactory for FakeFactory {
         };
         self.active.fetch_sub(1, Ordering::SeqCst);
         result
+    }
+}
+
+#[derive(Clone)]
+struct MultiFactory(Arc<HashMap<String, FakeFactory>>);
+
+impl SessionClientFactory for MultiFactory {
+    type Client = FakeClient;
+
+    async fn create(&self, config: DecryptedClusterConfig) -> Result<FakeClient, SessionError> {
+        self.0
+            .get(&config.bootstrap_servers)
+            .expect("test cluster must have a configured factory")
+            .create(config)
+            .await
+    }
+
+    async fn snapshot(
+        &self,
+        client: &mut FakeClient,
+        id: &str,
+    ) -> Result<ClusterSnapshot, SessionError> {
+        client.factory.clone().snapshot(client, id).await
+    }
+}
+
+// Also release gates when a regression assertion panics.
+struct ReleaseDropGates(Vec<Arc<DropGate>>);
+
+impl Drop for ReleaseDropGates {
+    fn drop(&mut self) {
+        for gate in &self.0 {
+            gate.release();
+        }
     }
 }
 
@@ -703,6 +742,129 @@ async fn configuration_replacement_waits_for_old_client_drop() {
     drop_gate.release();
     until(|| fixture.created() == 2).await;
     handle.shutdown().await;
+}
+
+// Retiring one cluster must not freeze revocation, replacement or new workers elsewhere.
+#[tokio::test(start_paused = true)]
+async fn blocked_cluster_drop_does_not_block_other_clusters_and_shutdown_drains_all() {
+    for action in 0..3 {
+        let mut fixture = Fixture::new(vec![]).await;
+        let a_drop = Arc::new(DropGate::default());
+        let c_drop = Arc::new(DropGate::default());
+        let _release = ReleaseDropGates(vec![a_drop.clone(), c_drop.clone()]);
+        fixture.factory.drop_gate = Some(a_drop.clone());
+        let b_sample = Arc::new(Semaphore::new(2));
+        let b_factory = FakeFactory {
+            snapshots: Arc::new(Mutex::new(VecDeque::from([
+                Ok(snapshot(&[5_100])),
+                Ok(snapshot(&[5_200])),
+                Ok(snapshot(&[5_300])),
+            ]))),
+            sample_gate: Some(b_sample.clone()),
+            ..Default::default()
+        };
+        let c_factory = FakeFactory {
+            drop_gate: Some(c_drop.clone()),
+            ..Default::default()
+        };
+        let b = fixture
+            .clusters
+            .create(&ClusterInput::plaintext("B", "b.invalid:9092"))
+            .await
+            .unwrap();
+        let c = fixture
+            .clusters
+            .create(&ClusterInput::plaintext("C", "c.invalid:9092"))
+            .await
+            .unwrap();
+        fixture.enable().await;
+        fixture
+            .settings
+            .replace(&b.id, Some(TEST_ALERT_TOKEN), false, &[rule(true)])
+            .await
+            .unwrap();
+        let factory = MultiFactory(Arc::new(HashMap::from([
+            ("fixture.invalid:9092".into(), fixture.factory.clone()),
+            ("b.invalid:9092".into(), b_factory.clone()),
+            ("c.invalid:9092".into(), c_factory.clone()),
+        ])));
+        let handle = monitor::start(
+            fixture.clusters.clone(),
+            fixture.settings.clone(),
+            factory,
+            fixture.sender.clone(),
+            PERIOD,
+        );
+        until(|| fixture.samples() == 1 && b_factory.samples.load(Ordering::SeqCst) == 1).await;
+        fixture.enable().await;
+        fixture.tick().await;
+        until(|| a_drop.started.load(Ordering::SeqCst)).await;
+        until(|| b_factory.samples.load(Ordering::SeqCst) == 2).await;
+        match action {
+            0 => {
+                fixture
+                    .settings
+                    .replace(&b.id, None, true, &[rule(true)])
+                    .await
+                    .unwrap();
+            }
+            1 => {
+                fixture.clusters.delete(&b.id).await.unwrap();
+            }
+            _ => {
+                let mut updated = rule(true);
+                updated.lag_threshold = 9_000_000;
+                fixture
+                    .settings
+                    .replace(&b.id, None, false, &[updated])
+                    .await
+                    .unwrap();
+            }
+        }
+        fixture
+            .settings
+            .replace(&c.id, Some(TEST_ALERT_TOKEN), false, &[rule(true)])
+            .await
+            .unwrap();
+        fixture.tick().await;
+        // C is a reconciliation barrier while A's native destructor is still blocked.
+        until(|| c_factory.samples.load(Ordering::SeqCst) == 1).await;
+        b_sample.add_permits(1);
+        until(|| b_factory.dropped.load(Ordering::SeqCst) == 1).await;
+        assert!(
+            fixture.messages().is_empty(),
+            "revoked configuration must not send"
+        );
+        assert_eq!(
+            fixture.created(),
+            1,
+            "A must not overlap its retiring client"
+        );
+        if action == 2 {
+            until(|| b_factory.configs.lock().unwrap().len() == 2).await;
+        } else {
+            assert_eq!(b_factory.configs.lock().unwrap().len(), 1);
+        }
+        let shutdown = tokio::spawn(async move { handle.shutdown().await });
+        b_sample.add_permits(100);
+        until(|| c_drop.started.load(Ordering::SeqCst)).await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must await active client destruction"
+        );
+        c_drop.release();
+        until(|| c_factory.dropped.load(Ordering::SeqCst) == 1).await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must await the retiring client"
+        );
+        a_drop.release();
+        shutdown.await.unwrap();
+        for factory in [&fixture.factory, &b_factory, &c_factory] {
+            assert_eq!(factory.live.load(Ordering::SeqCst), 0);
+            assert_eq!(factory.max_live.load(Ordering::SeqCst), 1);
+        }
+    }
 }
 
 // A second save while native destruction is blocked must revoke replacement

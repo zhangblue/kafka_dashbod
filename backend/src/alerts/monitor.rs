@@ -1,8 +1,12 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use tokio::{
     sync::{Mutex, watch},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{Instant, MissedTickBehavior},
 };
 
@@ -83,6 +87,8 @@ async fn coordinate<F: SessionClientFactory>(
     mut stop: watch::Receiver<bool>,
 ) {
     let mut workers: HashMap<String, Worker> = HashMap::new();
+    let mut retiring_ids = HashSet::new();
+    let mut retiring = JoinSet::new();
     let mut timer = tokio::time::interval(reconcile_interval);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut reconcile_now = false;
@@ -91,6 +97,12 @@ async fn coordinate<F: SessionClientFactory>(
             tokio::select! {
                 biased;
                 _ = stop.changed() => break,
+                completed = retiring.join_next(), if !retiring.is_empty() => {
+                    if let Some(Ok(id)) = completed {
+                        retiring_ids.remove(&id);
+                    }
+                    // Read fresh eligibility and both revisions after completion.
+                },
                 _ = timer.tick() => {},
             }
         }
@@ -131,29 +143,23 @@ async fn coordinate<F: SessionClientFactory>(
                 (!unchanged || worker.task.is_finished() || stopped(&stop)).then(|| id.clone())
             })
             .collect();
-        let mut retiring = Vec::new();
         for id in obsolete {
             if let Some(worker) = workers.remove(&id) {
                 worker.stop.send_replace(true);
-                retiring.push(worker.task);
+                retiring_ids.insert(id.clone());
+                retiring.spawn(async move {
+                    let _ = worker.task.await;
+                    id
+                });
             }
-        }
-        if !retiring.is_empty() {
-            // Signal every retiring worker before waiting on any native operation.
-            for task in retiring {
-                let _ = task.await;
-            }
-            // Native destruction can block across further configuration saves.
-            // Discard the entire old view and immediately reconcile fresh
-            // eligibility and both revisions before accepting any replacement.
-            reconcile_now = true;
-            continue;
         }
         for (id, (setting, cluster)) in desired {
             if stopped(&stop) {
                 break;
             }
-            if workers.contains_key(&id) {
+            // Only this cluster waits for its old native work and destructor.
+            // Other clusters still reconcile while a retirement is in progress.
+            if workers.contains_key(&id) || retiring_ids.contains(&id) {
                 continue;
             }
             let config = match clusters.decrypted_config(&id).await {
@@ -215,6 +221,8 @@ async fn coordinate<F: SessionClientFactory>(
     for (_, worker) in workers {
         let _ = worker.task.await;
     }
+    // Drain rather than abort: retirement includes accepted native work and sends.
+    while retiring.join_next().await.is_some() {}
 }
 
 struct RuleState {
