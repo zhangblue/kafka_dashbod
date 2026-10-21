@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 pub const MIN_GROWTH_SECONDS: i64 = 10;
+pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

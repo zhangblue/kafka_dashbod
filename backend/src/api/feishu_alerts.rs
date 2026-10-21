@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 
 use crate::{
     db::{clusters::ClusterRepository, feishu_alerts::FeishuAlertRepository},
-    domain::feishu_alert::{FeishuAlertRuleInput, FeishuAlertSettings, MIN_GROWTH_SECONDS},
+    domain::feishu_alert::{
+        FeishuAlertRuleInput, FeishuAlertSettings, MAX_SAFE_INTEGER, MIN_GROWTH_SECONDS,
+    },
     error::ApiError,
     notifications::feishu::{AlertSender, validate_access_token},
 };
@@ -74,16 +76,16 @@ pub async fn put(
                 "The group/topic pair must be unique".into(),
             );
         }
-        if rule.lag_threshold < 0 {
+        if !(0..=MAX_SAFE_INTEGER).contains(&rule.lag_threshold) {
             fields.insert(
                 format!("{prefix}.lagThreshold"),
-                "Must be zero or greater".into(),
+                "Must be a safe integer from 0 to 9007199254740991".into(),
             );
         }
-        if rule.growth_seconds < MIN_GROWTH_SECONDS {
+        if !(MIN_GROWTH_SECONDS..=MAX_SAFE_INTEGER).contains(&rule.growth_seconds) {
             fields.insert(
                 format!("{prefix}.growthSeconds"),
-                "Must be at least 10 seconds".into(),
+                "Must be a safe integer from 10 to 9007199254740991 seconds".into(),
             );
         }
     }

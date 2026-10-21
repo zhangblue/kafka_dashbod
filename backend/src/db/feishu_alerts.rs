@@ -1,7 +1,7 @@
 use super::RepositoryError;
 use crate::domain::feishu_alert::{
     EnabledAlertCluster, FeishuAlertRule, FeishuAlertRuleInput, FeishuAlertSettings,
-    MIN_GROWTH_SECONDS,
+    MAX_SAFE_INTEGER, MIN_GROWTH_SECONDS,
 };
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
@@ -59,8 +59,8 @@ impl FeishuAlertRepository {
         for rule in rules {
             if rule.group_id.trim().is_empty()
                 || rule.topic.trim().is_empty()
-                || rule.lag_threshold < 0
-                || rule.growth_seconds < MIN_GROWTH_SECONDS
+                || !(0..=MAX_SAFE_INTEGER).contains(&rule.lag_threshold)
+                || !(MIN_GROWTH_SECONDS..=MAX_SAFE_INTEGER).contains(&rule.growth_seconds)
                 || !pairs.insert((&rule.group_id, &rule.topic))
                 || rule
                     .id

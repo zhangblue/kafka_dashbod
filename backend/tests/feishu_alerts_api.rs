@@ -200,6 +200,40 @@ async fn invalid_fields_and_trimmed_duplicate_pairs_are_rejected_atomically() {
     );
 }
 
+// JSON numbers must round-trip exactly through JavaScript without partial saves on failure.
+#[tokio::test]
+async fn safe_integer_maximum_is_accepted_and_larger_values_are_rejected_atomically() {
+    let fixture = test_app_with_sender(FakeAlertSender::default()).await;
+    let id = create_cluster(&fixture.app, "bounds").await;
+    let uri = format!("/api/clusters/{id}/feishu-alert");
+    let mut input = settings();
+    input["rules"][0]["lagThreshold"] = json!(9_007_199_254_740_991_i64);
+    input["rules"][0]["growthSeconds"] = json!(9_007_199_254_740_991_i64);
+    let response = request(&fixture.app, "PUT", &uri, Some(input.clone())).await;
+    assert_eq!(response.status(), 200);
+    let saved = safe_json(response).await;
+    assert_safe(saved["rules"][0]["lagThreshold"] == 9_007_199_254_740_991_i64);
+    assert_safe(saved["rules"][0]["growthSeconds"] == 9_007_199_254_740_991_i64);
+    let repository = FeishuAlertRepository::new(fixture.pool.clone());
+    let revision = repository.enabled_clusters().await.unwrap()[0]
+        .revision
+        .clone();
+    for field in ["lagThreshold", "growthSeconds"] {
+        let mut invalid = input.clone();
+        invalid["accessToken"] = json!(DRAFT_TOKEN);
+        invalid["rules"][0][field] = json!(9_007_199_254_740_992_i64);
+        let response = request(&fixture.app, "PUT", &uri, Some(invalid)).await;
+        assert_eq!(response.status(), 422);
+        let error = safe_json(response).await;
+        assert_safe(error["code"] == "VALIDATION_ERROR");
+        assert_safe(error["details"][format!("rules.0.{field}")].is_string());
+        assert_safe(error["requestId"].is_string());
+        assert_safe(safe_json(request(&fixture.app, "GET", &uri, None).await).await == saved);
+        assert_safe(repository.token(&id).await.unwrap().as_deref() == Some(SAVED_TOKEN));
+        assert_safe(repository.enabled_clusters().await.unwrap()[0].revision == revision);
+    }
+}
+
 // Normalized strings are stored, zero and ten-second boundaries accepted, IDs survive edits.
 #[tokio::test]
 async fn saves_trimmed_pairs_zero_threshold_and_preserves_valid_rule_ids() {

@@ -336,6 +336,51 @@ async fn feishu_settings_replace_is_atomic_and_validates_rule_ownership() {
     );
 }
 
+// Direct repository callers must preserve token, rules and revision on oversized integers.
+#[tokio::test]
+async fn feishu_settings_enforce_safe_integer_bounds_without_mutation() {
+    let access_token = "integer-boundary-saved-token";
+    let replacement_token = "integer-boundary-replacement-token";
+    let (pool, clusters, _) = repositories().await;
+    let alerts = FeishuAlertRepository::new(pool);
+    let cluster = clusters
+        .create(&ClusterInput::plaintext("bounds", "broker:9092"))
+        .await
+        .unwrap();
+    let mut boundary = alert_rule("orders", "events");
+    boundary.lag_threshold = 9_007_199_254_740_991;
+    boundary.growth_seconds = 9_007_199_254_740_991;
+    let saved = alerts
+        .replace(&cluster.id, Some(access_token), false, &[boundary.clone()])
+        .await
+        .unwrap();
+    assert_sensitive(saved.rules[0].lag_threshold == 9_007_199_254_740_991);
+    assert_sensitive(saved.rules[0].growth_seconds == 9_007_199_254_740_991);
+    let revision = alerts.enabled_clusters().await.unwrap()[0].revision.clone();
+    for field in 0..2 {
+        let mut invalid = boundary.clone();
+        if field == 0 {
+            invalid.lag_threshold += 1;
+        } else {
+            invalid.growth_seconds += 1;
+        }
+        let result = alerts
+            .replace(&cluster.id, Some(replacement_token), false, &[invalid])
+            .await;
+        let Err(error) = result else {
+            panic!("unsafe integer must be rejected");
+        };
+        assert_sensitive(matches!(&error, db::RepositoryError::InvalidInput));
+        let diagnostic = format!("{error} {error:?}");
+        assert_sensitive(
+            !diagnostic.contains(access_token) && !diagnostic.contains(replacement_token),
+        );
+        assert_sensitive(alerts.get(&cluster.id).await.unwrap() == saved);
+        assert_sensitive(alerts.token(&cluster.id).await.unwrap().as_deref() == Some(access_token));
+        assert_sensitive(alerts.enabled_clusters().await.unwrap()[0].revision == revision);
+    }
+}
+
 // The worker sees exactly eligible clusters and enabled rules; deletion removes both tables.
 #[tokio::test]
 async fn feishu_settings_filter_workers_and_cascade_on_cluster_delete() {
