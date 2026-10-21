@@ -29,7 +29,9 @@ function FeishuAlertEditor({ cluster, snapshot, onClose }: { cluster: ClusterDto
   const [source, setSource] = useState<FeishuAlertSettings | null>(null)
   const [attempt, setAttempt] = useState(0)
   const expired = useSnapshotStale({ snapshot, status: 'connected' }, 10)
-  if (settings.isSuccess && !settings.isFetching && !source) setSource(settings.data)
+  // Cached success can coexist with an offline/paused fetch. Wait for this
+  // editor's observer to receive a completed success before restoring the form.
+  if (settings.isFetchedAfterMount && settings.isSuccess && settings.fetchStatus === 'idle' && !source) setSource(settings.data)
   useEffect(() => () => { void client.cancelQueries({ queryKey: ['feishu-alerts', cluster.id], exact: true }) }, [client, cluster.id])
   const renderForm = (currentSnapshot: ClusterSnapshot | null) => source && <FeishuAlertForm clusterId={cluster.id}
     value={source} snapshot={currentSnapshot} onClose={onClose} onSaved={value => {

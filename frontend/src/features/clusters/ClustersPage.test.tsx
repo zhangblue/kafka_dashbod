@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -10,6 +10,7 @@ import { clusterFixture, server, snapshotFixture } from '../../test/handlers'
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 beforeEach(() => server.use(http.get('/api/clusters/:id/feishu-alert', () => HttpResponse.json({ accessTokenConfigured: false, maskedAccessToken: null, rules: [] }))))
 afterEach(() => {
+  onlineManager.setOnline(true)
   server.resetHandlers()
   vi.useRealTimers()
   vi.restoreAllMocks()
@@ -17,8 +18,8 @@ afterEach(() => {
 })
 afterAll(() => server.close())
 
-function renderPage(snapshot: ClusterSnapshot | null = snapshotFixture) {
-  return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+function renderPage(snapshot: ClusterSnapshot | null = snapshotFixture, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
+  return render(<QueryClientProvider client={client}>
     <ClustersPage snapshot={snapshot} />
   </QueryClientProvider>)
 }
@@ -167,6 +168,54 @@ describe('cluster settings', () => {
     await screen.findByText('加载飞书告警配置失败，请重试。')
     expect(screen.queryByText('****cached')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '保存配置' })).not.toBeInTheDocument()
+  })
+
+  it.each(['success', 'failure'] as const)('hides cached Feishu settings while offline and waits for the resumed GET %s', async outcome => {
+    const user = userEvent.setup()
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const cached: FeishuAlertSettings = { accessTokenConfigured: true, maskedAccessToken: '****offline-old', rules: [
+      { groupId: 'audit-worker', topic: 'audit-log', lagThreshold: 100, growthSeconds: 10, enabled: true },
+    ] }
+    let complete!: () => void
+    const responseReady = new Promise<void>(resolve => { complete = resolve })
+    let started = false
+    server.use(http.get('/api/clusters/:id/feishu-alert', async () => {
+      started = true
+      await responseReady
+      return outcome === 'failure'
+        ? HttpResponse.json({ code: 'INTERNAL', message: 'unsafe-offline-response' }, { status: 500 })
+        : HttpResponse.json({ accessTokenConfigured: true, maskedAccessToken: '****online-new', rules: [
+          { groupId: 'flink-order-enrich', topic: 'raw-orders', lagThreshold: 250, growthSeconds: 20, enabled: false },
+        ] })
+    }))
+    client.setQueryData(['clusters'], [clusterFixture])
+    client.setQueryData(['feishu-alerts', clusterFixture.id], cached)
+    onlineManager.setOnline(false)
+    renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() }, client)
+    await user.click(await screen.findByRole('button', { name: '配置飞书告警' }))
+    try {
+      await waitFor(() => expect(client.getQueryState(['feishu-alerts', clusterFixture.id])?.fetchStatus).toBe('paused'))
+      expect(started).toBe(false)
+      expect(screen.getByText('正在加载飞书告警配置…')).toBeInTheDocument()
+      expect(screen.queryByRole('form', { name: '飞书告警配置' })).not.toBeInTheDocument()
+      expect(screen.queryByText('****offline-old')).not.toBeInTheDocument()
+      expect(client.getQueryData(['feishu-alerts', clusterFixture.id])).toEqual(cached)
+      expect(screen.getByText('飞书告警：Token 已配置 · 1 条 Topic + Group 规则')).toBeInTheDocument()
+      act(() => onlineManager.setOnline(true))
+      await waitFor(() => expect(started).toBe(true))
+      expect(screen.queryByRole('button', { name: '保存配置' })).not.toBeInTheDocument()
+      complete()
+      if (outcome === 'success') {
+        await screen.findByText('****online-new')
+        expect(screen.getByLabelText('Consumer Group')).toHaveValue('flink-order-enrich')
+        expect(screen.getByLabelText('Lag 阈值')).toHaveValue(250)
+      } else {
+        await screen.findByText('加载飞书告警配置失败，请重试。')
+        expect(screen.queryByRole('button', { name: '保存配置' })).not.toBeInTheDocument()
+        expect(screen.queryByText(/unsafe-offline-response/)).not.toBeInTheDocument()
+      }
+      expect(screen.queryByText('****offline-old')).not.toBeInTheDocument()
+    } finally { complete() }
   })
 
   it('pauses Feishu options while hidden, retains the draft, and releases every temporary session on pagehide and leave', async () => {
