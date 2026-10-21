@@ -7,6 +7,7 @@ use axum::{
     response::Response,
 };
 use kafka_dashboard::db::{self, clusters::ClusterRepository};
+use kafka_dashboard::notifications::feishu::AlertSender;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -21,6 +22,20 @@ pub async fn test_app() -> TestApp {
     let clusters = ClusterRepository::new(pool.clone());
     let app =
         kafka_dashboard::api::router_with_state(kafka_dashboard::api::AppState::new(pool.clone()));
+    TestApp {
+        app,
+        pool,
+        clusters,
+    }
+}
+
+pub async fn test_app_with_sender(sender: impl AlertSender + 'static) -> TestApp {
+    let pool = db::connect("sqlite::memory:").await.unwrap();
+    let clusters = ClusterRepository::new(pool.clone());
+    let app = kafka_dashboard::api::router_with_state(
+        kafka_dashboard::api::AppState::new(pool.clone())
+            .with_alert_sender(std::sync::Arc::new(sender)),
+    );
     TestApp {
         app,
         pool,

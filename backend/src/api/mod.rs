@@ -1,15 +1,20 @@
 pub mod clusters;
+pub mod feishu_alerts;
 pub mod health;
 pub mod lag_rules;
 pub mod sessions;
 pub mod static_assets;
 pub mod topics;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use crate::{
-    db::{clusters::ClusterRepository, lag_rules::LagRuleRepository},
+    db::{
+        clusters::ClusterRepository, feishu_alerts::FeishuAlertRepository,
+        lag_rules::LagRuleRepository,
+    },
     error,
+    notifications::feishu::{AlertSender, ReqwestFeishuSender},
     sessions::manager::{
         KafkaSessionClientFactory, LEASE_DURATION, SessionClientFactory, SessionManager,
     },
@@ -25,6 +30,8 @@ use axum::{
 pub struct AppState<F: SessionClientFactory = KafkaSessionClientFactory> {
     pub clusters: ClusterRepository,
     pub lag_rules: LagRuleRepository,
+    pub feishu_alerts: FeishuAlertRepository,
+    pub alert_sender: Arc<dyn AlertSender>,
     pub sessions: SessionManager<F>,
 }
 
@@ -32,13 +39,22 @@ impl AppState<KafkaSessionClientFactory> {
     pub fn new(pool: sqlx::SqlitePool) -> Self {
         Self {
             clusters: ClusterRepository::new(pool.clone()),
-            lag_rules: LagRuleRepository::new(pool),
+            lag_rules: LagRuleRepository::new(pool.clone()),
+            feishu_alerts: FeishuAlertRepository::new(pool),
+            alert_sender: Arc::new(
+                ReqwestFeishuSender::new().expect("Failed to initialize notification client"),
+            ),
             sessions: SessionManager::new(LEASE_DURATION, KafkaSessionClientFactory),
         }
     }
 }
 
 impl<F: SessionClientFactory> AppState<F> {
+    pub fn with_alert_sender(mut self, sender: Arc<dyn AlertSender>) -> Self {
+        self.alert_sender = sender;
+        self
+    }
+
     pub fn with_session_manager<G: SessionClientFactory>(
         self,
         sessions: SessionManager<G>,
@@ -46,6 +62,8 @@ impl<F: SessionClientFactory> AppState<F> {
         AppState {
             clusters: self.clusters,
             lag_rules: self.lag_rules,
+            feishu_alerts: self.feishu_alerts,
+            alert_sender: self.alert_sender,
             sessions,
         }
     }
@@ -72,6 +90,8 @@ fn state_router<F: SessionClientFactory>(
     routes::<F>(root)
         .layer(Extension(state.clusters))
         .layer(Extension(state.lag_rules))
+        .layer(Extension(state.feishu_alerts))
+        .layer(Extension(state.alert_sender))
         .layer(Extension(state.sessions))
 }
 
@@ -100,6 +120,14 @@ fn routes<F: SessionClientFactory>(web_root: Option<static_assets::StaticRoot>) 
         .route(
             "/api/clusters/{id}/lag-rules",
             get(lag_rules::get).put(lag_rules::put),
+        )
+        .route(
+            "/api/clusters/{id}/feishu-alert",
+            get(feishu_alerts::get).put(feishu_alerts::put),
+        )
+        .route(
+            "/api/clusters/{id}/feishu-alert/test",
+            post(feishu_alerts::test),
         )
         .route("/api/clusters/{id}/sessions", post(sessions::create::<F>))
         .route("/api/sessions/{id}", delete(sessions::delete::<F>))
