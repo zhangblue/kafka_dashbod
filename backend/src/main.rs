@@ -39,21 +39,35 @@ async fn run() -> std::io::Result<()> {
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let state = kafka_dashboard::api::AppState::new(pool);
     let sessions = state.sessions.clone();
-    let state_cleanup = sessions.clone();
-    let app = kafka_dashboard::api::router_with_state_and_web_root(state, config.web_dir)?;
-
-    let address = std::env::var("KAFKA_DASHBOARD_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into());
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    tracing::info!(address = %listener.local_addr()?, "Kafka Lens listening");
-
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            sessions.close_all().await;
-        })
-        .await;
-    // Also cover server errors that bypass the shutdown signal future.
-    state_cleanup.close_all().await;
+    let monitor = kafka_dashboard::alerts::monitor::start(
+        state.clusters.clone(),
+        state.feishu_alerts.clone(),
+        kafka_dashboard::sessions::manager::KafkaSessionClientFactory,
+        state.alert_sender.clone(),
+        kafka_dashboard::alerts::monitor::MONITOR_INTERVAL,
+    );
+    // Keep every fallible server setup step inside this scope, so errors drain
+    // the monitor and sessions just like signal-driven shutdown does.
+    let result = async {
+        let app = kafka_dashboard::api::router_with_state_and_web_root(state, config.web_dir)?;
+        let address =
+            std::env::var("KAFKA_DASHBOARD_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into());
+        let listener = tokio::net::TcpListener::bind(address).await?;
+        tracing::info!(address = %listener.local_addr()?, "Kafka Lens listening");
+        let shutdown_monitor = monitor.clone();
+        let shutdown_sessions = sessions.clone();
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                shutdown_monitor.shutdown().await;
+                shutdown_sessions.close_all().await;
+            })
+            .await
+    }
+    .await;
+    // Also cover server/setup errors that bypass the shutdown signal future.
+    monitor.shutdown().await;
+    sessions.close_all().await;
     result
 }
 

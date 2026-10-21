@@ -203,7 +203,7 @@ pub struct GrowthAlertMessage<'a> {
     pub group_id: &'a str,
     pub threshold: u64,
     pub total_lag: u64,
-    pub growth_seconds: u32,
+    pub growth_seconds: u64,
     pub detected_at: DateTime<FixedOffset>,
 }
 
@@ -549,6 +549,20 @@ mod tests {
         ] {
             assert!(text.contains(required));
         }
+    }
+
+    #[test]
+    fn growth_message_preserves_durations_above_u32_max() {
+        let text = format_growth_alert(&GrowthAlertMessage {
+            cluster_name: "fixture",
+            topic: "t",
+            group_id: "g",
+            threshold: 5_000,
+            total_lag: 6_000,
+            growth_seconds: 4_294_967_296_u64,
+            detected_at: chrono::DateTime::parse_from_rfc3339("2026-10-22T09:30:00+08:00").unwrap(),
+        });
+        assert!(text.contains("连续增长时间：4294967296 秒"));
     }
 
     #[test]

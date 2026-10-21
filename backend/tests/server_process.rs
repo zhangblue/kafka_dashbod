@@ -184,6 +184,80 @@ fn configured_listener_serves_health_and_sigterm_exits_successfully() {
     assert_health_and_sigterm(server, address);
 }
 
+// Persisted eligible alerts must start without a browser session. The peer is a
+// local inert TCP stub, not a Kafka broker; no metadata or delivery can succeed.
+#[tokio::test]
+async fn persisted_alert_worker_starts_and_sigterm_drains_it() {
+    use kafka_dashboard::{
+        db::{clusters::ClusterRepository, feishu_alerts::FeishuAlertRepository},
+        domain::{cluster::ClusterInput, feishu_alert::FeishuAlertRuleInput},
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let database_url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("configuration.db").display()
+    );
+    let peer = TcpListener::bind("127.0.0.1:0").unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let pool = kafka_dashboard::db::connect(&database_url).await.unwrap();
+    let mut input =
+        ClusterInput::plaintext("process fixture", peer.local_addr().unwrap().to_string());
+    input.connection_timeout_ms = 100;
+    let cluster = ClusterRepository::new(pool.clone())
+        .create(&input)
+        .await
+        .unwrap();
+    FeishuAlertRepository::new(pool.clone())
+        .replace(
+            &cluster.id,
+            Some("process-test-token"),
+            false,
+            &[FeishuAlertRuleInput {
+                id: None,
+                group_id: "process-test-group".into(),
+                topic: "process-test-topic".into(),
+                lag_threshold: 5_000,
+                growth_seconds: 10,
+                enabled: true,
+            }],
+        )
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = reservation.local_addr().unwrap();
+    drop(reservation);
+    let mut server = Server(
+        command_with_dotenv(directory.path(), "")
+            .env("DATABASE_URL", database_url)
+            .env("KAFKA_DASHBOARD_BIND", address.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let _socket = loop {
+        match peer.accept() {
+            Ok((socket, _)) => break socket,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("local stub failed: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "eligible background monitor did not create a Kafka client"
+        );
+        assert!(
+            server.0.try_wait().unwrap().is_none(),
+            "server exited before monitor startup"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_health_and_sigterm(server, address);
+}
+
 // Override loading would select the invalid file database instead of the external value.
 #[test]
 fn external_environment_overrides_dotenv() {
