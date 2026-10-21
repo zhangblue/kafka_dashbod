@@ -1,13 +1,14 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { ClustersPage } from './ClustersPage'
-import type { ClusterDto, ClusterSnapshot, LagRuleSet } from '../../api/types'
+import type { ClusterDto, ClusterSnapshot, FeishuAlertSettings, LagRuleSet } from '../../api/types'
 import { clusterFixture, server, snapshotFixture } from '../../test/handlers'
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
+beforeEach(() => server.use(http.get('/api/clusters/:id/feishu-alert', () => HttpResponse.json({ accessTokenConfigured: false, maskedAccessToken: null, rules: [] }))))
 afterEach(() => {
   server.resetHandlers()
   vi.useRealTimers()
@@ -23,6 +24,185 @@ function renderPage(snapshot: ClusterSnapshot | null = snapshotFixture) {
 }
 
 describe('cluster settings', () => {
+  it('opens independent Feishu settings using the active snapshot and retains save and test feedback after refreshing the summary', async () => {
+    const user = userEvent.setup()
+    let settings: FeishuAlertSettings = { accessTokenConfigured: false, maskedAccessToken: null, rules: [] }
+    let saved: unknown
+    let sessions = 0, tests = 0
+    server.use(
+      http.get('/api/clusters/:id/feishu-alert', () => HttpResponse.json(settings)),
+      http.post('/api/clusters/:id/sessions', () => { sessions++; return HttpResponse.json({ sessionId: 'unneeded', leaseSeconds: 15 }) }),
+      http.put('/api/clusters/:id/feishu-alert', async ({ request }) => {
+        saved = await request.json()
+        settings = { accessTokenConfigured: true, maskedAccessToken: '****demo', rules: [{ id: 'saved-rule', groupId: 'flink-order-enrich', topic: 'raw-orders', lagThreshold: 25, growthSeconds: 10, enabled: true }] }
+        return HttpResponse.json(settings)
+      }),
+      http.post('/api/clusters/:id/feishu-alert/test', () => { tests++; return HttpResponse.json({ ok: true }) }),
+    )
+    renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
+    await screen.findByText('飞书告警：未配置')
+    await user.click(screen.getByRole('button', { name: '编辑' }))
+    await user.click(screen.getByRole('button', { name: '配置飞书告警' }))
+    const dialog = await screen.findByRole('dialog', { name: '配置飞书告警' })
+    expect(screen.queryByLabelText('集群名称')).not.toBeInTheDocument()
+    await user.type(await within(dialog).findByLabelText('更新 Token'), 'synthetic-demo-token')
+    await user.click(within(dialog).getByRole('button', { name: '新增规则' }))
+    await user.selectOptions(screen.getByLabelText('Consumer Group'), 'flink-order-enrich')
+    expect(within(screen.getByLabelText('Topic')).queryByRole('option', { name: 'uncommitted' })).not.toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Topic'), 'raw-orders')
+    await user.clear(screen.getByLabelText('Lag 阈值'))
+    await user.type(screen.getByLabelText('Lag 阈值'), '25')
+    await user.click(screen.getByRole('button', { name: '保存配置' }))
+    await screen.findByText('飞书告警：Token 已配置 · 1 条 Topic + Group 规则')
+    expect(screen.getByText('飞书告警配置已保存')).toBeInTheDocument()
+    expect(screen.getByLabelText('更新 Token')).toHaveValue('')
+    expect(saved).toEqual({ accessToken: 'synthetic-demo-token', clearAccessToken: false, rules: [{ groupId: 'flink-order-enrich', topic: 'raw-orders', lagThreshold: 25, growthSeconds: 10, enabled: true }] })
+    await user.click(screen.getByRole('button', { name: '测试通知' }))
+    await screen.findByText('测试通知已发送')
+    expect(tests).toBe(1)
+    expect(sessions).toBe(0)
+    await user.click(screen.getByRole('button', { name: '配置 Lag 规则' }))
+    expect(screen.queryByRole('dialog', { name: '配置飞书告警' })).not.toBeInTheDocument()
+  })
+
+  it('opens a temporary Feishu configuration session for stale snapshots and releases it on close and deletion', async () => {
+    const user = userEvent.setup()
+    let clusters = [clusterFixture]
+    let created = 0, closed = 0
+    server.use(
+      http.get('/api/clusters', () => HttpResponse.json(clusters)),
+      http.post('/api/clusters/:id/sessions', () => HttpResponse.json({ sessionId: `feishu-${++created}`, leaseSeconds: 15 }, { status: 201 })),
+      http.get('/api/sessions/:id/snapshot', () => HttpResponse.json({ ...snapshotFixture, collectedAt: new Date().toISOString() })),
+      http.delete('/api/sessions/:id', () => { closed++; return new HttpResponse(null, { status: 204 }) }),
+      http.delete('/api/clusters/:id', () => { clusters = []; return new HttpResponse(null, { status: 204 }) }),
+    )
+    renderPage(snapshotFixture)
+    await user.click(await screen.findByRole('button', { name: '配置飞书告警' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '新增规则' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: '关闭' }))
+    await waitFor(() => expect(closed).toBe(1))
+    await user.click(screen.getByRole('button', { name: '配置飞书告警' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '新增规则' })).toBeEnabled())
+    await user.type(screen.getByLabelText('更新 Token'), 'discard-on-delete')
+    await user.click(screen.getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(closed).toBe(2))
+    expect(created).toBe(2)
+    expect(screen.queryByDisplayValue('discard-on-delete')).not.toBeInTheDocument()
+  })
+
+  it('aborts the previous cluster GET and discards its mask and draft when switching Feishu editors', async () => {
+    const user = userEvent.setup()
+    let finish!: () => void
+    const pending = new Promise<void>(resolve => { finish = resolve })
+    let readsA = 0, aborted = false
+    server.use(
+      http.get('/api/clusters', () => HttpResponse.json([clusterFixture, { ...clusterFixture, id: 'cluster-b', name: '集群 B' }])),
+      http.get('/api/clusters/:id/feishu-alert', async ({ params, request }) => {
+        if (params.id === 'cluster-a' && ++readsA === 3) {
+          request.signal.addEventListener('abort', () => { aborted = true })
+          await pending
+        }
+        return HttpResponse.json({ accessTokenConfigured: true, maskedAccessToken: params.id === 'cluster-a' ? '****old-a' : '****new-b', rules: [] })
+      }),
+      http.post('/api/clusters/:id/feishu-alert/test', () => HttpResponse.json({ ok: true })),
+    )
+    renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
+    const cards = await screen.findAllByRole('button', { name: '配置飞书告警' })
+    await waitFor(() => expect(screen.getAllByText('飞书告警：Token 已配置 · 0 条 Topic + Group 规则')).toHaveLength(2))
+    await user.click(cards[0])
+    await screen.findByText('****old-a')
+    await user.click(screen.getByRole('button', { name: '测试通知' }))
+    await screen.findByText('测试通知已发送')
+    await user.type(screen.getByLabelText('更新 Token'), 'discard-on-switch')
+    await user.click(screen.getByRole('button', { name: '关闭' }))
+    await user.click(cards[0])
+    await waitFor(() => expect(readsA).toBe(3))
+    await user.click(cards[1])
+    try {
+      await screen.findByText('****new-b')
+      expect(aborted).toBe(true)
+      expect(screen.getByLabelText('更新 Token')).toHaveValue('')
+      expect(screen.queryByText('****old-a')).not.toBeInTheDocument()
+      expect(screen.queryByText('测试通知已发送')).not.toBeInTheDocument()
+    } finally { finish() }
+    await act(async () => { await pending })
+    expect(screen.getByText('****new-b')).toBeInTheDocument()
+  })
+
+  it('shows safe Chinese loading and failure messages and retries Feishu settings without exposing response text', async () => {
+    const user = userEvent.setup()
+    let finish!: () => void
+    const pending = new Promise<void>(resolve => { finish = resolve })
+    let fail = true
+    server.use(http.get('/api/clusters/:id/feishu-alert', async () => {
+      await pending
+      return fail ? HttpResponse.json({ code: 'INTERNAL', message: 'sensitive-token-from-server', requestId: 'unsafe' }, { status: 500 })
+        : HttpResponse.json({ accessTokenConfigured: false, maskedAccessToken: null, rules: [] })
+    }))
+    renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
+    await user.click(await screen.findByRole('button', { name: '配置飞书告警' }))
+    expect(within(screen.getByRole('dialog')).getByText('正在加载飞书告警配置…')).toBeInTheDocument()
+    finish()
+    await screen.findByText('加载飞书告警配置失败，请重试。')
+    expect(screen.queryByText(/sensitive-token-from-server/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存配置' })).not.toBeInTheDocument()
+    fail = false
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+    await screen.findByLabelText('更新 Token')
+  })
+
+  it('requires a successful current GET before restoring a previously cached Feishu form', async () => {
+    const user = userEvent.setup()
+    let fail = false
+    server.use(http.get('/api/clusters/:id/feishu-alert', () => fail
+      ? HttpResponse.json({ code: 'INTERNAL', message: 'unsafe-response' }, { status: 500 })
+      : HttpResponse.json({ accessTokenConfigured: true, maskedAccessToken: '****cached', rules: [] })))
+    renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
+    await user.click(await screen.findByRole('button', { name: '配置飞书告警' }))
+    await screen.findByText('****cached')
+    await user.click(screen.getByRole('button', { name: '关闭' }))
+    fail = true
+    await user.click(screen.getByRole('button', { name: '配置飞书告警' }))
+    await screen.findByText('加载飞书告警配置失败，请重试。')
+    expect(screen.queryByText('****cached')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存配置' })).not.toBeInTheDocument()
+  })
+
+  it('pauses Feishu options while hidden, retains the draft, and releases every temporary session on pagehide and leave', async () => {
+    const user = userEvent.setup()
+    let created = 0, closed = 0
+    server.use(
+      http.post('/api/clusters/:id/sessions', () => HttpResponse.json({ sessionId: `feishu-visible-${++created}`, leaseSeconds: 15 }, { status: 201 })),
+      http.get('/api/sessions/:id/snapshot', () => HttpResponse.json({ ...snapshotFixture, collectedAt: new Date().toISOString() })),
+      http.delete('/api/sessions/:id', () => { closed++; return new HttpResponse(null, { status: 204 }) }),
+    )
+    const page = renderPage(null)
+    await user.click(await screen.findByRole('button', { name: '配置飞书告警' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '新增规则' })).toBeEnabled())
+    await user.type(screen.getByLabelText('更新 Token'), 'synthetic-draft')
+    act(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await waitFor(() => expect(closed).toBe(1))
+    expect(screen.getByRole('button', { name: '新增规则' })).toBeDisabled()
+    expect(screen.getByLabelText('更新 Token')).toHaveValue('synthetic-draft')
+    expect(created).toBe(1)
+    act(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await waitFor(() => expect(created).toBe(2))
+    act(() => window.dispatchEvent(new Event('pagehide')))
+    await waitFor(() => expect(closed).toBe(2))
+    expect(screen.getByRole('button', { name: '新增规则' })).toBeDisabled()
+    act(() => window.dispatchEvent(new Event('pageshow')))
+    await waitFor(() => expect(created).toBe(3))
+    page.unmount()
+    await waitFor(() => expect(closed).toBe(3))
+  })
+
   it('groups the security protocol label and control for consistent form layout', async () => {
     const user = userEvent.setup()
     renderPage()

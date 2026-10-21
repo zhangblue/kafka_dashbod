@@ -1,16 +1,56 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ApiError, clustersApi, lagRulesApi, sessionsApi } from '../../api/client'
-import type { ClusterDto, ClusterInput, ClusterSnapshot, LagRuleSet } from '../../api/types'
+import { ApiError, clustersApi, feishuAlertsApi, lagRulesApi, sessionsApi } from '../../api/client'
+import type { ClusterDto, ClusterInput, ClusterSnapshot, FeishuAlertSettings, LagRuleSet } from '../../api/types'
 import { ClusterForm, ApiErrorNotice } from './ClusterForm'
 import { LagRulesForm } from '../lag-rules/LagRulesForm'
 import { snapshotUnavailable } from '../lag-rules/snapshotAvailability'
 import { sessionTransition } from '../dashboard/sessionTransitions'
 import { Modal } from '../../components/Modal'
+import { FeishuAlertForm } from '../feishu-alerts/FeishuAlertForm'
+import { useSnapshotStale } from '../dashboard/useSnapshotStale'
 
-function ConfigurationSession({ clusterId, onReconnect, children }: {
+function feishuSettingsQuery(clusterId: string) {
+  return { queryKey: ['feishu-alerts', clusterId], queryFn: ({ signal }: { signal: AbortSignal }) => feishuAlertsApi.get(clusterId, signal) }
+}
+
+function FeishuAlertSummary({ clusterId }: { clusterId: string }) {
+  const settings = useQuery(feishuSettingsQuery(clusterId))
+  return <div className="threshold-summary">飞书告警：{settings.isError ? '摘要加载失败' : !settings.data ? '正在加载…'
+    : `${settings.data.accessTokenConfigured ? 'Token 已配置' : '未配置'}${settings.data.accessTokenConfigured || settings.data.rules.length ? ` · ${settings.data.rules.length} 条 Topic + Group 规则` : ''}`}</div>
+}
+
+function FeishuAlertEditor({ cluster, snapshot, onClose }: { cluster: ClusterDto; snapshot: ClusterSnapshot | null; onClose: () => void }) {
+  const client = useQueryClient()
+  const settings = useQuery({ ...feishuSettingsQuery(cluster.id), refetchOnMount: 'always' })
+  // Keep the loaded source stable while onSaved refreshes the summary cache, so the
+  // form retains the server result and its save/test feedback until it is closed.
+  const [source, setSource] = useState<FeishuAlertSettings | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  const expired = useSnapshotStale({ snapshot, status: 'connected' }, 10)
+  if (settings.isSuccess && !settings.isFetching && !source) setSource(settings.data)
+  useEffect(() => () => { void client.cancelQueries({ queryKey: ['feishu-alerts', cluster.id], exact: true }) }, [client, cluster.id])
+  const renderForm = (currentSnapshot: ClusterSnapshot | null) => source && <FeishuAlertForm clusterId={cluster.id}
+    value={source} snapshot={currentSnapshot} onClose={onClose} onSaved={value => {
+      client.setQueryData(['feishu-alerts', cluster.id], value)
+      void client.invalidateQueries({ queryKey: ['feishu-alerts', cluster.id], exact: true })
+    }} />
+  const reusable = snapshot?.clusterId === cluster.id && !expired && Number.isFinite(Date.parse(snapshot.collectedAt)) && !snapshotUnavailable(snapshot)
+  return <section aria-label={`${cluster.name} 飞书告警`}>
+    <p className="rules-description">{cluster.name} · 独立配置 Token 与 Consumer Group + Topic 告警规则。</p>
+    {!source && !settings.isError && <p role="status">正在加载飞书告警配置…</p>}
+    {settings.isError && !source && <><p role="alert">加载飞书告警配置失败，请重试。</p>
+      <button type="button" onClick={() => { void settings.refetch() }}>重新加载</button></>}
+    {source && <ConfigurationSession clusterId={cluster.id} snapshot={reusable ? snapshot : null} attempt={attempt}
+      onReconnect={() => setAttempt(value => value + 1)}>{renderForm}</ConfigurationSession>}
+  </section>
+}
+
+function ConfigurationSession({ clusterId, snapshot = null, attempt = 0, onReconnect, children }: {
   clusterId: string
+  snapshot?: ClusterSnapshot | null
+  attempt?: number
   onReconnect: () => void
   children: (snapshot: ClusterSnapshot | null) => ReactNode
 }) {
@@ -19,6 +59,13 @@ function ConfigurationSession({ clusterId, onReconnect, children }: {
   const [connecting, setConnecting] = useState(true)
   const [visible, setVisible] = useState(() => document.visibilityState === 'visible')
   const [pageActive, setPageActive] = useState(true)
+  const [sharedSnapshot, setSharedSnapshot] = useState(snapshot)
+  if (snapshot !== sharedSnapshot) {
+    setSharedSnapshot(snapshot)
+    setOwnSnapshot(null)
+    setConnectionError(null)
+    setConnecting(true)
+  }
   const stopSession = useRef(() => {})
   useEffect(() => {
     const pause = () => { setOwnSnapshot(null); setConnectionError(null); setConnecting(true) }
@@ -39,7 +86,7 @@ function ConfigurationSession({ clusterId, onReconnect, children }: {
     }
   }, [])
   useEffect(() => {
-    if (!visible || !pageActive) return
+    if (!visible || !pageActive || snapshot) return
     let disposed = false
     let sessionId: string | undefined
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -88,12 +135,14 @@ function ConfigurationSession({ clusterId, onReconnect, children }: {
     stopSession.current = stop
     void connect()
     return () => { stop(); if (stopSession.current === stop) stopSession.current = () => {} }
-  }, [clusterId, visible, pageActive])
+  }, [clusterId, visible, pageActive, snapshot, attempt])
   return <>
     <ApiErrorNotice error={connectionError} />
-    {(!visible || !pageActive) ? <p role="status">已暂停（页面不可见）</p> : connecting && <p role="status">正在连接集群…</p>}
-    {(!ownSnapshot || snapshotUnavailable(ownSnapshot)) && <button type="button" disabled={connecting} onClick={onReconnect}>重新连接</button>}
-    {children(visible && pageActive ? ownSnapshot : null)}
+    {(!visible || !pageActive) ? <p role="status">已暂停（页面不可见）</p> : !snapshot && connecting && <p role="status">正在连接集群…</p>}
+    {!snapshot && (!ownSnapshot || snapshotUnavailable(ownSnapshot)) && <button type="button" disabled={connecting} onClick={() => {
+      setOwnSnapshot(null); setConnectionError(null); setConnecting(true); onReconnect()
+    }}>重新连接</button>}
+    {children(visible && pageActive ? snapshot ?? ownSnapshot : null)}
   </>
 }
 
@@ -139,6 +188,8 @@ export function ClustersPage({ snapshot = null }: ClustersPageProps) {
   const [editing, setEditing] = useState<ClusterDto | 'new' | null>(null)
   const [rulesClusterId, setRulesClusterId] = useState<string | null>(null)
   const rulesCluster = clusters.data?.find(cluster => cluster.id === rulesClusterId)
+  const [feishuClusterId, setFeishuClusterId] = useState<string | null>(null)
+  const feishuCluster = clusters.data?.find(cluster => cluster.id === feishuClusterId)
   const [testedId, setTestedId] = useState('')
   const save = useMutation({ mutationKey: ['cluster-settings'], mutationFn: ({ id, value }: { id?: string; value: ClusterInput }) => id ? clustersApi.update(id, value) : clustersApi.create(value),
     onSuccess: async saved => {
@@ -155,12 +206,13 @@ export function ClustersPage({ snapshot = null }: ClustersPageProps) {
     } })
   const remove = useMutation({ mutationFn: clustersApi.delete, onSuccess: async (_, id) => {
     if (rulesClusterId === id) setRulesClusterId(null)
+    if (feishuClusterId === id) setFeishuClusterId(null)
     if (editing !== 'new' && editing?.id === id) setEditing(null)
     await client.invalidateQueries({ queryKey: ['clusters'] })
   } })
   const test = useMutation({ mutationFn: (id: string) => clustersApi.test(id) })
 
-  const addCluster = () => { save.reset(); setRulesClusterId(null); setEditing('new') }
+  const addCluster = () => { save.reset(); setRulesClusterId(null); setFeishuClusterId(null); setEditing('new') }
   return <><header className="topbar settings-topbar"><span>Kafka Lens <span className="breadcrumb-separator">/</span> 集群设置</span><span className="muted">连接与 Lag 状态规则</span></header>
     <section className="page-content settings-page" aria-label="集群设置">
     <div className="page-head"><div><h1>集群设置</h1><p>管理 Kafka 连接与各集群的 Lag 状态规则</p></div>
@@ -172,10 +224,12 @@ export function ClustersPage({ snapshot = null }: ClustersPageProps) {
       <div className="cluster-card-top"><h3>{cluster.name}</h3><span className="protocol-badge">{cluster.securityProtocol}</span></div>
       <div className="cluster-meta"><p>{cluster.bootstrapServers}</p><p>{cluster.saslMechanism || 'Kafka 集群连接'}</p></div>
       <div className="threshold-summary">默认 Lag 阈值：正常 ≤ {cluster.defaultNormalLagMax.toLocaleString('en-US')} · 高 Lag ≥ {cluster.defaultHighLagMin.toLocaleString('en-US')}<br />持续超限 {cluster.defaultOverLimitSeconds} 秒</div>
+      <FeishuAlertSummary clusterId={cluster.id} />
       <div className="cluster-card-actions">
-      <button type="button" disabled={savingSettings} onClick={() => { save.reset(); setRulesClusterId(null); setEditing(cluster) }}>编辑</button>
+      <button type="button" disabled={savingSettings} onClick={() => { save.reset(); setRulesClusterId(null); setFeishuClusterId(null); setEditing(cluster) }}>编辑</button>
       <button type="button" disabled={test.isPending} onClick={() => { setTestedId(cluster.id); test.mutate(cluster.id) }}>测试连接</button>
-      <button type="button" disabled={savingSettings} onClick={() => { setEditing(null); setRulesClusterId(cluster.id) }}>配置 Lag 规则</button>
+      <button type="button" disabled={savingSettings} onClick={() => { setEditing(null); setFeishuClusterId(null); setRulesClusterId(cluster.id) }}>配置 Lag 规则</button>
+      <button type="button" disabled={savingSettings} onClick={() => { setEditing(null); setRulesClusterId(null); setFeishuClusterId(cluster.id) }}>配置飞书告警</button>
       <button className="danger-button" type="button" disabled={remove.isPending || savingSettings} onClick={() => remove.mutate(cluster.id)}>删除</button></div>
       {test.isSuccess && testedId === cluster.id && <p role="status">连接成功：{test.data.brokerCount} Broker，{test.data.topicCount} Topic，耗时 {test.data.elapsedMs} ms</p>}
     </fieldset>)}<button className="empty-add" type="button" disabled={savingSettings} onClick={addCluster}><span aria-hidden="true">＋</span>添加 Kafka 集群</button></div>
@@ -185,5 +239,7 @@ export function ClustersPage({ snapshot = null }: ClustersPageProps) {
       onSave={value => save.mutate({ id: editing === 'new' ? undefined : editing.id, value })} /></Modal>}
     {rulesCluster && <Modal title="Lag 状态判断区间" wide busy={savingSettings} onClose={() => setRulesClusterId(null)}><RulesEditor key={rulesCluster.id} cluster={rulesCluster}
       snapshot={snapshot?.clusterId === rulesCluster.id ? snapshot : null} onClose={() => setRulesClusterId(null)} /></Modal>}
+    {feishuCluster && <Modal title="配置飞书告警" wide onClose={() => setFeishuClusterId(null)}><FeishuAlertEditor key={feishuCluster.id} cluster={feishuCluster}
+      snapshot={snapshot?.clusterId === feishuCluster.id ? snapshot : null} onClose={() => setFeishuClusterId(null)} /></Modal>}
   </section></>
 }
