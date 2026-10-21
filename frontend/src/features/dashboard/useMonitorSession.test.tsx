@@ -113,6 +113,53 @@ it('withdraws an expired ID even when the next snapshot remains pending', async 
   expect(result.current.status).toBe('connecting')
 })
 
+it.each(['initial', 'refresh'] as const)('does not reactivate a lease from a late %s snapshot response', async phase => {
+  vi.setSystemTime(0)
+  let finish!: (value: typeof snapshotFixture) => void
+  const pending = () => new Promise<typeof snapshotFixture>(resolve => { finish = resolve })
+  if (phase === 'initial') vi.mocked(sessionsApi.snapshot).mockImplementationOnce(pending)
+  const { result, rerender } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
+  await flush()
+  if (phase === 'refresh') {
+    expect(result.current.sessionId).toBe('a-1')
+    vi.mocked(sessionsApi.snapshot).mockImplementationOnce(pending)
+    await act(async () => { void result.current.refresh() })
+  }
+  // The request renews at 0 or 1 ms, so any reply after 31 s cannot extend it.
+  await act(async () => { await vi.advanceTimersByTimeAsync(31_000) })
+  expect(result.current.sessionId).toBeUndefined()
+  await act(async () => finish(snapshotFixture))
+  await flush()
+  rerender()
+  expect(result.current.sessionId).toBeUndefined()
+  expect(result.current.status).toBe('connecting')
+})
+
+it('rearms expiry after a busy reply arrives after the previous expiry timer has stopped', async () => {
+  vi.setSystemTime(0)
+  const { result, rerender } = renderHook(({ interval }) => useMonitorSession('a', interval), {
+    wrapper: Wrapper, initialProps: { interval: 10 as 3 | 5 | 10 },
+  })
+  await flush()
+  expect(result.current.sessionId).toBe('a-1')
+  let busyReply!: (reason: ApiError) => void
+  vi.mocked(sessionsApi.snapshot)
+    .mockImplementationOnce(() => new Promise((_, reject) => { busyReply = reject }))
+    .mockImplementationOnce(() => new Promise(() => {}))
+  // At 10 s a request starts and renews the server lease through 40 s.
+  await act(async () => { await vi.advanceTimersByTimeAsync(9_999) })
+  // Its 409 reply arrives only after the original 30 s timer has fired.
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_001) })
+  expect(result.current.sessionId).toBeUndefined()
+  await act(async () => busyReply(new ApiError(409, { code: 'SNAPSHOT_IN_PROGRESS' })))
+  rerender({ interval: 5 })
+  expect(result.current.sessionId).toBe('a-1')
+  // The retry stays pending. The renewed 40 s deadline must still withdraw ID.
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+  expect(result.current.sessionId).toBeUndefined()
+  expect(result.current.status).toBe('connecting')
+})
+
 it.each([3, 5, 10] as const)('collects at %ss without clearing history when cadence changes', async seconds => {
   const { result, rerender, unmount } = renderHook(({ interval }) => useMonitorSession('a', interval), { wrapper: Wrapper, initialProps: { interval: seconds } })
   await flush()

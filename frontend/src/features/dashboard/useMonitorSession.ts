@@ -40,6 +40,7 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
   const [pageActive, setPageActive] = useState(true)
   const [attempt, setAttempt] = useState(0)
   const [leaseClock, setLeaseClock] = useState(() => Date.now())
+  const [leaseDeadline, setLeaseDeadline] = useState(0)
   const [continuity, setContinuity] = useState(0)
   const [failure, setFailure] = useState<{ runtime: object; error: unknown } | null>(null)
   const [data, setData] = useState<{ runtime: object; sessionId: string; snapshot: ClusterSnapshot; display: DisplaySnapshot; history: SnapshotSample[] } | null>(null)
@@ -108,6 +109,13 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
     queryFn: async ({ signal }) => {
       const usable = () => runtime.active && runtime.foreground && !signal.aborted
       const aborted = () => new DOMException('Monitoring paused', 'AbortError')
+      const renew = (lease: Lease, requestedAt: number) => {
+        // Renewal happens before collection on the server. Response latency must
+        // consume this trusted window, not create another lease after receipt.
+        lease.expiresAt = requestedAt + lease.leaseSeconds * 1000
+        setLeaseDeadline(lease.expiresAt)
+        setLeaseClock(Date.now())
+      }
       async function connect() {
         if (runtime.lease && runtime.lease.expiresAt <= Date.now()) close()
         if (!runtime.lease) {
@@ -131,13 +139,16 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
       async function collect(lease: Lease): Promise<ClusterSnapshot> {
         let backoff = 500
         while (usable()) {
+          const requestedAt = Date.now()
           try {
-            return await sessionsApi.snapshot(lease.sessionId, signal)
+            const snapshot = await sessionsApi.snapshot(lease.sessionId, signal)
+            if (usable()) renew(lease, requestedAt)
+            return snapshot
           } catch (error) {
             if (!(error instanceof ApiError && error.status === 409 && error.code === 'SNAPSHOT_IN_PROGRESS') || !usable()) throw error
             // The server renews a live lease before checking its collection lock.
             // Cancelling HTTP does not cancel that server-side collection.
-            lease.expiresAt = Date.now() + lease.leaseSeconds * 1000
+            renew(lease, requestedAt)
             await waitForCollection(backoff, signal)
             backoff = Math.min(backoff * 2, 2000)
           }
@@ -157,7 +168,6 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
         }
         if (!usable()) throw aborted()
         if (snapshotUnavailable(snapshot)) throw new ApiError(503, { code: 'KAFKA_UNAVAILABLE', message: '集群数据采集失败，请重新连接。' })
-        lease.expiresAt = Date.now() + lease.leaseSeconds * 1000
         setData(previous => ({ runtime, sessionId: lease.sessionId, snapshot,
           display: retainDisplaySnapshot(snapshot, previous?.runtime === runtime ? previous.display : undefined), history: appendSample(previous?.runtime === runtime ? previous.history : [],
           { at: Date.parse(snapshot.collectedAt), snapshot }) }))
@@ -186,7 +196,7 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
     }
     checkExpiry()
     return () => clearTimeout(timer)
-  }, [runtime, data])
+  }, [runtime, data, leaseDeadline])
   const sessionReady = Boolean(runtime.lease && runtime.lease.expiresAt > leaseClock
     && data?.runtime === runtime && data.sessionId === runtime.lease.sessionId)
   const sessionId = running && runtime.active && runtime.foreground && sessionReady ? runtime.lease?.sessionId : undefined
