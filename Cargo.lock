@@ -113,6 +113,7 @@ dependencies = [
  "http-body-util",
  "percent-encoding",
  "rdkafka",
+ "rdkafka-sys",
  "rustix",
  "serde",
  "serde_json",
