@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { randomUUID } from 'node:crypto'
 
 const topic = 'dashboard-e2e-orders'
 const group = 'dashboard-e2e-reader'
@@ -7,6 +8,10 @@ const secret = process.env.E2E_FIXTURE_SECRET ?? 'missing-fixture-secret'
 test.beforeEach(() => {
   expect(process.env.E2E_BASE_URL, 'Run through scripts/test-e2e.sh to start isolated services').toBeTruthy()
   expect(process.env.E2E_KAFKA_BROKERS).toMatch(/^127\.0\.0\.1:\d+$/)
+  const port = Number(process.env.E2E_KAFKA_BROKERS?.split(':')[1])
+  expect(port).toBeGreaterThan(0)
+  expect(port).toBeLessThanOrEqual(65535)
+  expect(process.env.E2E_KAFKA_FIXTURE_PERMIT).toBe('disposable-compose')
 })
 
 async function createCluster(page: Page, name: string) {
@@ -105,6 +110,86 @@ test('cluster CRUD, connection, partitions, lag rules and session lifecycle', as
   expect((await request.get(`/api/sessions/${active.sessionId}/snapshot`)).status()).toBe(410)
   await page.getByRole('group', { name: 'E2E secondary', exact: true }).getByRole('button', { name: '删除', exact: true }).click()
   await expect(page.getByRole('group', { name: 'E2E secondary', exact: true })).toHaveCount(0)
+})
+
+// Breaks on missing real Admin writes, stale config reads, incorrect source mapping
+// or DELETE instead of removing the override. Never manage the seed Topic.
+test('creates a unique Topic, rereads retention, restores default and deletes it', async ({ page, request }) => {
+  const managed = `dashboard-e2e-managed-browser-${randomUUID()}`
+  let created = false
+  let deleted = false
+  await page.goto('/settings')
+  const clusterId = await createCluster(page, 'E2E Topic management')
+  try {
+    await page.getByRole('link', { name: 'Topics', exact: true }).click()
+    await page.getByLabel('集群', { exact: true }).selectOption(clusterId)
+    await expect(page.getByRole('complementary', { name: 'Kafka Lens' })).not.toHaveText(/只读模式/)
+    await page.getByRole('button', { name: '新建 Topic', exact: true }).click()
+    const create = page.getByRole('dialog', { name: '新建 Topic', exact: true })
+    await create.getByLabel('Topic 名称', { exact: true }).fill(managed)
+    await create.getByLabel('副本因子', { exact: true }).fill('1')
+    const creation = page.waitForResponse(r => /\/api\/sessions\/[^/]+\/topics$/.test(r.url()) && r.request().method() === 'POST')
+    await create.getByRole('button', { name: '创建 Topic', exact: true }).click()
+    const response = await creation
+    created = response.status() === 201
+    expect(response.status()).toBe(201)
+    await expect(create).not.toBeVisible()
+    const row = page.getByRole('row').filter({ has: page.getByRole('button', { name: `展开 ${managed}`, exact: true }) })
+    await expect(row).toBeVisible()
+
+    const config = page.getByRole('dialog', { name: 'Topic 参数配置', exact: true })
+    const retention = config.getByRole('article', { name: '消息保留时间 配置项', exact: true })
+    await row.getByRole('button', { name: `配置 ${managed}`, exact: true }).click()
+    await expect(retention.getByText('Broker 默认值', { exact: true })).toBeVisible()
+    const original = await retention.getByLabel('消息保留时间', { exact: true }).inputValue()
+    expect(original).toMatch(/^-?\d+$/)
+    await retention.getByLabel('消息保留时间', { exact: true }).fill('3600000')
+    await config.getByRole('button', { name: '保存配置', exact: true }).click()
+    await expect(config.getByText('配置已保存，当前值已从 Kafka 重新读取。', { exact: true })).toBeVisible()
+    await expect(retention.getByText('Topic 覆盖值', { exact: true })).toBeVisible()
+    await config.getByRole('button', { name: '取消', exact: true }).click()
+    await row.getByRole('button', { name: `配置 ${managed}`, exact: true }).click()
+    await expect(retention.getByLabel('消息保留时间', { exact: true })).toHaveValue('3600000')
+    await expect(retention.getByText('Topic 覆盖值', { exact: true })).toBeVisible()
+    await retention.getByRole('button', { name: '恢复 消息保留时间 为 Broker 默认值', exact: true }).click()
+    await config.getByRole('button', { name: '保存配置', exact: true }).click()
+    await expect(config.getByText('配置已保存，当前值已从 Kafka 重新读取。', { exact: true })).toBeVisible()
+    await expect(retention.getByLabel('消息保留时间', { exact: true })).toHaveValue(original)
+    await expect(retention.getByText('Broker 默认值', { exact: true })).toBeVisible()
+    await config.getByRole('button', { name: '取消', exact: true }).click()
+    await row.getByRole('button', { name: `配置 ${managed}`, exact: true }).click()
+    await expect(retention.getByLabel('消息保留时间', { exact: true })).toHaveValue(original)
+    await expect(retention.getByText('Broker 默认值', { exact: true })).toBeVisible()
+    await config.getByRole('button', { name: '取消', exact: true }).click()
+
+    await row.getByRole('button', { name: `删除 ${managed}`, exact: true }).click()
+    const confirmation = page.getByRole('dialog', { name: '删除 Topic', exact: true })
+    await expect(confirmation.getByRole('button', { name: '确认删除', exact: true })).toBeDisabled()
+    await confirmation.getByLabel('确认 Topic 名称', { exact: true }).fill(managed)
+    const deletion = page.waitForResponse(r => r.url().endsWith(`/topics/${managed}`) && r.request().method() === 'DELETE')
+    await confirmation.getByRole('button', { name: '确认删除', exact: true }).click()
+    const removal = await deletion
+    deleted = removal.status() === 204
+    expect(removal.status()).toBe(204)
+    await expect(confirmation).not.toBeVisible()
+    await expect(row).toHaveCount(0)
+    await expect(page.getByRole('button', { name: `展开 ${topic}`, exact: true })).toBeVisible()
+  } finally {
+    // Only this test's acknowledged creation can be deleted by cleanup. A new
+    // short-lived session avoids reusing an expired browser lease after failure.
+    if (created && !deleted) {
+      const opened = await request.post(`/api/clusters/${clusterId}/sessions`)
+      expect(opened.status()).toBe(201)
+      const { sessionId } = await opened.json()
+      try {
+        const removed = await request.delete(`/api/sessions/${sessionId}/topics/${managed}`, { data: { confirmationName: managed } })
+        expect([204, 404]).toContain(removed.status())
+      } finally {
+        expect((await request.delete(`/api/sessions/${sessionId}`)).status()).toBe(204)
+      }
+    }
+    expect((await request.delete(`/api/clusters/${clusterId}`)).status()).toBe(204)
+  }
 })
 
 // Uses real HTTP validation/storage paths; never sends these credentials to Kafka.

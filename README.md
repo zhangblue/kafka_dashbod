@@ -1,6 +1,6 @@
 # Kafka Lens
 
-Kafka 只读监控面板：管理集群连接配置，查看 Topic / Partition 水位、Consumer Group Lag、最近一小时趋势，以及集群默认和 Group / Topic 自定义 Lag 规则。后端为 Rust / Axum，前端为 React / Vite，SQLite 只保存配置与明文 Kafka 凭据。常规应用不会创建 Topic、生产消息或提交消费位置。
+Kafka 监控与 Topic 管理面板：管理集群连接配置，查看 Topic / Partition 水位、Consumer Group Lag、最近一小时趋势，以及集群默认和 Group / Topic 自定义 Lag 规则；支持创建、删除 Topic 和实时读取、修改受控 Topic 参数。后端为 Rust / Axum，前端为 React / Vite，SQLite 只保存连接配置、Lag 规则与明文 Kafka 凭据，不保存 Topic 配置副本。应用不生产消息、不调用删除消息 API，不提交或重置消费位置，也不提供分区扩容和副本重分配。
 
 当前版本没有后台常驻采集、跨页面持久化指标、消息内容浏览、消费位置重置、通知渠道或内置用户认证。数据范围受 Kafka 账户权限限制。截图约定放在 `docs/screenshots/`（当前未附截图）；如补充截图，请使用临时测试集群并隐藏连接地址及所有凭据。
 
@@ -84,6 +84,46 @@ Bootstrap Servers 填写逗号分隔的 `host:port`。后端必须能访问 Kafk
 - Lag 超过正常上限后，从首个有效超限样本开始计时；持续达到设定时长才显示积压或高 Lag，之前状态仍为正常。恢复正常会清零，隐藏页面、连接中断、采集异常、未提交、重建会话、规则变化或切换集群也会重置。Flink checkpoint 引起的短暂锯齿形 Lag 因此不会立刻变成告警状态；页面未打开期间不能推断持续超限。
 - 图表仅保留当前页面内存中最近一小时样本；刷新页面清空历史。采样间隔可选 3 / 5 / 10 秒。
 
+## Topic 管理
+
+进入 Topics 页面并成功连接后，可执行四类操作：新建 Topic、删除 Topic、读取当前 Topic 配置、修改或恢复配置。创建时分区数默认 1，副本因子留空使用集群默认值，可选参数留空不会发送覆盖值。删除必须输入大小写完全一致的完整名称，`__` 开头的内部 Topic 禁止删除。**删除 Topic 不可恢复，会删除其中数据并影响相关生产者与消费者。**
+
+仅开放以下 8 个参数，界面显示 Kafka key、中文含义、单位及风险；Kafka 的实际策略仍可能拒绝本地校验通过的值。
+
+| 参数 | 含义与输入范围 |
+| --- | --- |
+| `retention.ms` | 消息保留时间，毫秒；`-1` 表示不按时间限制，或非负整数 |
+| `retention.bytes` | 每分区保留空间，字节；`-1` 表示不按空间限制，或非负整数 |
+| `cleanup.policy` | 清理策略：`delete`、`compact`、`delete,compact` |
+| `segment.ms` | 日志段滚动时间，毫秒，正整数 |
+| `segment.bytes` | 日志段大小，字节，正整数 |
+| `min.insync.replicas` | 最小同步副本数，正整数；会影响生产者写入可用性 |
+| `max.message.bytes` | 最大消息批次大小，字节，正整数；需与客户端限制配合 |
+| `compression.type` | 压缩类型：`producer`、`gzip`、`snappy`、`lz4`、`zstd`、`uncompressed` |
+
+打开配置弹窗即向 Kafka 读取有效当前值。来源“Topic 覆盖值”表示显式的 Topic 级设置，“Broker 默认值”表示继承集群提供的默认配置；来源未知、值不可用及只读参数会明确标记，不用示例值补齐。点击“恢复默认”并保存会删除该键的 Topic 级覆盖（增量 `DELETE`），随后重新读取当时的 Broker 默认值，不把某个固定数字写作默认。普通保存仅增量修改已编辑项（`SET`），未修改参数保持原样。[Kafka 配置覆盖说明](https://github.com/apache/kafka/blob/trunk/docs/configuration/topic-configs.md)
+
+**缩短保留时间或降低保留空间，可能使已有数据在后续清理中被删除。** 恢复默认也可能降低当前有效保留值；修改前应核对业务保留要求、磁盘容量及集群默认策略。`compact` 不等同于按条数或时间精确保留。
+
+保存前会重读已编辑键并比较预期旧值，发现冲突时要求重新读取；Kafka 不提供本流程的原子比较写入，因此外部客户端仍可能在检查后并发修改。保存成功后再次读取；若显示“已提交但暂时无法确认当前值”，应重新读取确认，不能据此断言写入失败。创建和删除后列表可能受元数据传播影响稍有延迟，等待刷新确认实际结果。
+
+管理操作复用当前短租约会话，与快照采集互斥；会话失效或页面隐藏时管理入口禁用。关闭会话、删除集群或退出服务会等待已接受的管理工作及资源释放。
+
+### 最小 Kafka 权限与兼容性
+
+在已有监控所需 Topic / Group `Describe` 等权限基础上，按业务需要仅对允许管理的 Topic 名称或命名前缀增授下列 ACL。无需为 Topic 配置读取/修改授予集群级配置管理权限。
+
+| 操作 | Topic 资源所需 ACL |
+| --- | --- |
+| 创建 | `Create`；集群级 `Create` 也能授权，但范围更宽 |
+| 删除 | `Delete` |
+| 读取配置 | `DescribeConfigs` |
+| 修改/恢复默认 | `AlterConfigs`，以及本应用保存前后读取所需的 `DescribeConfigs` |
+
+仅监控的账户可以继续不授予上述写权限；没有权限的管理请求会返回安全错误。不要授予 `All` 或不必要的 `Write` / Offset 修改能力。Kafka 的 Topic `Delete` ACL 同时授权其 DeleteRecords API，本应用仍不提供该 API；须保护管理凭据，不能把应用功能边界当作 Kafka 权限隔离。[Kafka ACL 对照表](https://kafka.apache.org/39/security/authorization-and-acls/)
+
+配置更新依赖集群支持 `IncrementalAlterConfigs`，不会降级到整体替换配置。一次性验收环境使用 Apache Kafka 3.9.1；其他版本、兼容实现及托管服务可能限制删除、参数可写性、合法范围、副本数或管理 API。请依据目标服务的版本和策略核对权限，不能把单一版本验收视为全部服务兼容保证。
+
 ## 短租约与资源释放
 
 保存配置不会保持 Kafka 连接。进入仪表盘或配置规则时创建按需监控会话，租约为 15 秒，快照请求续租。同一会话同时只允许一个采集，重叠请求返回 409。后台每 5 秒清理过期会话；隐藏页面停止仪表盘轮询，页面离开、切换集群和删除集群会主动关闭对应会话，关闭请求未送达时由租约兜底。SIGINT / SIGTERM 会关闭全部会话并等待在途采集完成后退出。
@@ -103,7 +143,9 @@ npm --prefix frontend run test:e2e
 git diff --check
 ```
 
-E2E 一键脚本使用独立 Compose project 和动态本地端口，启动 Apache Kafka 3.9.1 KRaft；Rust fixture 只向本次临时容器创建 `dashboard-e2e-orders` 的两个分区、在分区 0 写入 10 条消息，并为 `dashboard-e2e-reader` 提交位置 4 / 0，预期 Lag 为 6 / 0。脚本自动使用临时 SQLite、后端和前端进程。Vite 直接绑定端口 0，脚本从子进程实际监听地址获取端口，并核验 PID 存活及本次运行标识，防止误用其他健康服务。正常结束、失败或收到 INT / TERM 均清理进程、容器、卷和临时文件。不要手动把 fixture 指向已有 Kafka；普通 `cargo test` 默认跳过需要 broker 的测试。
+E2E 一键脚本使用独立 Compose project 和动态本地端口，启动 Apache Kafka 3.9.1 KRaft；Rust fixture 只向本次临时容器创建 `dashboard-e2e-orders` 的两个分区、在分区 0 写入 10 条消息，并为 `dashboard-e2e-reader` 提交位置 4 / 0，预期 Lag 为 6 / 0。fixture 必须同时收到精确的 `127.0.0.1:<非零端口>` 和 `E2E_KAFKA_FIXTURE_PERMIT=disposable-compose`，由脚本设置；不要自行设置许可并指向已有 Kafka。真实管理验收使用随机唯一的 `dashboard-e2e-managed-*` Topic，覆盖创建、读取保留时间和来源、设置覆盖、重新打开回显、删除覆盖恢复默认、删除及列表消失。Rust 额外验证无关配置不变和断言失败时清理 guard 生效；清理只针对本次成功创建的管理 Topic，绝不删除 seed Topic。
+
+脚本自动使用临时 SQLite、后端和前端进程。Vite 直接绑定端口 0，脚本从子进程实际监听地址获取端口，并核验 PID 存活及本次运行标识，防止误用其他健康服务。正常结束、失败或收到 INT / TERM 均清理进程、容器、卷和临时文件。普通 `cargo test` 默认跳过需要 broker 的测试；单独强行运行 ignored fixture 而没有一次性环境时，安全前置检查失败是预期结果，不代表真实验收通过。此环境未启用 ACL，真实授权拒绝须在专用授权环境另验，普通 API 测试覆盖稳定权限错误映射。
 
 浏览器验收覆盖集群 CRUD、测试连接、真实水位/Lag、规则保存与自定义标记、刷新频率、切换和离开时释放会话；另验证 API / 运行日志不泄漏测试秘密、超大请求、历史淘汰和隐藏时无轮询。历史测试只加速响应中的采集时间，指标仍来自 Kafka；headless 环境通过浏览器 visibility 事件模拟隐藏。Rust 测试额外覆盖采集互斥、删除释放和 SIGTERM。Playwright 默认关闭 trace / screenshot，避免持久化请求中的敏感字段。
 
@@ -117,7 +159,7 @@ docker compose -f docker-compose.test.yml -p kafka-lens-manual down --volumes --
 
 ## 部署边界
 
-当前服务没有内置用户登录或权限系统。生产环境应置于受保护的内网或带身份验证的反向代理之后；使用 HTTPS，对 `/api` 配置代理和访问控制。发行包由后端直接提供静态资源和 SPA fallback。Vite preview 仅用于本地验收。后端默认只绑定回环地址；代理请求体限制应与 256 KiB 上限一致，超时需容纳 Kafka 采集。限制数据库、sidecar 和备份的文件权限，受控保存备份；建议启用磁盘加密。Kafka 使用最小只读权限账户，优先选择 SASL_SSL / SSL。
+当前服务没有内置用户登录或权限系统。能够访问管理 API 的调用者可以使用所配置 Kafka 凭据的管理权限，页面确认框不是身份认证。生产环境必须置于受保护的内网或带身份验证的 HTTPS 反向代理之后，对全部 `/api` 配置访问控制，不得直接暴露到公网。发行包由后端直接提供静态资源和 SPA fallback。Vite preview 仅用于本地验收。后端默认只绑定回环地址；代理请求体限制应与 256 KiB 上限一致，超时需容纳 Kafka 采集及管理操作。限制数据库、sidecar 和备份的文件权限，受控保存备份；建议启用磁盘加密。仅监控时使用最小只读权限；需要管理时按上表限定 Topic 范围和操作权限，优先选择 SASL_SSL / SSL。
 
 ## 双平台离线发行包
 

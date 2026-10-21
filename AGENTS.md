@@ -7,7 +7,7 @@
 - `backend/src/domain/`：Offset、Lag、配置和快照的领域类型与纯计算；未知值必须显式表达，不能降为 0。
 - `backend/src/api/`：Axum `/api` JSON 接口、校验与统一安全错误；`static_assets/` 负责生产静态资源。API 路径（包括未知 API）不得回退为 HTML，SPA fallback 只适用于允许的页面请求；保留静态文件路径、符号链接与目录能力的安全边界。
 - `backend/src/db/`、`backend/migrations/`：SQLite 配置仓储与迁移。只持久化集群配置、明文 Kafka 凭据及 Lag 规则，不存储指标历史。旧加密数据库由用户停服后手动删除并重新配置，不迁移、转换或自动删除。
-- `backend/src/kafka/`：只读 librdkafka 适配和有界采集。普通应用禁止生产消息、创建 Topic、提交或重置消费位置。
+- `backend/src/kafka/`：librdkafka 有界采集及受控 Topic Admin 适配。仅允许创建/删除 Topic、读取配置和增量修改 8 个白名单参数；继续禁止生产消息、调用删除消息 API、提交/重置 Offset、分区扩容及副本重分配。删除保护 `__` 内部 Topic，必须严格匹配完整确认名称。
 - `backend/src/sessions/`：按需客户端和 15 秒短租约。快照续租，同一会话采集互斥；5 秒清理过期会话。关闭、删除集群、取消任务及进程退出必须等待在途创建/采集/释放，不能把阻塞原生工作遗留到后台。
 - `frontend/src/api/`：唯一 HTTP 客户端、共享类型；`frontend/src/features/`：设置、概览、Topics、Consumer Groups、Lag 规则、会话及内存历史；`frontend/src/components/`：公共展示组件。
 - `backend/tests/`、前端 `*.test.ts(x)`：领域、仓储、API、进程、交互测试；`frontend/e2e/` 与 `scripts/`：一次性 Kafka + 浏览器验收；`tests/`：发行脚本回归。
@@ -27,13 +27,15 @@
 
 保存配置不保持 Kafka 连接。只有打开仪表盘或需要采样的规则页面才创建会话；页面隐藏停止轮询，离开页面、切换或删除集群主动释放，短租约兜底。历史仅在当前页面内存中保留一小时；刷新间隔仅 3/5/10 秒。
 
+Topic 管理必须绑定当前有效 session，复用其 AdminClient 并与快照共享互斥。关闭/取消/删除集群/退出须等待所有已接受的管理任务及原生析构。配置仅实时读取，不持久化副本，不用示例值替代当前值。白名单为 `retention.ms`、`retention.bytes`、`cleanup.policy`、`segment.ms`、`segment.bytes`、`min.insync.replicas`、`max.message.bytes`、`compression.type`；增量 SET 修改指定值，DELETE 删除 Topic 覆盖以恢复 Broker 默认，禁止 legacy 整体替换。保留来源、未知/只读状态、保存前冲突检查及已应用但未确认的 202 语义；Kafka 不提供本流程的原子比较写入。
+
 Low 是保留起点，High 是下一写入位置，非空分区最大消息 Offset 为 High - 1，范围估算为 High - Low，不能称为精确消息数。Lag 为 max(High - committed, 0)；未提交、未知、部分失败与陈旧数据必须保留区别。自定义规则按 Group + Topic 覆盖默认；持续超限计时仅累积连续可见有效采样，隐藏、断开、换会话或规则变化时重置。
 
 ## 安全与生成文件
 
 SQLite 含明文 Kafka 凭据，须限制数据库、sidecar 和备份的访问权限。API 只返回凭据配置标志，API/日志仍不得回显秘密。不要把原生 Kafka 错误、请求体、连接密码、PEM 或数据库内容写入日志、截图、测试附件或错误响应。保留 256 KiB 请求上限、Request ID 和脱敏错误。
 
-服务没有内置认证；默认只监听回环地址，部署需要内网或认证反向代理及 HTTPS。只使用明确授权的一次性 broker 运行写入 fixture；普通集群始终只读。
+服务没有内置认证；默认只监听回环地址，部署需要受控内网或带认证的 HTTPS 反向代理，对全部 API 施加访问控制。Kafka 管理权限按 Topic 范围最小授予；删除不可恢复，降低保留值或恢复默认可能导致已有数据清理。只使用明确授权的一次性 broker 运行写入 fixture；fixture 精确要求 `127.0.0.1:<非零端口>` 和 `E2E_KAFKA_FIXTURE_PERMIT=disposable-compose`，管理验收仅用随机唯一 Topic，清理 guard 只能删除本次成功创建资源，禁止删除 seed 或已有集群资源。
 
 禁止提交 `dist/`、`frontend/dist/`、`target/`、`node_modules/`、SQLite 文件及 sidecar、`.env`、私钥、真实证书、日志、PID 文件、启动器锁目录、Playwright 报告/trace。`packaging/.env.example` 只含占位符，可以提交。锁文件 `Cargo.lock`、`frontend/package-lock.json` 必须保留。生成产物从源码重建，不手改发布文件；`.superpowers/` 是本地工作记录，不属于交付源码。
 

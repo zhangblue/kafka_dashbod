@@ -67,7 +67,7 @@ free_port() {
 
 export KAFKA_TEST_PORT="$(free_port)"
 export E2E_KAFKA_BROKERS="127.0.0.1:$KAFKA_TEST_PORT"
-export E2E_KAFKA_WRITE_PERMIT=disposable-compose
+export E2E_KAFKA_FIXTURE_PERMIT=disposable-compose
 export E2E_RUN_ID="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
 export E2E_FIXTURE_SECRET="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
 export DATABASE_URL="sqlite://$run_dir/dashboard.db"
@@ -78,7 +78,7 @@ unset FORCE_COLOR
 
 printf '%s\n' 'Starting disposable Kafka fixture…'
 "${compose[@]}" up --wait --wait-timeout 180
-cargo test -p backend --test kafka_fixture seed_disposable_kafka -- --ignored --exact
+cargo test -p backend --test kafka_fixture -- --ignored
 cargo build -p backend --bin kafka-dashboard
 touch "$run_dir/.env"
 (

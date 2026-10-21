@@ -71,12 +71,65 @@ SQLite 以明文保存 Kafka 密码、证书、私钥及私钥口令。限制数
 账户及授权管理员读取；例如在复制配置后执行 chmod 600 .env。
 备份应存放在访问受控的位置，建议使用磁盘加密。不要将 data/、真实
 .env、凭据或私钥放入对外分发的发行包。API 和日志不得回显这些凭据。
-Kafka 账户只授予所需的元数据与消费组等只读权限。
+Kafka Lens 支持监控与受控 Topic 管理，不再是完全只读应用。仅监控时
+仍只授予必要的元数据与消费组读取权限；管理权限按下一节最小配置。
 服务没有内置认证；请部署在受保护内网或带身份验证的反向代理之后，
-使用 HTTPS，并为 /api 配置访问控制。Linux 发行包不携带宿主机 CA
+使用 HTTPS，并为全部 /api 配置访问控制，不得直接暴露公网。能访问
+管理 API 的调用者可以使用已配置 Kafka 凭据的权限，确认框不能代替
+身份认证。Linux 发行包不携带宿主机 CA
 信任库，私有 TLS 请在集群设置中显式配置 CA PEM。
 
-六、从旧加密数据库升级
+六、Topic 管理、权限与风险
+
+Topics 页面成功连接后提供四类操作：新建 Topic、删除 Topic、读取
+当前配置、修改或恢复配置。创建默认 1 分区，副本因子留空采用集群
+默认值，可选参数留空不发送覆盖。删除须输入大小写完全一致的完整
+名称，禁止删除 __ 开头的内部 Topic。删除不可恢复，会删除数据并
+影响相关生产者和消费者。
+
+仅允许八个配置参数：
+  retention.ms          保留时间（毫秒），-1 或非负整数
+  retention.bytes       每分区保留空间（字节），-1 或非负整数
+  cleanup.policy        delete、compact、delete,compact
+  segment.ms            日志段滚动时间（毫秒），正整数
+  segment.bytes         日志段大小（字节），正整数
+  min.insync.replicas    最小同步副本数，正整数
+  max.message.bytes     最大消息批次大小（字节），正整数
+  compression.type      producer、gzip、snappy、lz4、zstd、uncompressed
+保留参数 -1 表示不按相应维度限制；Kafka 仍可能施加更严格的范围。
+应用不生产消息、不调用删除消息 API，不提交/重置 Offset，不提供
+分区扩容或副本重分配。
+
+配置弹窗实时读取 Kafka 当前有效值。“Topic 覆盖值”表示 Topic 级
+显式设置，“Broker 默认值”表示继承集群默认；未知、不可用及只读
+状态明确标记。修改仅增量 SET 已编辑参数；“恢复默认”保存后通过
+增量 DELETE 删除该键覆盖，再读取当时的 Broker 默认值，并非写入
+某个固定数字。未修改参数保持原样，SQLite 不保存 Topic 配置副本。
+缩短保留时间、降低保留空间或恢复到更小的默认值，可能导致已有数据
+被后续清理删除；修改前核对业务要求。可靠性参数也可能影响写入。
+
+保存前比较旧值，冲突时须重新读取；该流程不是 Kafka 原子比较写入，
+仍可能与外部客户端竞争。保存后重读；显示“已提交但暂时无法确认
+当前值”时应重新读取确认，不应当作失败再次盲目提交。创建/删除的
+元数据传播可能延迟，请等待列表刷新确认。所有管理复用当前短租约
+会话并与采集互斥；服务关闭会等待在途操作及资源释放。
+
+在监控所需 Topic / Group Describe 等权限之外，只对允许管理的
+Topic 名称或命名前缀按需授予：
+  创建：Create（Topic 级；Cluster Create 也可授权但范围更宽）
+  删除：Delete
+  读取配置：DescribeConfigs
+  修改/恢复默认：AlterConfigs，以及前后读取所需的 DescribeConfigs
+无需集群级配置管理权限，也不要授予 All 或不必要的 Write 权限。
+Kafka Topic Delete ACL 同时授权 DeleteRecords；本应用不提供后者，
+仍须严格保护管理凭据。没有权限时返回安全错误，不能靠按钮隐藏隔离。
+ACL 参考：https://kafka.apache.org/39/security/authorization-and-acls/
+
+配置修改依赖 IncrementalAlterConfigs，不降级到整体替换。一次性
+验收环境为 Apache Kafka 3.9.1；其他版本、兼容实现和托管服务可能
+限制删除、参数范围/可写性、副本数或管理 API，使用前核对其策略。
+
+七、从旧加密数据库升级
 
 先停止服务，确认实际生效的 DATABASE_URL 所指向的旧数据库（模板为
 data/kafka-dashboard.db；外部环境变量可能覆盖此值）。手动删除该旧
@@ -84,7 +137,7 @@ data/kafka-dashboard.db；外部环境变量可能覆盖此值）。手动删除
 全部集群和 Lag 规则。删除会丢失旧配置；程序不会自动转换旧凭据，
 也不会自动删除数据库。备份旧数据库时同样须保护凭据及访问权限。
 
-七、故障排查
+八、故障排查
 
 无法加载配置：检查发行目录是否有可读、格式有效的 .env；检查外部
 环境变量是否覆盖了文件中的值。不要输出环境变量转储。
@@ -95,7 +148,7 @@ KAFKA_DASHBOARD_BIND 后重试。
 页面不可用：先检查 /api/health，再确认 KAFKA_DASHBOARD_WEB_DIR 指向
 含 index.html 的 web/，并检查发行文件校验和及反向代理配置。
 Kafka 连接失败：从服务所在机器检查 Bootstrap Servers 和全部
-advertised listeners 的 DNS、网络、防火墙及只读账户权限。
+advertised listeners 的 DNS、网络、防火墙及对应监控/管理权限。
 SASL/TLS 失败：核对协议、SASL mechanism 和证书信任链；双向 TLS 的
 客户端证书与私钥须成对配置，私有 CA 须显式填写。
 反馈问题时只提供安全错误、Request ID、版本和复现步骤。不要提交

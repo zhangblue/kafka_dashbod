@@ -22,7 +22,7 @@ function App() {
             <li><NavLink to="/settings"><i aria-hidden="true">⚙</i><span>集群设置</span></NavLink></li>
           </ul>
         </nav>
-        <div className="sidebar-footer">只读模式<br />数据仅在页面打开时采集</div>
+        <div className="sidebar-footer">监控与 Topic 管理<br />数据仅在页面打开时采集</div>
       </aside>
       <main className="app-main">
         <Routes>
