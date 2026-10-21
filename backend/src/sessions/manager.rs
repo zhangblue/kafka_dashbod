@@ -275,6 +275,7 @@ struct Sessions<C> {
 /// A completion record lives in the manager until its owned task has released resources.
 struct Operation {
     cluster_id: Option<String>,
+    session_id: Option<String>,
     closing_session_id: Option<String>,
     expired: bool,
     cancelled: Arc<AtomicBool>,
@@ -285,6 +286,7 @@ impl<C> Sessions<C> {
     fn register_operation(
         &mut self,
         cluster_id: Option<String>,
+        session_id: Option<String>,
         closing_session_id: Option<String>,
         expired: bool,
     ) -> (
@@ -300,6 +302,7 @@ impl<C> Sessions<C> {
             id.clone(),
             Operation {
                 cluster_id,
+                session_id,
                 closing_session_id,
                 expired,
                 cancelled: cancelled.clone(),
@@ -338,7 +341,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         if state.shutting_down {
             return Err(SessionError::ShuttingDown);
         }
-        let (operation_id, done, _, _) = state.register_operation(cluster_id, None, false);
+        let (operation_id, done, _, _) = state.register_operation(cluster_id, None, None, false);
         let shared = self.state.clone();
         let factory = self.factory.clone();
         let (reply, result) = oneshot::channel();
@@ -429,18 +432,44 @@ impl<F: SessionClientFactory> SessionManager<F> {
         + 'static,
     ) -> Result<T, TopicOperationError> {
         let session = self.get_and_renew(id).await?;
+        let mut state = self.state.lock().await;
+        // Close may have removed the session while registration waited for the state lock.
+        if state
+            .entries
+            .get(id)
+            .is_none_or(|entry| !Arc::ptr_eq(&entry.session, &session))
+        {
+            return Err(SessionError::Expired.into());
+        }
+        let (operation_id, done, _, _) = state.register_operation(
+            Some(session.cluster_id.clone()),
+            Some(id.to_owned()),
+            None,
+            false,
+        );
         let factory = self.factory.clone();
-        // Own the whole future, including native work and its final awaits, after HTTP cancellation.
-        tokio::spawn(async move {
+        // Registration and spawn are atomic to close, even before this task is scheduled.
+        let task = tokio::spawn(async move {
             let _operation = session.lock_operation().await?;
             let mut clients = session.clients.lock().await;
             let client = clients.as_mut().ok_or(SessionError::Expired)?;
             operation(&factory, client)
                 .await
                 .map_err(TopicOperationError::Admin)
-        })
-        .await
-        .map_err(|_| TopicAdminError::Unavailable)?
+        });
+        let shared = self.state.clone();
+        let (reply, result) = oneshot::channel();
+        // Joining includes task capture destruction; HTTP cancellation only drops its receiver.
+        tokio::spawn(async move {
+            let outcome = task
+                .await
+                .unwrap_or_else(|_| Err(TopicAdminError::Unavailable.into()));
+            shared.lock().await.operations.remove(&operation_id);
+            done.send_replace(true);
+            let _ = reply.send(outcome);
+        });
+        drop(state);
+        result.await.map_err(|_| TopicAdminError::Unavailable)?
     }
 
     pub fn new(lease: Duration, factory: F) -> Self {
@@ -508,7 +537,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
             return Err(SessionError::ShuttingDown);
         }
         let (operation_id, done, _, cancelled) =
-            state.register_operation(Some(cluster_id.clone()), None, false);
+            state.register_operation(Some(cluster_id.clone()), None, None, false);
         let (reply, result) = oneshot::channel();
         let shared = self.state.clone();
         let factory = self.factory.clone();
@@ -742,13 +771,22 @@ impl<F: SessionClientFactory> SessionManager<F> {
         expired: bool,
     ) -> watch::Receiver<bool> {
         entry.closed.store(true, Ordering::Release);
+        let operations: Vec<_> = state
+            .operations
+            .values()
+            .filter(|operation| operation.session_id.as_deref() == Some(&id))
+            .map(|operation| operation.completion.clone())
+            .collect();
         let (operation_id, done, completion, _) =
-            state.register_operation(Some(entry.cluster_id.clone()), Some(id), expired);
+            state.register_operation(Some(entry.cluster_id.clone()), None, Some(id), expired);
         let shared = shared.clone();
         // The operation stays tracked while waiting for a collector's client lock and
         // while native destruction runs. Request cancellation cannot abort this task.
         tokio::spawn(async move {
             entry.close().await;
+            for operation in operations {
+                Self::wait(operation).await;
+            }
             shared.lock().await.operations.remove(&operation_id);
             done.send_replace(true);
         });
@@ -1752,6 +1790,165 @@ mod tests {
                 operation.run(&manager, &id).await,
                 Err(TopicOperationError::Session(SessionError::Expired))
             ));
+        }
+    }
+
+    struct UnscheduledTopicFactory {
+        shared: Arc<UnscheduledTopicState>,
+        block_drop: bool,
+    }
+
+    struct UnscheduledTopicState {
+        track_next_clone: AtomicBool,
+        dropping: std::sync::mpsc::Sender<()>,
+        release_drop: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl Clone for UnscheduledTopicFactory {
+        fn clone(&self) -> Self {
+            Self {
+                shared: self.shared.clone(),
+                block_drop: self.shared.track_next_clone.swap(false, Ordering::SeqCst),
+            }
+        }
+    }
+
+    impl Drop for UnscheduledTopicFactory {
+        fn drop(&mut self) {
+            if self.block_drop {
+                let _ = self.shared.dropping.send(());
+                if let Some(release) = self.shared.release_drop.lock().unwrap().take() {
+                    let _ = release.recv();
+                }
+            }
+        }
+    }
+
+    impl SessionClientFactory for UnscheduledTopicFactory {
+        type Client = ();
+
+        async fn create(&self, _: DecryptedClusterConfig) -> Result<Self::Client, SessionError> {
+            Ok(())
+        }
+
+        async fn create_topic(
+            &self,
+            _: &mut Self::Client,
+            _: &CreateTopicInput,
+        ) -> Result<(), TopicAdminError> {
+            panic!("closed session must reject the task before entering the adapter");
+        }
+    }
+
+    // A lock cannot track a spawned task that has not yet run or joined its wait queue.
+    #[test]
+    fn close_waits_for_unscheduled_topic_task_and_its_factory_drop() {
+        for mode in 0..3 {
+            for cancel_caller in [false, true] {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let (dropping, drop_started) = std::sync::mpsc::channel();
+                let (release_drop, drop_release) = std::sync::mpsc::channel();
+                let shared = Arc::new(UnscheduledTopicState {
+                    track_next_clone: AtomicBool::new(false),
+                    dropping,
+                    release_drop: std::sync::Mutex::new(Some(drop_release)),
+                });
+                let (manager, id) = runtime.block_on(async {
+                    let manager = SessionManager::new(
+                        LEASE_DURATION,
+                        UnscheduledTopicFactory {
+                            shared: shared.clone(),
+                            block_drop: false,
+                        },
+                    );
+                    let id = manager
+                        .create("cluster-a", DecryptedClusterConfig::plaintext("kafka:9092"))
+                        .await
+                        .unwrap();
+                    (manager, id)
+                });
+
+                // Occupy both workers before polling HTTP on the calling thread. This
+                // guarantees the owned task cannot run until close has marked it closed.
+                let mut worker_releases = Vec::new();
+                let (blocked, worker_started) = std::sync::mpsc::channel();
+                for _ in 0..2 {
+                    let (release, wait) = std::sync::mpsc::channel();
+                    worker_releases.push(release);
+                    let blocked = blocked.clone();
+                    runtime.spawn(async move {
+                        let _ = blocked.send(());
+                        let _ = wait.recv();
+                    });
+                }
+                for _ in 0..2 {
+                    worker_started.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                shared.track_next_clone.store(true, Ordering::SeqCst);
+                let mut request = Some(Box::pin(manager.create_topic(
+                    &id,
+                    CreateTopicInput {
+                        name: "orders".into(),
+                        partitions: 1,
+                        replication_factor: None,
+                        configs: Default::default(),
+                    },
+                )));
+                runtime.block_on(async {
+                    assert!(
+                        poll_once(request.as_mut().unwrap().as_mut())
+                            .await
+                            .is_none()
+                    );
+                });
+                let mut closing = Box::pin(async {
+                    match mode {
+                        0 => manager.close(&id).await,
+                        1 => {
+                            manager.close_for_cluster("cluster-a").await;
+                            Ok(())
+                        }
+                        _ => {
+                            manager.close_all().await;
+                            Ok(())
+                        }
+                    }
+                });
+                runtime.block_on(async {
+                    assert!(poll_once(closing.as_mut()).await.is_none());
+                });
+                if cancel_caller {
+                    drop(request.take());
+                }
+                for release in worker_releases {
+                    release.send(()).unwrap();
+                }
+                drop_started.recv_timeout(Duration::from_secs(5)).unwrap();
+                let returned_early = runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_millis(200), closing.as_mut())
+                        .await
+                        .is_ok()
+                });
+                // Always release the blocked destructor before asserting or exiting.
+                release_drop.send(()).unwrap();
+                if !returned_early {
+                    runtime.block_on(closing).unwrap();
+                }
+                if let Some(request) = request {
+                    assert!(matches!(
+                        runtime.block_on(request),
+                        Err(TopicOperationError::Session(SessionError::Expired))
+                    ));
+                }
+                assert!(
+                    !returned_early,
+                    "close returned before owned task destruction: mode={mode} cancel={cancel_caller}"
+                );
+            }
         }
     }
 }
