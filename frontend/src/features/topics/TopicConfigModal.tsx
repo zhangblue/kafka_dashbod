@@ -86,6 +86,7 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
   const [saveError, setSaveError] = useState<unknown>(null)
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [notice, setNotice] = useState('')
+  const [refreshError, setRefreshError] = useState('')
   const request = useRef<AbortController | null>(null)
   const active = useRef(true)
   const submitting = useRef(false)
@@ -105,7 +106,7 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
     })
   }, [sessionId, topic])
   const prepareRead = () => {
-    setLoading(true); setConfigs(null); setDraft({}); setLoadError(null); setSaveError(null); setFieldErrors({})
+    setLoading(true); setConfigs(null); setDraft({}); setLoadError(null); setSaveError(null); setFieldErrors({}); setRefreshError('')
   }
   useEffect(() => {
     active.current = true
@@ -117,7 +118,7 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
     if (!saving && (!changed || window.confirm('有未保存的 Topic 配置修改，确定放弃吗？'))) onClose()
   }
   const edit = (entry: TopicConfigValue, value: string | null) => {
-    setSaveError(null); setFieldErrors({}); setNotice('')
+    setSaveError(null); setFieldErrors({}); setNotice(''); setRefreshError('')
     setDraft(previous => {
       const next = { ...previous }
       if (value === entry.value) delete next[entry.key]
@@ -136,7 +137,7 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
     if (Object.keys(errors).length) return
     const input: UpdateTopicConfigsInput = { changes: { ...draft }, expectedValues: {} }
     for (const key of Object.keys(draft)) input.expectedValues[key] = configs.find(item => item.key === key)!.value
-    submitting.current = true; setSaving(true); setSaveError(null); setNotice('')
+    submitting.current = true; setSaving(true); setSaveError(null); setNotice(''); setRefreshError('')
     try {
       let result
       try { result = await topicsApi.update(sessionId, topic, input) }
@@ -148,7 +149,7 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
       if (!active.current) return
       setNotice(unconfirmed ? '已提交但暂时无法确认当前值' : '配置已保存，当前值已从 Kafka 重新读取。')
       try { await onApplied(unconfirmed ? { status: 'appliedButUnconfirmed' } : undefined) }
-      catch { if (active.current) setNotice('配置已提交，列表刷新失败，请稍后手动刷新。') }
+      catch { if (active.current) setRefreshError('列表刷新失败，请稍后手动刷新。') }
     } finally {
       submitting.current = false
       if (active.current) setSaving(false)
@@ -163,6 +164,7 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
         <div className="topic-config-grid" aria-hidden="true">{Array.from({ length: 8 }, (_, index) => <div key={index} />)}</div></div>}
       <TopicAdminErrorNotice error={loadError ?? saveError} />
       {notice && <p className="topic-config-feedback" role="status">{notice}</p>}
+      {refreshError && <p role="alert">{refreshError}</p>}
       {!loading && (!configs || !!loadError || (saveError instanceof ApiError && saveError.code === 'TOPIC_CONFIG_CHANGED')) &&
         <button type="button" disabled={saving} onClick={() => {
           if (!changed || window.confirm('重新读取会放弃未保存的修改，确定继续吗？')) {

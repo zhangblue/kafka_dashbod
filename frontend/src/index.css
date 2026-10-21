@@ -156,6 +156,8 @@ button.empty-add:hover { border-color: var(--cyan); color: var(--cyan); }
 .modal-actions > div { display: flex; gap: 8px; }
 .config-modal.wide:has(.topic-admin-form) { width: min(1060px,95vw); max-height: 92vh; padding: 0; }
 .config-modal:has(.topic-admin-form) > .modal-heading { position: sticky; top: 0; z-index: 2; background: #111927; padding: 22px 24px 18px; margin: 0; border-bottom: 1px solid var(--line); }
+.config-modal:has(.topic-admin-form) > .modal-heading > div { min-width: 0; }
+.config-modal:has(.topic-admin-form) > .modal-heading p { overflow-wrap: anywhere; }
 .topic-admin-form { padding: 0 24px; }
 .topic-config-notice { margin: 18px 0 0; padding: 11px 14px; border: 1px solid #4d4225; background: #211c10; border-radius: 9px; color: #e7c87a; font-size: 12px; line-height: 1.55; }
 .topic-config-legend { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 16px 0 0; color: var(--muted); font-size: 11px; }

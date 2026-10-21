@@ -20,7 +20,8 @@ it('creates with one partition, cluster-default replicas and no unset configs wh
     return HttpResponse.json({ status: 'created' }, { status: 201 })
   }))
   const onApplied = vi.fn()
-  render(<CreateTopicModal sessionId="session-a" onClose={() => {}} onApplied={onApplied} />)
+  const onClose = vi.fn()
+  render(<CreateTopicModal sessionId="session-a" onClose={onClose} onApplied={onApplied} />)
   expect(screen.getByLabelText('分区数')).toHaveValue(1)
   expect(screen.getByLabelText('副本因子')).toHaveValue(null)
   expect(screen.getByLabelText('消息保留时间')).toHaveValue(null)
@@ -33,7 +34,35 @@ it('creates with one partition, cluster-default replicas and no unset configs wh
   expect(screen.getByRole('button', { name: '关闭弹窗' })).toBeDisabled()
   await user.click(screen.getByRole('button', { name: '创建中…' }))
   await waitFor(() => expect(onApplied).toHaveBeenCalledOnce())
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
   expect(requests).toEqual([{ name: 'orders.v2', partitions: 1, replicationFactor: null }])
+})
+
+// Catches treating a failed list refresh as a failed POST and reopening a duplicate creation path.
+it('keeps a successful creation locked and offers direct close when the list refresh rejects', async () => {
+  const user = userEvent.setup()
+  let creates = 0
+  server.use(http.post('/api/sessions/:id/topics', () => {
+    creates++
+    return HttpResponse.json({ status: 'created' }, { status: 201 })
+  }))
+  const onApplied = vi.fn(async () => { throw new Error('synthetic refresh failure') })
+  const onClose = vi.fn()
+  const confirm = vi.spyOn(window, 'confirm')
+  render(<CreateTopicModal sessionId="session-a" onClose={onClose} onApplied={onApplied} />)
+  await user.type(screen.getByLabelText('Topic 名称'), 'created-orders')
+  await user.click(screen.getByRole('button', { name: '创建 Topic' }))
+  expect(await screen.findByRole('status')).toHaveTextContent('Topic 已创建，但列表刷新失败。请关闭弹窗后手动刷新。')
+  expect(onApplied).toHaveBeenCalledWith({ status: 'created' })
+  const created = screen.getByRole('button', { name: 'Topic 已创建' })
+  expect(created).toBeDisabled()
+  expect(screen.getByLabelText('Topic 名称')).toBeDisabled()
+  await user.click(created)
+  expect(creates).toBe(1)
+  expect(onClose).not.toHaveBeenCalled()
+  await user.click(screen.getByRole('button', { name: '关闭' }))
+  expect(confirm).not.toHaveBeenCalled()
+  expect(onClose).toHaveBeenCalledOnce()
 })
 
 // Catches dropping optional values, missing front-end validation, or losing the draft on API errors.

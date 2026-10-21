@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { delay, http, HttpResponse } from 'msw'
@@ -5,10 +6,24 @@ import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 import type { UpdateTopicConfigsInput } from '../../api/types'
 import { server, topicConfigsFixture } from '../../test/handlers'
 import { TopicConfigModal } from './TopicConfigModal'
+import { readFileSync } from 'node:fs'
+
+const appStyles = readFileSync('src/index.css', 'utf8')
 
 beforeAll(() => server.listen())
 afterEach(() => { server.resetHandlers(); vi.restoreAllMocks() })
 afterAll(() => server.close())
+
+// Catches flex min-content sizing and unbroken topic names making the dialog scroll horizontally.
+// jsdom has no layout: verify the actual stylesheet's computed constraints, then check dimensions in a browser.
+it.each([80, 249])('keeps a legal %i-character Topic description wrappable inside a shrinkable heading', async length => {
+  const topic = 'a'.repeat(length)
+  render(<><style>{appStyles}</style><TopicConfigModal sessionId="session-a" topic={topic} onClose={() => {}} onApplied={() => {}} /></>)
+  await screen.findByLabelText('消息保留时间')
+  const description = screen.getByText(`${topic} · 修改后直接应用到 Kafka，无需重启 Broker`)
+  expect(getComputedStyle(description.parentElement!).minWidth).toBe('0px')
+  expect(getComputedStyle(description).overflowWrap).toBe('anywhere')
+})
 
 // Catches mock defaults, missing sources, and allowing writes to restricted or unavailable keys.
 it('loads current Kafka values immediately and preserves read-only and unavailable entries', async () => {
@@ -103,6 +118,22 @@ it.each(['accepted', 'read-failed'])('marks submitted values unconfirmed for %s 
   expect(screen.queryByLabelText('清理策略')).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: '重新读取' })).toBeEnabled()
   await waitFor(() => expect(onApplied).toHaveBeenCalledWith({ status: 'appliedButUnconfirmed' }))
+})
+
+// Catches losing the 202 uncertainty notice when refreshing the page also fails.
+it('preserves the unconfirmed status and reports a refresh rejection separately after a 202', async () => {
+  const user = userEvent.setup()
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', () =>
+    HttpResponse.json({ status: 'appliedButUnconfirmed' }, { status: 202 })))
+  const onApplied = vi.fn(async () => { throw new Error('synthetic refresh failure') })
+  render(<TopicConfigModal sessionId="session-a" topic="orders" onClose={() => {}} onApplied={onApplied} />)
+  await user.selectOptions(await screen.findByLabelText('清理策略'), 'compact')
+  await user.click(screen.getByRole('button', { name: '保存配置' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('列表刷新失败，请稍后手动刷新。')
+  expect(screen.getByRole('status')).toHaveTextContent('已提交但暂时无法确认当前值')
+  expect(screen.getByRole('button', { name: '保存配置' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '重新读取' })).toBeEnabled()
+  expect(onApplied).toHaveBeenCalledWith({ status: 'appliedButUnconfirmed' })
 })
 
 // Catches invalid updates, lost edits or silent closure after an API conflict.

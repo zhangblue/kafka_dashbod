@@ -22,6 +22,8 @@ function CreateTopicForm({ sessionId, onClose, onApplied }: CreateTopicModalProp
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [error, setError] = useState<unknown>(null)
   const [saving, setSaving] = useState(false)
+  const [created, setCreated] = useState(false)
+  const [refreshFailed, setRefreshFailed] = useState(false)
   const submitting = useRef(false)
   const active = useRef(true)
   useEffect(() => {
@@ -30,7 +32,7 @@ function CreateTopicForm({ sessionId, onClose, onApplied }: CreateTopicModalProp
   }, [])
   const dirty = name !== '' || partitions !== '1' || replicationFactor !== '' || Object.values(configs).some(Boolean)
   const close = () => {
-    if (!saving && (!dirty || window.confirm('有未保存的 Topic 创建内容，确定放弃吗？'))) onClose()
+    if (!saving && (created || !dirty || window.confirm('有未保存的 Topic 创建内容，确定放弃吗？'))) onClose()
   }
   const clearErrors = () => { setFieldErrors({}); setError(null) }
   const fieldError = (key: string) => fieldErrors[key] ?? (error instanceof ApiError
@@ -38,7 +40,7 @@ function CreateTopicForm({ sessionId, onClose, onApplied }: CreateTopicModalProp
   const attributes = (key: string) => ({ 'aria-invalid': !!fieldError(key),
     'aria-describedby': fieldError(key) ? `${id}-${key}-error` : undefined })
   const submit = async () => {
-    if (submitting.current) return
+    if (submitting.current || created) return
     const errors: Record<string, string> = {}
     if (!/^[a-zA-Z0-9._-]{1,249}$/.test(name) || name === '.' || name === '..') errors.name = '请输入 1–249 个字母、数字、点、下划线或短横线；名称不能是 . 或 ..。'
     if (!/^[0-9]+$/.test(partitions) || !Number.isSafeInteger(Number(partitions)) || Number(partitions) < 1 || Number(partitions) > 2147483647) errors.partitions = '分区数必须为有效的正整数。'
@@ -58,13 +60,15 @@ function CreateTopicForm({ sessionId, onClose, onApplied }: CreateTopicModalProp
       try { result = await topicsApi.create(sessionId, input) }
       catch (error) { if (active.current) setError(error); return }
       if (!active.current) return
-      await onApplied(result)
+      setCreated(true)
+      try { await onApplied(result) }
+      catch { if (active.current) setRefreshFailed(true); return }
       if (active.current) onClose()
     } finally { submitting.current = false; if (active.current) setSaving(false) }
   }
   return <Modal title="新建 Topic" description="创建会直接修改 Kafka 集群；未设置的可选配置使用集群默认值。" onClose={close} busy={saving} wide>
     <form className="topic-admin-form" noValidate onSubmit={event => { event.preventDefault(); void submit() }}>
-      <fieldset className="form-grid topic-basic-fields" disabled={saving}><legend>基础信息</legend>
+      <fieldset className="form-grid topic-basic-fields" disabled={saving || created}><legend>基础信息</legend>
         {([
           ['name', 'Topic 名称', name, setName, 'text'],
           ['partitions', '分区数', partitions, setPartitions, 'number'],
@@ -78,11 +82,12 @@ function CreateTopicForm({ sessionId, onClose, onApplied }: CreateTopicModalProp
       </fieldset>
       <h3 className="topic-optional-title">可选配置</h3><p className="form-note">以下参数均可选；留空表示使用 Kafka 集群默认值。</p>
       <div className="topic-config-grid">{topicConfigDefinitions.map(definition => <TopicConfigField key={definition.key}
-        definition={definition} value={configs[definition.key] ?? ''} disabled={saving} error={fieldError(definition.key)}
+        definition={definition} value={configs[definition.key] ?? ''} disabled={saving || created} error={fieldError(definition.key)}
         onChange={value => { clearErrors(); setConfigs(previous => ({ ...previous, [definition.key]: value })) }} />)}</div>
       <TopicAdminErrorNotice error={error} />
+      {refreshFailed && <p role="status">Topic 已创建，但列表刷新失败。请关闭弹窗后手动刷新。</p>}
       <div className="modal-actions topic-admin-actions"><small>创建前请确认分区数、副本因子与集群策略。</small><div>
-        <button type="button" disabled={saving} onClick={close}>取消</button><button type="submit" disabled={saving}>{saving ? '创建中…' : '创建 Topic'}</button>
+        <button type="button" disabled={saving} onClick={close}>{created ? '关闭' : '取消'}</button><button type="submit" disabled={saving || created}>{created ? 'Topic 已创建' : saving ? '创建中…' : '创建 Topic'}</button>
       </div></div>
     </form>
   </Modal>
