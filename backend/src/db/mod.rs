@@ -1,4 +1,5 @@
 pub mod clusters;
+pub mod feishu_alerts;
 pub mod lag_rules;
 
 use sqlx::{
