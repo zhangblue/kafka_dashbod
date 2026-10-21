@@ -551,6 +551,35 @@ async fn shutdown_waits_for_creation_then_drops_without_sampling() {
 
 // Long snapshots must never overlap or cause queued catch-up bursts; shutdown drains one.
 #[tokio::test(start_paused = true)]
+async fn slow_sampling_requires_three_valid_samples_even_after_duration() {
+    let mut fixture = Fixture::new(vec![
+        snapshot(&[5_100]),
+        snapshot(&[5_200]),
+        snapshot(&[5_300]),
+    ])
+    .await;
+    let gate = Arc::new(Semaphore::new(1));
+    fixture.factory.sample_gate = Some(gate.clone());
+    fixture.enable().await;
+    let handle = fixture.start();
+    until(|| fixture.samples() == 1).await;
+    settle().await;
+    fixture.tick().await;
+    until(|| fixture.samples() == 2).await;
+    tokio::time::advance(Duration::from_secs(20)).await;
+    gate.add_permits(1);
+    until(|| fixture.samples() == 3).await;
+    assert!(
+        fixture.messages().is_empty(),
+        "two valid samples must not notify"
+    );
+    gate.add_permits(1);
+    until(|| fixture.messages().len() == 1).await;
+    handle.shutdown().await;
+}
+
+// Long snapshots must never overlap or cause queued catch-up bursts; shutdown drains one.
+#[tokio::test(start_paused = true)]
 async fn slow_sampling_is_serial_skips_missed_ticks_and_drains_on_shutdown() {
     let mut fixture = Fixture::new(vec![]).await;
     let gate = Arc::new(Semaphore::new(0));

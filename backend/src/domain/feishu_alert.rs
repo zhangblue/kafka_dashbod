@@ -67,6 +67,7 @@ struct GrowthCandidate {
     started_at: Instant,
     last_lag: i64,
     has_grown: bool,
+    sample_count: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -101,22 +102,29 @@ impl AlertState {
             return AlertDecision::None;
         }
 
-        let candidate = self.candidate.get_or_insert(GrowthCandidate {
-            started_at: now,
-            last_lag: total_lag,
-            has_grown: false,
-        });
-        if total_lag < candidate.last_lag {
-            *candidate = GrowthCandidate {
-                started_at: now,
-                last_lag: total_lag,
-                has_grown: false,
-            };
-        } else {
-            candidate.has_grown |= total_lag > candidate.last_lag;
-            candidate.last_lag = total_lag;
+        match self.candidate.as_mut() {
+            Some(candidate) if total_lag >= candidate.last_lag => {
+                candidate.has_grown |= total_lag > candidate.last_lag;
+                candidate.last_lag = total_lag;
+                candidate.sample_count = candidate.sample_count.saturating_add(1);
+            }
+            _ => {
+                self.candidate = Some(GrowthCandidate {
+                    started_at: now,
+                    last_lag: total_lag,
+                    has_grown: false,
+                    sample_count: 1,
+                })
+            }
         }
-        if !candidate.has_grown || now.saturating_duration_since(candidate.started_at) < duration {
+        let candidate = self
+            .candidate
+            .as_ref()
+            .expect("valid Lag creates a candidate");
+        if candidate.sample_count < 3
+            || !candidate.has_grown
+            || now.saturating_duration_since(candidate.started_at) < duration
+        {
             return AlertDecision::None;
         }
 
@@ -191,6 +199,28 @@ mod tests {
             Step::Observe(10, Some(5_200), Quiet),
             Step::Observe(14, Some(5_300), Quiet),
             Step::Observe(15, Some(5_400), Send),
+        ]);
+    }
+
+    #[test]
+    fn widely_spaced_samples_still_require_three_valid_observations() {
+        use AlertDecision::{None as Quiet, Send};
+        check(&[
+            Step::Observe(0, Some(5_100), Quiet),
+            Step::Observe(20, Some(5_200), Quiet),
+            Step::Observe(25, Some(5_200), Send),
+        ]);
+    }
+
+    #[test]
+    fn decrease_resets_the_minimum_sample_count() {
+        use AlertDecision::{None as Quiet, Send};
+        check(&[
+            Step::Observe(0, Some(5_100), Quiet),
+            Step::Observe(5, Some(5_300), Quiet),
+            Step::Observe(9, Some(5_200), Quiet),
+            Step::Observe(29, Some(5_250), Quiet),
+            Step::Observe(34, Some(5_250), Send),
         ]);
     }
 
@@ -276,6 +306,7 @@ mod tests {
         for recovered_lag in [5_000, 4_999] {
             check(&[
                 Step::Observe(0, Some(5_100), Quiet),
+                Step::Observe(5, Some(5_150), Quiet),
                 Step::Observe(10, Some(5_200), Send),
                 Step::Attempt(11, true),
                 Step::Observe(20, Some(5_300), Quiet),
@@ -286,6 +317,7 @@ mod tests {
                 Step::Observe(51, Some(5_300), Quiet),
                 Step::Observe(52, Some(recovered_lag), Quiet),
                 Step::Observe(53, Some(5_100), Quiet),
+                Step::Observe(58, Some(5_150), Quiet),
                 Step::Observe(63, Some(5_200), Send),
             ]);
         }
@@ -296,6 +328,7 @@ mod tests {
         use AlertDecision::{None as Quiet, Send};
         check(&[
             Step::Observe(0, Some(5_100), Quiet),
+            Step::Observe(5, Some(5_150), Quiet),
             Step::Observe(10, Some(5_200), Send),
             Step::Attempt(12, false),
             Step::Observe(40, Some(5_300), Quiet),
@@ -312,6 +345,7 @@ mod tests {
         for recovered_lag in [5_000, 4_999] {
             check(&[
                 Step::Observe(0, Some(5_100), Quiet),
+                Step::Observe(5, Some(5_150), Quiet),
                 Step::Observe(10, Some(5_200), Send),
                 Step::Attempt(10, false),
                 Step::Observe(39, Some(5_300), Quiet),
@@ -328,6 +362,7 @@ mod tests {
                 Step::Observe(123, Some(5_300), Quiet),
                 Step::Observe(124, Some(recovered_lag), Quiet),
                 Step::Observe(125, Some(5_100), Quiet),
+                Step::Observe(130, Some(5_150), Quiet),
                 Step::Observe(135, Some(5_200), Send),
                 Step::Attempt(135, false),
                 Step::Observe(165, Some(5_300), Send),
@@ -341,6 +376,7 @@ mod tests {
         for interrupted_lag in [None, Some(5_050)] {
             check(&[
                 Step::Observe(0, Some(5_100), Quiet),
+                Step::Observe(5, Some(5_150), Quiet),
                 Step::Observe(10, Some(5_200), Send),
                 Step::Attempt(10, false),
                 Step::Observe(39, interrupted_lag, Quiet),
@@ -360,6 +396,7 @@ mod tests {
         use AlertDecision::{None as Quiet, Send};
         check(&[
             Step::Observe(0, Some(5_100), Quiet),
+            Step::Observe(5, Some(5_150), Quiet),
             Step::Observe(10, Some(5_200), Send),
             Step::Observe(20, Some(5_300), Quiet),
             Step::Observe(40, Some(5_400), Quiet),
@@ -374,10 +411,12 @@ mod tests {
         use AlertDecision::{None as Quiet, Send};
         check(&[
             Step::Observe(0, Some(5_100), Quiet),
+            Step::Observe(5, Some(5_150), Quiet),
             Step::Observe(10, Some(5_200), Send),
             Step::Attempt(10, false),
             Step::Observe(11, Some(5_000), Quiet),
             Step::Observe(12, Some(5_100), Quiet),
+            Step::Observe(17, Some(5_150), Quiet),
             Step::Observe(22, Some(5_200), Send),
         ]);
     }
