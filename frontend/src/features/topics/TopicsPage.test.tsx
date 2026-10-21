@@ -320,6 +320,26 @@ it('restores focus to the toolbar when the deleted Topic row disappears during r
   expect(screen.getByRole('button', { name: '新建 Topic' })).toHaveFocus()
 })
 
+// Catches later metadata propagation removing the restored trigger, and focus recovery stealing a user's new focus.
+it.each(['trigger', 'search', 'background'] as const)('recovers delayed deletion focus only while it remains on the trigger (%s)', async focus => {
+  const user = userEvent.setup()
+  server.use(http.delete('/api/sessions/:id/topics/:topic', () => new HttpResponse(null, { status: 204 })))
+  const view = show(snapshot, { refresh: async () => {} })
+  const trigger = screen.getByRole('button', { name: '删除 order-events' })
+  await user.click(trigger)
+  await user.type(screen.getByLabelText('确认 Topic 名称'), 'order-events')
+  await user.click(screen.getByRole('button', { name: '确认删除' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(trigger).toHaveFocus()
+  const search = screen.getByRole('searchbox', { name: '搜索 Topic' })
+  if (focus === 'search') await user.click(search)
+  if (focus === 'background') await user.click(screen.getByRole('heading', { name: 'Topics' }))
+  view.update({ snapshot: { ...snapshot, topics: [snapshot.topics[1]] } })
+  expect(trigger).not.toBeInTheDocument()
+  expect(focus === 'trigger' ? screen.getByRole('button', { name: '新建 Topic' })
+    : focus === 'search' ? search : document.body).toHaveFocus()
+})
+
 // Catches indefinitely promising that metadata propagation is still in progress.
 it('bounds the deletion propagation notice without reporting that a successful DELETE failed', async () => {
   const user = userEvent.setup()

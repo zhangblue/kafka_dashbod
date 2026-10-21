@@ -50,14 +50,18 @@ export function TopicsPage() {
   const [target, setTarget] = useState<ManagementTarget | null>(null)
   const [notice, setNotice] = useState<ManagementNotice | null>(null)
   const sessionId = monitor.sessionId
+  const snapshot = monitor.displaySnapshot ?? monitor.snapshot
   const createButton = useRef<HTMLButtonElement>(null)
   const previousTarget = useRef<ManagementTarget | null>(null)
+  const focusedDeleteTrigger = useRef<HTMLButtonElement | null>(null)
   if (target && target.sessionId !== sessionId) setTarget(null)
   if (notice && notice.clusterId !== cluster?.id) setNotice(null)
   useEffect(() => {
-    if (previousTarget.current && !target && document.activeElement === document.body) createButton.current?.focus()
+    const removedTrigger = focusedDeleteTrigger.current && !focusedDeleteTrigger.current.isConnected
+    if (((previousTarget.current && !target) || removedTrigger) && document.activeElement === document.body) createButton.current?.focus()
+    if (removedTrigger) focusedDeleteTrigger.current = null
     previousTarget.current = target
-  }, [target])
+  }, [target, snapshot])
   useEffect(() => {
     if (!notice?.waiting) return
     const timer = setTimeout(() => setNotice(previous => previous === notice
@@ -65,7 +69,6 @@ export function TopicsPage() {
     return () => clearTimeout(timer)
   }, [notice])
   const id = useId()
-  const snapshot = monitor.displaySnapshot ?? monitor.snapshot
   const topics = snapshot?.topics.filter(topic => topic.topic.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) ?? []
   const openManagement = (kind: ManagementTarget['kind'], topic?: string) => {
     if (!sessionId) return
@@ -108,7 +111,10 @@ export function TopicsPage() {
           <td>{staleAt ? <StaleNotice at={staleAt} /> : values.incomplete ? '不完整：部分分区采集失败，展开查看已知值' : '完整'}</td>
           <td className="topic-actions-column"><div className="topic-row-actions">
             <button type="button" aria-label={`配置 ${topic.topic}`} disabled={!sessionId} onClick={() => openManagement('config', topic.topic)}>配置</button>
-            {!topic.topic.startsWith('__') && <button type="button" className="danger-button" aria-label={`删除 ${topic.topic}`} disabled={!sessionId} onClick={() => openManagement('delete', topic.topic)}>删除</button>}
+            {!topic.topic.startsWith('__') && <button type="button" className="danger-button" aria-label={`删除 ${topic.topic}`} disabled={!sessionId}
+              onFocus={event => { if (notice?.deletedTopic === topic.topic) focusedDeleteTrigger.current = event.currentTarget }}
+              onBlur={event => { if (event.currentTarget.isConnected) focusedDeleteTrigger.current = null }}
+              onClick={() => openManagement('delete', topic.topic)}>删除</button>}
           </div></td></tr>
           {open && <tr className="detail-row"><td colSpan={7} id={detailsId}><PartitionTable topic={topic} staleResources={monitor.staleResources} /></td></tr>}
         </Fragment>
