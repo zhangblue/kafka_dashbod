@@ -22,6 +22,44 @@ use kafka_dashboard::{
 use tokio::sync::Semaphore;
 
 const PERIOD: Duration = Duration::from_secs(5);
+const TEST_ALERT_TOKEN: &str = "test-alert-token";
+const FAILURE_PROBE_TOKEN: &str = "monitor-diagnostic-probe-token";
+
+#[tokio::test]
+async fn monitor_token_assertion_failure_probe() {
+    if std::env::var_os("MONITOR_ASSERTION_FAILURE_PROBE").is_none() {
+        return;
+    }
+    let sender = FakeSender::default();
+    let _ = sender.send_text(FAILURE_PROBE_TOKEN, "probe").await;
+}
+
+// Run the real sender assertion in isolation, keeping all failed-test output private.
+#[test]
+fn monitor_sensitive_assertion_diagnostics_never_echo_tokens() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "monitor_token_assertion_failure_probe",
+            "--nocapture",
+        ])
+        .env("MONITOR_ASSERTION_FAILURE_PROBE", "1")
+        .output()
+        .expect("diagnostic probe should execute");
+    assert!(!output.status.success(), "diagnostic probe must fail");
+    let captured = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exposes_token = [TEST_ALERT_TOKEN, FAILURE_PROBE_TOKEN]
+        .iter()
+        .any(|token| captured.contains(token));
+    assert!(
+        !exposes_token,
+        "monitor assertion diagnostics must omit credentials"
+    );
+}
 
 #[derive(Default)]
 struct DropGate {
@@ -115,7 +153,12 @@ struct FakeSender {
 #[async_trait]
 impl AlertSender for FakeSender {
     async fn send_text(&self, token: &str, text: &str) -> Result<(), AlertSendError> {
-        assert_eq!(token, "test-alert-token");
+        let expected_token = TEST_ALERT_TOKEN;
+        let matches_expected = token == expected_token;
+        assert!(
+            matches_expected,
+            "monitor must pass the configured credential"
+        );
         self.messages.lock().unwrap().push(text.to_owned());
         if let Some(gate) = &self.gate {
             gate.acquire().await.unwrap().forget();
@@ -209,7 +252,7 @@ impl Fixture {
         self.settings
             .replace(
                 &self.cluster_id,
-                Some("test-alert-token"),
+                Some(TEST_ALERT_TOKEN),
                 false,
                 &[rule(true)],
             )
@@ -321,8 +364,10 @@ async fn monitor_sends_once_for_complete_total_lag_growth() {
     ] {
         assert!(text.contains(field), "missing {field}");
     }
-    assert!(!text.contains("test-alert-token"));
-    assert!(!text.contains("fixture.invalid"));
+    let contains_token = text.contains(TEST_ALERT_TOKEN);
+    assert!(!contains_token, "alert text must omit credentials");
+    let contains_server = text.contains("fixture.invalid");
+    assert!(!contains_server, "alert text must omit connection details");
     for _ in 0..4 {
         fixture.tick().await;
     }
@@ -388,7 +433,7 @@ async fn no_token_or_no_enabled_rules_never_creates_a_client() {
         .settings
         .replace(
             &fixture.cluster_id,
-            Some("test-alert-token"),
+            Some(TEST_ALERT_TOKEN),
             false,
             &[rule(false)],
         )
@@ -703,7 +748,7 @@ async fn replacement_rechecks_eligibility_after_blocked_drop() {
         }
         fixture
             .settings
-            .replace(&sentinel.id, Some("test-alert-token"), false, &[rule(true)])
+            .replace(&sentinel.id, Some(TEST_ALERT_TOKEN), false, &[rule(true)])
             .await
             .unwrap();
         drop_gate.release();
@@ -836,7 +881,7 @@ async fn all_rules_observe_the_same_sampling_time_despite_a_slow_send() {
         .settings
         .replace(
             &fixture.cluster_id,
-            Some("test-alert-token"),
+            Some(TEST_ALERT_TOKEN),
             false,
             &[rule(true), second_rule],
         )
