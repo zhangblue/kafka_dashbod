@@ -3,6 +3,7 @@ pub mod health;
 pub mod lag_rules;
 pub mod sessions;
 pub mod static_assets;
+pub mod topics;
 
 use std::path::PathBuf;
 
@@ -102,7 +103,16 @@ fn routes<F: SessionClientFactory>(web_root: Option<static_assets::StaticRoot>) 
         )
         .route("/api/clusters/{id}/sessions", post(sessions::create::<F>))
         .route("/api/sessions/{id}", delete(sessions::delete::<F>))
-        .route("/api/sessions/{id}/snapshot", get(sessions::snapshot::<F>));
+        .route("/api/sessions/{id}/snapshot", get(sessions::snapshot::<F>))
+        .route("/api/sessions/{id}/topics", post(topics::create::<F>))
+        .route(
+            "/api/sessions/{id}/topics/{topic}/configs",
+            get(topics::configs::<F>).put(topics::update::<F>),
+        )
+        .route(
+            "/api/sessions/{id}/topics/{topic}",
+            delete(topics::delete::<F>),
+        );
     let router = match web_root {
         Some(root) => router.fallback(move |request| static_assets::serve(root.clone(), request)),
         None => router.fallback(error::not_found),
