@@ -1,12 +1,18 @@
-import { act, render, screen, within } from '@testing-library/react'
+/// <reference types="node" />
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { http, HttpResponse } from 'msw'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 import type { ClusterSnapshot } from '../../api/types'
-import { clusterFixture, snapshotFixture } from '../../test/handlers'
+import { clusterFixture, server, snapshotFixture } from '../../test/handlers'
 import type { DashboardContext } from '../dashboard/useDashboard'
 import { TopicsPage } from './TopicsPage'
-afterEach(() => vi.useRealTimers())
+import { readFileSync } from 'node:fs'
+const appStyles = readFileSync('src/index.css', 'utf8')
+beforeAll(() => server.listen())
+afterEach(() => { vi.useRealTimers(); server.resetHandlers(); vi.restoreAllMocks() })
+afterAll(() => server.close())
 
 const snapshot: ClusterSnapshot = { ...snapshotFixture, topics: [
   { topic: 'order-events', low: 10, latestMessageOffset: 105101, retainedOffsetSpan: 105097, incomplete: false,
@@ -19,14 +25,19 @@ const snapshot: ClusterSnapshot = { ...snapshotFixture, topics: [
     partitions: [{ partition: 0, low: 0, high: 0, latestMessageOffset: null, retainedOffsetSpan: 0 }] },
 ] }
 
-function show(value: ClusterSnapshot | null = snapshot) {
+function show(value: ClusterSnapshot | null = snapshot, overrides: Partial<DashboardContext['monitor']> = {}) {
   const context: DashboardContext = { cluster: clusterFixture, monitor: {
     snapshot: value, history: [], status: 'connected', error: null, isFetching: false,
-    continuityKey: 'test', refresh: async () => {}, reconnect: () => {},
+    sessionId: 'session-a', continuityKey: 'test', refresh: async () => {}, reconnect: () => {}, ...overrides,
   } }
-  render(<MemoryRouter><Routes><Route element={<Outlet context={context} />}>
+  const content = () => <MemoryRouter><Routes><Route element={<Outlet context={context} />}>
     <Route index element={<TopicsPage />} />
-  </Route></Routes></MemoryRouter>)
+  </Route></Routes></MemoryRouter>
+  const view = render(content())
+  return { update: (monitor: Partial<DashboardContext['monitor']>) => {
+    Object.assign(context.monitor, monitor)
+    view.rerender(content())
+  } }
 }
 
 it('marks the whole Topics page stale after two refresh intervals', () => {
@@ -43,7 +54,7 @@ it('shows topic overview calculations and filters by topic name', async () => {
   const user = userEvent.setup()
   show()
   const row = screen.getByRole('row', { name: /order-events/ })
-  expect(within(row).getAllByRole('cell').slice(1).map(cell => cell.textContent)).toEqual([
+  expect(within(row).getAllByRole('cell').slice(1, 6).map(cell => cell.textContent)).toEqual([
     '3', '10', '105,101', '105,097', '完整',
   ])
   expect(screen.getByText(/仅供概览.*Partition.*为准/)).toBeInTheDocument()
@@ -88,6 +99,7 @@ it('marks partial data and shows unavailable offsets as dashes', async () => {
 it('explains fields on keyboard focus and supports hover, click and Escape', async () => {
   const user = userEvent.setup()
   show()
+  await user.tab()
   await user.tab()
   await user.tab()
   const firstHelp = screen.getByRole('button', { name: 'Partitions 字段说明' })
@@ -137,6 +149,7 @@ it('dismisses hover help with Escape while search keeps keyboard focus', async (
   expect(search).toHaveFocus()
   expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
   await user.tab()
+  await user.tab()
   expect(help).toHaveFocus()
   expect(help).toHaveAccessibleDescription(/分区数量/)
   await user.keyboard('{Escape}')
@@ -145,4 +158,218 @@ it('dismisses hover help with Escape while search keeps keyboard focus', async (
   expect(help).toHaveAccessibleDescription(/分区数量/)
   await user.keyboard('{Escape}')
   expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+})
+
+// Catches missing management entry points and accidentally exposing internal Topic deletion.
+it('opens the real management dialogs and protects internal Topics from deletion', async () => {
+  const user = userEvent.setup()
+  show({ ...snapshot, topics: [...snapshot.topics, { ...snapshot.topics[1], topic: '__consumer_offsets' }] })
+  const create = screen.getByRole('button', { name: '新建 Topic' })
+  await user.click(create)
+  expect(screen.getByRole('dialog', { name: '新建 Topic' })).toBeVisible()
+  await user.click(screen.getByRole('button', { name: '取消' }))
+  expect(create).toHaveFocus()
+  await user.click(screen.getByRole('button', { name: '配置 order-events' }))
+  expect(await screen.findByLabelText('消息保留时间')).toHaveValue(604800000)
+  await user.click(screen.getByRole('button', { name: '取消' }))
+  expect(screen.getByRole('button', { name: '配置 order-events' })).toHaveFocus()
+  await user.click(screen.getByRole('button', { name: '删除 order-events' }))
+  expect(screen.getByRole('dialog', { name: '删除 Topic' })).toBeVisible()
+  await user.click(screen.getByRole('button', { name: '取消' }))
+  expect(screen.getByRole('button', { name: '删除 order-events' })).toHaveFocus()
+  expect(screen.getByRole('button', { name: '配置 __consumer_offsets' })).toBeEnabled()
+  expect(screen.queryByRole('button', { name: '删除 __consumer_offsets' })).not.toBeInTheDocument()
+})
+
+// Catches a retained display snapshot being mistaken for an authorized live session.
+it.each(['connecting', 'paused', 'error'] as const)('disables management without a valid session while %s', status => {
+  show(snapshot, { sessionId: undefined, status })
+  expect(screen.getByRole('button', { name: '新建 Topic' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '配置 order-events' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '删除 order-events' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '展开 order-events' })).toBeEnabled()
+})
+
+// Catches routing successful writes around the shared refresh, or closing before it settles.
+it('awaits a fresh snapshot before closing successful creation', async () => {
+  const user = userEvent.setup()
+  let release!: () => void
+  const refresh = vi.fn(() => new Promise<void>(resolve => { release = resolve }))
+  show(snapshot, { refresh })
+  await user.click(screen.getByRole('button', { name: '新建 Topic' }))
+  await user.type(screen.getByLabelText('Topic 名称'), 'created-orders')
+  await user.click(screen.getByRole('button', { name: '创建 Topic' }))
+  await waitFor(() => expect(refresh).toHaveBeenCalledOnce())
+  expect(screen.getByRole('dialog', { name: '新建 Topic' })).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Topic 已创建' })).toBeDisabled()
+  await act(async () => release())
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('Topic 已创建')
+})
+
+// Catches falsely claiming a 202 is a confirmed save, especially when the list refresh rejects.
+it.each([false, true])('preserves the fixed unconfirmed notice after config 202 (refresh failure: %s)', async failRefresh => {
+  const user = userEvent.setup()
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', () =>
+    HttpResponse.json({ status: 'appliedButUnconfirmed' }, { status: 202 })))
+  const refresh = vi.fn(async () => { if (failRefresh) throw new Error('synthetic refresh failure') })
+  show(snapshot, { refresh })
+  await user.click(screen.getByRole('button', { name: '配置 order-events' }))
+  await user.selectOptions(await screen.findByLabelText('清理策略'), 'compact')
+  await user.click(screen.getByRole('button', { name: '保存配置' }))
+  await waitFor(() => expect(refresh).toHaveBeenCalledOnce())
+  if (failRefresh) expect(await screen.findByRole('alert')).toHaveTextContent('列表刷新失败')
+  await user.click(screen.getByRole('button', { name: '取消' }))
+  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('已提交但暂时无法确认当前值')
+  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).not.toHaveTextContent('配置已保存')
+})
+
+// Catches a failed list refresh re-enabling an already committed create request.
+it('keeps a created Topic locked after refresh failure and retains its page notice', async () => {
+  const user = userEvent.setup()
+  let creates = 0
+  server.use(http.post('/api/sessions/:id/topics', () => {
+    creates++
+    return HttpResponse.json({ status: 'created' }, { status: 201 })
+  }))
+  show(snapshot, { refresh: async () => { throw new Error('synthetic refresh failure') } })
+  await user.click(screen.getByRole('button', { name: '新建 Topic' }))
+  await user.type(screen.getByLabelText('Topic 名称'), 'created-orders')
+  await user.click(screen.getByRole('button', { name: '创建 Topic' }))
+  expect(await screen.findByText(/Topic 已创建，但列表刷新失败/)).toBeVisible()
+  await user.click(screen.getByRole('button', { name: 'Topic 已创建' }))
+  expect(creates).toBe(1)
+  await user.click(screen.getByRole('button', { name: '关闭' }))
+  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('Topic 已创建')
+})
+
+// Catches deleting without the typed confirmation, missing refresh and misleading metadata propagation results.
+it('refreshes after deletion and reports metadata propagation until the Topic disappears', async () => {
+  const user = userEvent.setup()
+  let received: unknown
+  server.use(http.delete('/api/sessions/session-a/topics/order-events', async ({ request }) => {
+    received = await request.json()
+    return new HttpResponse(null, { status: 204 })
+  }))
+  const refresh = vi.fn(async () => {})
+  const view = show(snapshot, { refresh })
+  await user.click(screen.getByRole('button', { name: '删除 order-events' }))
+  await user.type(screen.getByLabelText('确认 Topic 名称'), 'order-events')
+  await user.click(screen.getByRole('button', { name: '确认删除' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(received).toEqual({ confirmationName: 'order-events' })
+  expect(refresh).toHaveBeenCalledOnce()
+  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('删除请求已成功，正在等待集群状态更新')
+  view.update({ snapshot: { ...snapshot, topics: [snapshot.topics[1]] } })
+  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('Topic 已删除')
+})
+
+// Catches failed configuration writes being treated as successful page actions.
+it('retains the configuration dialog on failure without refreshing or reporting success', async () => {
+  const user = userEvent.setup()
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', () => HttpResponse.json({
+    code: 'TOPIC_AUTHORIZATION_FAILED', message: 'Forbidden',
+  }, { status: 403 })))
+  const refresh = vi.fn()
+  show(snapshot, { refresh })
+  await user.click(screen.getByRole('button', { name: '配置 order-events' }))
+  await user.selectOptions(await screen.findByLabelText('清理策略'), 'compact')
+  await user.click(screen.getByRole('button', { name: '保存配置' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Kafka 账户无权')
+  expect(screen.getByRole('dialog', { name: 'Topic 参数配置' })).toBeVisible()
+  expect(screen.getByLabelText('清理策略')).toHaveValue('compact')
+  expect(refresh).not.toHaveBeenCalled()
+  expect(screen.queryByRole('status', { name: 'Topic 操作结果' })).not.toBeInTheDocument()
+})
+
+// Catches restoring a stale editor after the session is hidden, replaced or expired.
+it('discards an open management target when the live session disappears', async () => {
+  const user = userEvent.setup()
+  const view = show()
+  await user.click(screen.getByRole('button', { name: '配置 order-events' }))
+  await screen.findByLabelText('清理策略')
+  view.update({ sessionId: undefined, status: 'paused' })
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  view.update({ sessionId: 'session-a', status: 'connected' })
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+})
+
+// Catches successful configuration writes not refreshing the shared monitor.
+it('refreshes the list after confirmed configuration changes', async () => {
+  const user = userEvent.setup()
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', () => HttpResponse.json({ configs: [] })))
+  const refresh = vi.fn(async () => {})
+  show(snapshot, { refresh })
+  await user.click(screen.getByRole('button', { name: '配置 order-events' }))
+  await user.selectOptions(await screen.findByLabelText('清理策略'), 'compact')
+  await user.click(screen.getByRole('button', { name: '保存配置' }))
+  await waitFor(() => expect(refresh).toHaveBeenCalledOnce())
+  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('配置已保存')
+  expect(screen.getByRole('dialog')).toBeVisible()
+})
+
+// Catches losing keyboard focus when a successful refresh removes the dialog's original trigger.
+it('restores focus to the toolbar when the deleted Topic row disappears during refresh', async () => {
+  const user = userEvent.setup()
+  server.use(http.delete('/api/sessions/:id/topics/:topic', () => new HttpResponse(null, { status: 204 })))
+  const view = show(snapshot, { refresh: async () => { view.update({ snapshot: { ...snapshot, topics: [snapshot.topics[1]] } }) } })
+  await user.click(screen.getByRole('button', { name: '删除 order-events' }))
+  await user.type(screen.getByLabelText('确认 Topic 名称'), 'order-events')
+  await user.click(screen.getByRole('button', { name: '确认删除' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(screen.getByRole('button', { name: '新建 Topic' })).toHaveFocus()
+})
+
+// Catches indefinitely promising that metadata propagation is still in progress.
+it('bounds the deletion propagation notice without reporting that a successful DELETE failed', async () => {
+  const user = userEvent.setup()
+  let release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  server.use(http.delete('/api/sessions/:id/topics/:topic', async () => {
+    await pending
+    return new HttpResponse(null, { status: 204 })
+  }))
+  show()
+  await user.click(screen.getByRole('button', { name: '删除 order-events' }))
+  await user.type(screen.getByLabelText('确认 Topic 名称'), 'order-events')
+  await user.click(screen.getByRole('button', { name: '确认删除' }))
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+  await act(async () => { release(); await vi.advanceTimersByTimeAsync(1) })
+  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('正在等待集群状态更新')
+  await act(async () => { await vi.advanceTimersByTimeAsync(30000) })
+  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('删除请求已成功，请稍后刷新确认集群状态')
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+
+// Catches later generic action styles overriding danger color.
+it('keeps destructive actions visually distinct', () => {
+  show()
+  render(<style>{appStyles}</style>)
+  const remove = screen.getByRole('button', { name: '删除 order-events' })
+  const configure = screen.getByRole('button', { name: '配置 order-events' })
+  expect(getComputedStyle(remove).color).not.toBe(getComputedStyle(configure).color)
+})
+
+// Catches the expand button wrapping onto a separate line at narrow table widths.
+it('keeps Topic names and their expansion on one table line', () => {
+  show()
+  render(<style>{appStyles}</style>)
+  const cell = within(screen.getByRole('row', { name: /order-events/ })).getAllByRole('cell')[0]
+  expect(getComputedStyle(cell).whiteSpace).toBe('nowrap')
+})
+
+// Catches a refresh failure invalidating the live session and erasing an already successful 202 notice.
+it('retains the submitted outcome when refreshing disconnects the monitor session', async () => {
+  const user = userEvent.setup()
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', () =>
+    HttpResponse.json({ status: 'appliedButUnconfirmed' }, { status: 202 })))
+  const view = show(snapshot, { refresh: async () => {
+    view.update({ sessionId: undefined, status: 'error' })
+    throw new Error('synthetic refresh failure')
+  } })
+  await user.click(screen.getByRole('button', { name: '配置 order-events' }))
+  await user.selectOptions(await screen.findByLabelText('清理策略'), 'compact')
+  await user.click(screen.getByRole('button', { name: '保存配置' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('已提交但暂时无法确认当前值')
 })

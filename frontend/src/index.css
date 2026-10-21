@@ -65,6 +65,8 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px soli
 button.primary, button[type="submit"] { border: 0; background: linear-gradient(135deg,#3578f6,#5468e7); color: #fff; font-weight: 600; padding: 10px 14px; }
 button.icon-button { padding: 6px 11px; font-size: 18px; }
 button.danger-button { color: #ff8fa0; }
+button[type="submit"].danger-button { background: #9f2944; color: #fff; }
+button[type="submit"].danger-button:hover:not(:disabled) { background: #b6324f; }
 .filter-tabs { display: flex; gap: 4px; background: #0c1320; border: 1px solid var(--line); padding: 4px; border-radius: 9px; }
 .filter-tabs button { border: 0; background: transparent; padding: 6px 10px; color: var(--muted); white-space: nowrap; }
 .filter-tabs button[aria-pressed="true"] { background: #22304a; color: #fff; }
@@ -104,6 +106,15 @@ button.expand-button { border: 0; background: transparent; color: #6e8bad; paddi
 .detail-row > td { background: #0c1320; padding: 0 16px 14px 36px; }
 .detail-row table { background: #111a29; border-radius: 8px; overflow: hidden; }
 .detail-row th, .detail-row td { padding: 9px 12px; font-size: 12px; }
+.topic-actions-column { width: 1%; white-space: nowrap; }
+.topic-row-actions { display: flex; gap: 6px; }
+.topic-row-actions button { background: transparent; border-color: transparent; padding: 5px 8px; color: var(--muted); }
+.topic-row-actions .danger-button { color: #ff8fa0; }
+.topic-name-cell { white-space: nowrap; }
+.topic-management-notice { margin: 0 0 12px; padding: 10px 14px; border: 1px solid #29435a; background: #0d1d2b; border-radius: 9px; }
+.topic-delete-form > label { width: 100%; margin: 0 0 8px; }
+.topic-delete-warning { padding: 11px 14px; border: 1px solid #5a2c3b; background: #26131d; border-radius: 9px; color: #ffafbc; font-size: 12px; }
+.topic-delete-name { overflow-wrap: anywhere; color: var(--text); }
 .offset-note { margin: 0 0 12px; padding: 11px 14px; border: 1px solid #29435a; background: #0d1d2b; border-radius: 9px; color: #a9bed3; font-size: 12px; line-height: 1.6; }
 .offset-note b { color: #7dd3fc; }
 .rules-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
