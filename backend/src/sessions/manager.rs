@@ -18,11 +18,18 @@ use tokio::{
 };
 
 use crate::{
-    domain::cluster::DecryptedClusterConfig,
+    domain::{
+        cluster::DecryptedClusterConfig,
+        topic_admin::{
+            CreateTopicInput, TopicAdminError, TopicConfigUpdateOutcome, TopicConfigValue,
+            UpdateTopicConfigsInput,
+        },
+    },
     kafka::{
         client::{ConnectionError, ConnectionTestResult},
         config::build_client_properties,
         group_consumers::GroupConsumerCache,
+        topic_admin::TopicAdminClient,
     },
 };
 
@@ -38,6 +45,14 @@ pub enum SessionError {
     ShuttingDown,
     #[error(transparent)]
     Connection(#[from] ConnectionError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TopicOperationError {
+    #[error(transparent)]
+    Session(#[from] SessionError),
+    #[error(transparent)]
+    Admin(#[from] TopicAdminError),
 }
 
 pub trait SessionClientFactory: Clone + Send + Sync + 'static {
@@ -65,6 +80,39 @@ pub trait SessionClientFactory: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<crate::domain::snapshot::ClusterSnapshot, SessionError>> + Send
     {
         async { Err(SessionError::Connection(ConnectionError::InvalidConfig)) }
+    }
+
+    fn create_topic(
+        &self,
+        _client: &mut Self::Client,
+        _input: &CreateTopicInput,
+    ) -> impl Future<Output = Result<(), TopicAdminError>> + Send {
+        async { Err(TopicAdminError::Unavailable) }
+    }
+
+    fn delete_topic(
+        &self,
+        _client: &mut Self::Client,
+        _topic: &str,
+    ) -> impl Future<Output = Result<(), TopicAdminError>> + Send {
+        async { Err(TopicAdminError::Unavailable) }
+    }
+
+    fn describe_topic_configs(
+        &self,
+        _client: &mut Self::Client,
+        _topic: &str,
+    ) -> impl Future<Output = Result<Vec<TopicConfigValue>, TopicAdminError>> + Send {
+        async { Err(TopicAdminError::Unavailable) }
+    }
+
+    fn update_topic_configs(
+        &self,
+        _client: &mut Self::Client,
+        _topic: &str,
+        _input: &UpdateTopicConfigsInput,
+    ) -> impl Future<Output = Result<TopicConfigUpdateOutcome, TopicAdminError>> + Send {
+        async { Err(TopicAdminError::Unavailable) }
     }
 }
 
@@ -124,11 +172,52 @@ impl SessionClientFactory for KafkaSessionClientFactory {
         probe.finish().await;
         Ok(snapshot)
     }
+
+    async fn create_topic(
+        &self,
+        client: &mut Self::Client,
+        input: &CreateTopicInput,
+    ) -> Result<(), TopicAdminError> {
+        TopicAdminClient::new(client.admin.clone(), client.config.connection_timeout)
+            .create(input)
+            .await
+    }
+
+    async fn delete_topic(
+        &self,
+        client: &mut Self::Client,
+        topic: &str,
+    ) -> Result<(), TopicAdminError> {
+        TopicAdminClient::new(client.admin.clone(), client.config.connection_timeout)
+            .delete(topic)
+            .await
+    }
+
+    async fn describe_topic_configs(
+        &self,
+        client: &mut Self::Client,
+        topic: &str,
+    ) -> Result<Vec<TopicConfigValue>, TopicAdminError> {
+        TopicAdminClient::new(client.admin.clone(), client.config.connection_timeout)
+            .describe(topic)
+            .await
+    }
+
+    async fn update_topic_configs(
+        &self,
+        client: &mut Self::Client,
+        topic: &str,
+        input: &UpdateTopicConfigsInput,
+    ) -> Result<TopicConfigUpdateOutcome, TopicAdminError> {
+        TopicAdminClient::new(client.admin.clone(), client.config.connection_timeout)
+            .update(topic, input)
+            .await
+    }
 }
 
 pub struct SessionEntry<C> {
     pub cluster_id: String,
-    /// Held throughout collection; closing takes the resource even if an Arc handle survives.
+    /// Held throughout collection and administration; close takes even surviving Arc handles.
     pub clients: Mutex<Option<C>>,
     collection_lock: Mutex<()>,
     closed: AtomicBool,
@@ -149,8 +238,21 @@ impl<C: Send + 'static> SessionEntry<C> {
         Ok(guard)
     }
 
+    async fn lock_operation(&self) -> Result<MutexGuard<'_, ()>, SessionError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SessionError::Expired);
+        }
+        let guard = self.collection_lock.lock().await;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SessionError::Expired);
+        }
+        Ok(guard)
+    }
+
     async fn close(&self) {
         self.closed.store(true, Ordering::Release);
+        // Match the collection/admin lock order and drain queued operations first.
+        let _operation = self.collection_lock.lock().await;
         let clients = self.clients.lock().await.take();
         // Native client destruction can block while its poll threads terminate.
         if let Some(clients) = clients {
@@ -269,6 +371,76 @@ impl<F: SessionClientFactory> SessionManager<F> {
         })
         .await
         .map_err(|_| SessionError::Connection(ConnectionError::Timeout))?
+    }
+
+    pub async fn create_topic(
+        &self,
+        id: &str,
+        input: CreateTopicInput,
+    ) -> Result<(), TopicOperationError> {
+        self.topic_operation(id, move |factory, client| {
+            Box::pin(async move { factory.create_topic(client, &input).await })
+        })
+        .await
+    }
+
+    pub async fn delete_topic(&self, id: &str, topic: &str) -> Result<(), TopicOperationError> {
+        let topic = topic.to_owned();
+        self.topic_operation(id, move |factory, client| {
+            Box::pin(async move { factory.delete_topic(client, &topic).await })
+        })
+        .await
+    }
+
+    pub async fn describe_topic_configs(
+        &self,
+        id: &str,
+        topic: &str,
+    ) -> Result<Vec<TopicConfigValue>, TopicOperationError> {
+        let topic = topic.to_owned();
+        self.topic_operation(id, move |factory, client| {
+            Box::pin(async move { factory.describe_topic_configs(client, &topic).await })
+        })
+        .await
+    }
+
+    pub async fn update_topic_configs(
+        &self,
+        id: &str,
+        topic: &str,
+        input: UpdateTopicConfigsInput,
+    ) -> Result<TopicConfigUpdateOutcome, TopicOperationError> {
+        let topic = topic.to_owned();
+        self.topic_operation(id, move |factory, client| {
+            Box::pin(async move { factory.update_topic_configs(client, &topic, &input).await })
+        })
+        .await
+    }
+
+    async fn topic_operation<T: Send + 'static>(
+        &self,
+        id: &str,
+        operation: impl for<'a> FnOnce(
+            &'a F,
+            &'a mut F::Client,
+        )
+            -> futures::future::BoxFuture<'a, Result<T, TopicAdminError>>
+        + Send
+        + 'static,
+    ) -> Result<T, TopicOperationError> {
+        let session = self.get_and_renew(id).await?;
+        let factory = self.factory.clone();
+        // Own the whole future, including native work and its final awaits, after HTTP cancellation.
+        tokio::spawn(async move {
+            let _operation = session.lock_operation().await?;
+            let mut clients = session.clients.lock().await;
+            let client = clients.as_mut().ok_or(SessionError::Expired)?;
+            operation(&factory, client)
+                .await
+                .map_err(TopicOperationError::Admin)
+        })
+        .await
+        .map_err(|_| TopicAdminError::Unavailable)?
     }
 
     pub fn new(lease: Duration, factory: F) -> Self {
@@ -591,6 +763,13 @@ impl<F: SessionClientFactory> SessionManager<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{
+        snapshot::ClusterSnapshot,
+        topic_admin::{
+            CreateTopicInput, TopicAdminError, TopicConfigSource, TopicConfigUpdateOutcome,
+            TopicConfigValue, UpdateTopicConfigsInput,
+        },
+    };
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1188,5 +1367,391 @@ mod tests {
             "unrelated renewal waited on another session's cleanup"
         );
         assert!(renewal.unwrap().is_ok());
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum TopicOperation {
+        Create,
+        Delete,
+        Describe,
+        Update,
+    }
+
+    const TOPIC_OPERATIONS: [TopicOperation; 4] = [
+        TopicOperation::Create,
+        TopicOperation::Delete,
+        TopicOperation::Describe,
+        TopicOperation::Update,
+    ];
+
+    impl TopicOperation {
+        async fn run(
+            self,
+            manager: &SessionManager<BlockingTopicFactory>,
+            id: &str,
+        ) -> Result<(), TopicOperationError> {
+            match self {
+                Self::Create => {
+                    manager
+                        .create_topic(
+                            id,
+                            CreateTopicInput {
+                                name: "orders".into(),
+                                partitions: 2,
+                                replication_factor: Some(1),
+                                configs: [("retention.ms".into(), "60000".into())].into(),
+                            },
+                        )
+                        .await
+                }
+                Self::Delete => manager.delete_topic(id, "orders").await,
+                Self::Describe => {
+                    manager
+                        .describe_topic_configs(id, "orders")
+                        .await
+                        .map(|values| {
+                            assert_eq!(
+                                values,
+                                vec![TopicConfigValue {
+                                    key: "retention.ms".into(),
+                                    value: Some("60000".into()),
+                                    source: TopicConfigSource::TopicOverride,
+                                    read_only: false,
+                                }]
+                            );
+                        })
+                }
+                Self::Update => manager
+                    .update_topic_configs(
+                        id,
+                        "orders",
+                        UpdateTopicConfigsInput {
+                            changes: [("retention.ms".into(), Some("60000".into()))].into(),
+                            expected_values: [("retention.ms".into(), None)].into(),
+                        },
+                    )
+                    .await
+                    .map(|outcome| {
+                        assert_eq!(outcome, TopicConfigUpdateOutcome::AppliedButUnconfirmed);
+                    }),
+            }
+        }
+    }
+
+    fn topic_config() -> TopicConfigValue {
+        TopicConfigValue {
+            key: "retention.ms".into(),
+            value: Some("60000".into()),
+            source: TopicConfigSource::TopicOverride,
+            read_only: false,
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct BlockingTopicFactory {
+        snapshot_started: Arc<tokio::sync::Notify>,
+        release_snapshot: Arc<tokio::sync::Notify>,
+        block_snapshot: Arc<AtomicBool>,
+        started: Arc<tokio::sync::Notify>,
+        proceed: Arc<tokio::sync::Notify>,
+        finishing: Arc<tokio::sync::Notify>,
+        finish: Arc<tokio::sync::Notify>,
+        block_finish: bool,
+        dropping: Arc<tokio::sync::Notify>,
+        release_drop: Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
+        drops: Arc<AtomicUsize>,
+        error: Option<TopicAdminError>,
+    }
+
+    struct BlockingTopicClient(BlockingTopicFactory);
+
+    impl Drop for BlockingTopicClient {
+        fn drop(&mut self) {
+            self.0.dropping.notify_one();
+            if let Some(release) = self.0.release_drop.lock().unwrap().take() {
+                let _ = release.recv();
+            }
+            self.0.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl BlockingTopicFactory {
+        async fn operation(&self) -> Result<(), TopicAdminError> {
+            self.started.notify_one();
+            self.proceed.notified().await;
+            if self.block_finish {
+                self.finishing.notify_one();
+                self.finish.notified().await;
+            }
+            self.error.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    impl SessionClientFactory for BlockingTopicFactory {
+        type Client = BlockingTopicClient;
+
+        async fn create(&self, _: DecryptedClusterConfig) -> Result<Self::Client, SessionError> {
+            Ok(BlockingTopicClient(self.clone()))
+        }
+
+        async fn snapshot(
+            &self,
+            _: &mut Self::Client,
+            cluster_id: &str,
+        ) -> Result<ClusterSnapshot, SessionError> {
+            if self.block_snapshot.swap(false, Ordering::SeqCst) {
+                self.snapshot_started.notify_one();
+                self.release_snapshot.notified().await;
+            }
+            Ok(ClusterSnapshot {
+                cluster_id: cluster_id.into(),
+                collected_at: "2026-10-21T00:00:00Z".into(),
+                topics: vec![],
+                consumer_group_ids: vec![],
+                consumer_groups: vec![],
+                partial_failures: vec![],
+            })
+        }
+
+        async fn create_topic(
+            &self,
+            _: &mut Self::Client,
+            input: &CreateTopicInput,
+        ) -> Result<(), TopicAdminError> {
+            assert_eq!(input.name, "orders");
+            assert_eq!(input.partitions, 2);
+            assert_eq!(input.replication_factor, Some(1));
+            assert_eq!(input.configs.get("retention.ms").unwrap(), "60000");
+            self.operation().await
+        }
+
+        async fn delete_topic(
+            &self,
+            _: &mut Self::Client,
+            topic: &str,
+        ) -> Result<(), TopicAdminError> {
+            assert_eq!(topic, "orders");
+            self.operation().await
+        }
+
+        async fn describe_topic_configs(
+            &self,
+            _: &mut Self::Client,
+            topic: &str,
+        ) -> Result<Vec<TopicConfigValue>, TopicAdminError> {
+            assert_eq!(topic, "orders");
+            self.operation().await?;
+            Ok(vec![topic_config()])
+        }
+
+        async fn update_topic_configs(
+            &self,
+            _: &mut Self::Client,
+            topic: &str,
+            input: &UpdateTopicConfigsInput,
+        ) -> Result<TopicConfigUpdateOutcome, TopicAdminError> {
+            assert_eq!(topic, "orders");
+            assert_eq!(input.changes["retention.ms"], Some("60000".into()));
+            assert_eq!(input.expected_values["retention.ms"], None);
+            self.operation().await?;
+            Ok(TopicConfigUpdateOutcome::AppliedButUnconfirmed)
+        }
+    }
+
+    async fn topic_manager(
+        factory: BlockingTopicFactory,
+    ) -> (SessionManager<BlockingTopicFactory>, String) {
+        let manager = SessionManager::new(LEASE_DURATION, factory);
+        let id = manager
+            .create("cluster-a", DecryptedClusterConfig::plaintext("kafka:9092"))
+            .await
+            .unwrap();
+        (manager, id)
+    }
+
+    async fn wait_for_topic_signal(signal: &tokio::sync::Notify) {
+        tokio::time::timeout(Duration::from_secs(5), signal.notified())
+            .await
+            .expect("session operation did not reach the expected lifecycle phase");
+    }
+
+    // A separate admin mutex would let writes overlap collection or make snapshots wait.
+    #[tokio::test]
+    async fn topic_operations_wait_for_snapshot_and_reject_overlapping_snapshots() {
+        for operation in TOPIC_OPERATIONS {
+            let factory = BlockingTopicFactory::default();
+            factory.block_snapshot.store(true, Ordering::SeqCst);
+            let (manager, id) = topic_manager(factory.clone()).await;
+            let snapshot = tokio::spawn({
+                let manager = manager.clone();
+                let id = id.clone();
+                async move { manager.snapshot(&id).await }
+            });
+            wait_for_topic_signal(&factory.snapshot_started).await;
+            let mut request = Box::pin(operation.run(&manager, &id));
+            assert!(poll_once(request.as_mut()).await.is_none());
+            tokio::task::yield_now().await;
+            let mut started = Box::pin(factory.started.notified());
+            assert!(poll_once(started.as_mut()).await.is_none());
+            factory.release_snapshot.notify_one();
+            snapshot.await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), started)
+                .await
+                .expect("queued operation never started after snapshot completion");
+            assert!(matches!(
+                manager.snapshot(&id).await,
+                Err(SessionError::CollectionInProgress)
+            ));
+            let other = manager
+                .create("cluster-b", DecryptedClusterConfig::plaintext("kafka:9092"))
+                .await
+                .unwrap();
+            assert_eq!(
+                manager.snapshot(&other).await.unwrap().cluster_id,
+                "cluster-b"
+            );
+            factory.proceed.notify_one();
+            request.await.unwrap();
+            assert!(manager.snapshot(&id).await.is_ok());
+            manager.close_all().await;
+        }
+    }
+
+    // Returning CollectionInProgress for writes would discard an authorized queued operation.
+    #[tokio::test]
+    async fn topic_operations_wait_for_another_topic_operation() {
+        for operation in TOPIC_OPERATIONS {
+            let factory = BlockingTopicFactory::default();
+            let (manager, id) = topic_manager(factory.clone()).await;
+            let mut first = Box::pin(TopicOperation::Create.run(&manager, &id));
+            assert!(poll_once(first.as_mut()).await.is_none());
+            wait_for_topic_signal(&factory.started).await;
+            let mut second = Box::pin(operation.run(&manager, &id));
+            assert!(poll_once(second.as_mut()).await.is_none());
+            tokio::task::yield_now().await;
+            let mut second_started = Box::pin(factory.started.notified());
+            assert!(poll_once(second_started.as_mut()).await.is_none());
+            factory.proceed.notify_one();
+            first.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), second_started)
+                .await
+                .expect("queued operation never started after administration completed");
+            assert!(matches!(
+                manager.snapshot(&id).await,
+                Err(SessionError::CollectionInProgress)
+            ));
+            factory.proceed.notify_one();
+            second.await.unwrap();
+            manager.close_all().await;
+        }
+    }
+
+    // Dropping HTTP must not drop the admin future or unlock clients before its final await.
+    #[tokio::test]
+    async fn cancelled_topic_operations_remain_owned_until_close_and_destructor_finish() {
+        for operation in TOPIC_OPERATIONS {
+            for mode in 0..3 {
+                let (release_drop, drop_rx) = std::sync::mpsc::channel();
+                let factory = BlockingTopicFactory {
+                    block_finish: true,
+                    release_drop: Arc::new(std::sync::Mutex::new(Some(drop_rx))),
+                    ..BlockingTopicFactory::default()
+                };
+                let (manager, id) = topic_manager(factory.clone()).await;
+                let request = tokio::spawn({
+                    let manager = manager.clone();
+                    let id = id.clone();
+                    async move { operation.run(&manager, &id).await }
+                });
+                wait_for_topic_signal(&factory.started).await;
+                request.abort();
+                assert!(request.await.unwrap_err().is_cancelled());
+                let mut closing = Box::pin(async {
+                    match mode {
+                        0 => manager.close(&id).await.unwrap(),
+                        1 => manager.close_for_cluster("cluster-a").await,
+                        _ => manager.close_all().await,
+                    }
+                });
+                assert!(poll_once(closing.as_mut()).await.is_none());
+                assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
+                factory.proceed.notify_one();
+                wait_for_topic_signal(&factory.finishing).await;
+                assert!(poll_once(closing.as_mut()).await.is_none());
+                factory.finish.notify_one();
+                wait_for_topic_signal(&factory.dropping).await;
+                assert!(poll_once(closing.as_mut()).await.is_none());
+                release_drop.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(5), closing)
+                    .await
+                    .expect("close deadlocked with an active topic operation");
+                assert_eq!(factory.drops.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    // Failing the second closed check could perform an admin request after close started.
+    #[tokio::test]
+    async fn queued_topic_operations_reject_a_closed_session() {
+        for operation in TOPIC_OPERATIONS {
+            let factory = BlockingTopicFactory::default();
+            let (manager, id) = topic_manager(factory.clone()).await;
+            let held = manager.get(&id).await.unwrap();
+            let collection = held.try_collect().unwrap();
+            let mut request = Box::pin(operation.run(&manager, &id));
+            assert!(poll_once(request.as_mut()).await.is_none());
+            tokio::task::yield_now().await;
+            let mut closing = Box::pin(manager.close(&id));
+            let closed_immediately = poll_once(closing.as_mut()).await;
+            assert!(held.closed.load(Ordering::Acquire));
+            drop(collection);
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(5), request)
+                    .await
+                    .expect("queued operation ran after the session closed"),
+                Err(TopicOperationError::Session(SessionError::Expired))
+            ));
+            if closed_immediately.is_none() {
+                closing.await.unwrap();
+            }
+            let mut started = Box::pin(factory.started.notified());
+            assert!(poll_once(started.as_mut()).await.is_none());
+        }
+    }
+
+    // Administration must renew leases and preserve Kafka errors without locking out snapshots.
+    #[tokio::test(start_paused = true)]
+    async fn topic_operations_renew_live_leases_and_preserve_admin_errors() {
+        for operation in TOPIC_OPERATIONS {
+            let factory = BlockingTopicFactory {
+                error: Some(TopicAdminError::Authorization),
+                ..BlockingTopicFactory::default()
+            };
+            let (manager, id) = topic_manager(factory.clone()).await;
+            manager
+                .state
+                .lock()
+                .await
+                .entries
+                .get_mut(&id)
+                .unwrap()
+                .renewed_at = Instant::now() - Duration::from_secs(10);
+            let mut request = Box::pin(operation.run(&manager, &id));
+            assert!(poll_once(request.as_mut()).await.is_none());
+            wait_for_topic_signal(&factory.started).await;
+            tokio::time::advance(Duration::from_secs(6)).await;
+            assert!(manager.get(&id).await.is_ok());
+            factory.proceed.notify_one();
+            assert!(matches!(
+                request.await,
+                Err(TopicOperationError::Admin(TopicAdminError::Authorization))
+            ));
+            assert!(manager.snapshot(&id).await.is_ok());
+            manager.close(&id).await.unwrap();
+            assert!(matches!(
+                operation.run(&manager, &id).await,
+                Err(TopicOperationError::Session(SessionError::Expired))
+            ));
+        }
     }
 }
