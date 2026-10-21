@@ -217,6 +217,31 @@ button.topic-reset { color: #9fb8ff; font-size: 11px; white-space: nowrap; }
 .rule-row label { font-size: 11px; }
 .rule-row button { margin-bottom: 1px; }
 .lag-rules-form > button[type="submit"] { display: block; margin: 20px 0 12px auto; }
+.feishu-alert-form { margin: 0; min-width: 0; }
+.feishu-alert-form .feishu-control { background: #0a111d; border: 1px solid var(--line); border-radius: 8px; color: var(--text); height: 42px; padding: 10px; width: 100%; min-width: 0; }
+.feishu-alert-form .feishu-control:focus { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(79,124,255,.12); }
+.feishu-alert-form .feishu-control:disabled { color: #6f7c91; }
+.feishu-token-field { display: grid; gap: 7px; margin-bottom: 18px; }
+.feishu-token-field > label { margin: 0; }
+.feishu-token-field .form-note { margin: 0; }
+.feishu-token-input { display: grid; grid-template-columns: minmax(0,1fr) 42px; gap: 8px; }
+button.feishu-token-eye { display: grid; place-items: center; padding: 0; height: 42px; }
+.feishu-alert-form .feishu-checkbox { display: inline-flex; align-items: center; gap: 7px; margin: 0; white-space: nowrap; }
+.feishu-checkbox input { margin: 0; }
+.feishu-rules-box { border: 1px solid var(--line); border-radius: 9px; min-width: 0; margin-bottom: 18px; }
+.feishu-rules-heading { display: flex; gap: 12px; align-items: center; justify-content: space-between; background: #0b1320; padding: 10px 12px; border-radius: 9px 9px 0 0; }
+.feishu-rules-heading h3 { font-size: 12px; margin: 0; }
+.feishu-rules-heading button { flex-shrink: 0; color: var(--cyan); }
+.feishu-rules-box > .form-note, .feishu-rules-scroll > .form-note { margin: 12px; }
+.feishu-rules-scroll { overflow-x: auto; min-width: 0; max-width: 100%; }
+.feishu-rule-row { display: grid; grid-template-columns: minmax(160px,1.15fr) minmax(160px,1.15fr) 112px 96px auto auto; gap: 8px; align-items: end; min-width: 770px; border: 0; border-top: 1px solid var(--line); margin: 0; padding: 10px 12px 12px; }
+.feishu-rule-row legend { color: var(--muted); font-size: 11px; padding: 0 4px; }
+.feishu-rule-row label { font-size: 11px; margin: 0; min-width: 0; }
+.feishu-rule-row .feishu-threshold { width: 112px; min-width: 112px; }
+.feishu-rule-row .feishu-duration { width: 96px; min-width: 96px; }
+.feishu-rule-row .feishu-checkbox { height: 42px; }
+.feishu-rule-row > button { height: 42px; white-space: nowrap; }
+.feishu-form-actions { flex-wrap: wrap; }
 section[aria-label="消费组 Lag 历史"] { margin-top: 24px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 section[aria-label="消费组 Lag 历史"] > h3 { margin: 0; font-size: 14px; }
 section[aria-label="消费组 Lag 历史"] > p { font-size: 12px; }

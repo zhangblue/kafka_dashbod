@@ -54,6 +54,24 @@ export interface LagRule extends LagThresholds {
   topic: string
 }
 export interface LagRuleSet { defaults: LagThresholds; overrides: LagRule[] }
+export interface FeishuAlertRule {
+  id?: string
+  groupId: string
+  topic: string
+  lagThreshold: number
+  growthSeconds: number
+  enabled: boolean
+}
+export interface FeishuAlertSettings {
+  accessTokenConfigured: boolean
+  maskedAccessToken: string | null
+  rules: FeishuAlertRule[]
+}
+export interface SaveFeishuAlertSettings {
+  accessToken?: string
+  clearAccessToken: boolean
+  rules: FeishuAlertRule[]
+}
 export interface ConnectionTestResult { brokerCount: number; topicCount: number; elapsedMs: number }
 export interface CreatedSession { sessionId: string; leaseSeconds: number }
 export interface CreateTopicInput {

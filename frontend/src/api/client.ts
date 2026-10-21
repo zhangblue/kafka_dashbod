@@ -1,5 +1,5 @@
 import type { ClusterDto, ClusterInput, ClusterSnapshot, ConnectionTestResult, CreatedSession, CreateTopicInput,
-  LagRuleSet, TopicConfigsResponse, TopicMutationResult, UpdateTopicConfigsInput } from './types'
+  FeishuAlertSettings, SaveFeishuAlertSettings, LagRuleSet, TopicConfigsResponse, TopicMutationResult, UpdateTopicConfigsInput } from './types'
 
 export class ApiError extends Error {
   readonly status: number
@@ -48,6 +48,11 @@ export const clustersApi = {
 export const lagRulesApi = {
   get: (id: string, signal?: AbortSignal) => apiFetch<LagRuleSet>(`${clusterPath(id)}/lag-rules`, { signal }),
   save: (id: string, value: LagRuleSet) => apiFetch<LagRuleSet>(`${clusterPath(id)}/lag-rules`, { method: 'PUT', body: JSON.stringify(value) }),
+}
+export const feishuAlertsApi = {
+  get: (id: string, signal?: AbortSignal) => apiFetch<FeishuAlertSettings>(`${clusterPath(id)}/feishu-alert`, { signal }),
+  save: (id: string, value: SaveFeishuAlertSettings) => apiFetch<FeishuAlertSettings>(`${clusterPath(id)}/feishu-alert`, { method: 'PUT', body: JSON.stringify(value) }),
+  test: (id: string, accessToken?: string) => apiFetch<{ ok: boolean }>(`${clusterPath(id)}/feishu-alert/test`, { method: 'POST', body: JSON.stringify({ accessToken }) }),
 }
 export const sessionsApi = {
   create: (clusterId: string, signal?: AbortSignal) => apiFetch<CreatedSession>(`${clusterPath(clusterId)}/sessions`, { method: 'POST', signal }),
