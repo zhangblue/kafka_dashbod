@@ -56,6 +56,25 @@ export interface LagRule extends LagThresholds {
 export interface LagRuleSet { defaults: LagThresholds; overrides: LagRule[] }
 export interface ConnectionTestResult { brokerCount: number; topicCount: number; elapsedMs: number }
 export interface CreatedSession { sessionId: string; leaseSeconds: number }
+export interface CreateTopicInput {
+  name: string
+  partitions: number
+  replicationFactor?: number | null
+  configs?: Record<string, string>
+}
+export type TopicConfigSource = 'topicOverride' | 'brokerDefault' | 'unknown'
+export interface TopicConfigValue {
+  key: string
+  value: string | null
+  source: TopicConfigSource
+  readOnly: boolean
+}
+export interface TopicConfigsResponse { configs: TopicConfigValue[] }
+export interface UpdateTopicConfigsInput {
+  changes: Record<string, string | null>
+  expectedValues: Record<string, string | null>
+}
+export type TopicMutationResult = { status: 'created' } | { status: 'appliedButUnconfirmed' }
 export interface PartitionWatermark {
   partition: number; low: number | null; high: number | null
   latestMessageOffset: number | null; retainedOffsetSpan: number | null

@@ -1,4 +1,5 @@
-import type { ClusterDto, ClusterInput, ClusterSnapshot, ConnectionTestResult, CreatedSession, LagRuleSet } from './types'
+import type { ClusterDto, ClusterInput, ClusterSnapshot, ConnectionTestResult, CreatedSession, CreateTopicInput,
+  LagRuleSet, TopicConfigsResponse, TopicMutationResult, UpdateTopicConfigsInput } from './types'
 
 export class ApiError extends Error {
   readonly status: number
@@ -31,6 +32,8 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
 
 const clusterPath = (id: string) => `/api/clusters/${encodeURIComponent(id)}`
 const sessionPath = (id: string) => `/api/sessions/${encodeURIComponent(id)}`
+const topicsPath = (sessionId: string) => `${sessionPath(sessionId)}/topics`
+const topicPath = (sessionId: string, topic: string) => `${topicsPath(sessionId)}/${encodeURIComponent(topic)}`
 
 export const clustersApi = {
   list: (signal?: AbortSignal) => apiFetch<ClusterDto[]>('/api/clusters', { signal }),
@@ -50,4 +53,14 @@ export const sessionsApi = {
   create: (clusterId: string, signal?: AbortSignal) => apiFetch<CreatedSession>(`${clusterPath(clusterId)}/sessions`, { method: 'POST', signal }),
   snapshot: (id: string, signal?: AbortSignal) => apiFetch<ClusterSnapshot>(`${sessionPath(id)}/snapshot`, { signal }),
   close: (id: string) => apiFetch<void>(sessionPath(id), { method: 'DELETE', keepalive: true }),
+}
+export const topicsApi = {
+  create: (sessionId: string, value: CreateTopicInput) => apiFetch<Extract<TopicMutationResult, { status: 'created' }>>(
+    topicsPath(sessionId), { method: 'POST', body: JSON.stringify(value) }),
+  configs: (sessionId: string, topic: string, signal?: AbortSignal) => apiFetch<TopicConfigsResponse>(
+    `${topicPath(sessionId, topic)}/configs`, { signal }),
+  update: (sessionId: string, topic: string, value: UpdateTopicConfigsInput) => apiFetch<TopicConfigsResponse | Extract<TopicMutationResult, { status: 'appliedButUnconfirmed' }>>(
+    `${topicPath(sessionId, topic)}/configs`, { method: 'PUT', body: JSON.stringify(value) }),
+  delete: (sessionId: string, topic: string, confirmationName: string) => apiFetch<void>(
+    topicPath(sessionId, topic), { method: 'DELETE', body: JSON.stringify({ confirmationName }) }),
 }

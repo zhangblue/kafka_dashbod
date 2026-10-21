@@ -48,6 +48,71 @@ afterEach(async () => {
   vi.useRealTimers()
 })
 
+it('exposes only the current lease after its first accepted snapshot and clears it on switching or disabling', async () => {
+  let finish!: (value: typeof snapshotFixture) => void
+  vi.mocked(sessionsApi.snapshot).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  const { result, rerender } = renderHook(({ cluster, active }) => useMonitorSession(cluster, 3, active), {
+    wrapper: Wrapper, initialProps: { cluster: 'a', active: true },
+  })
+  await flush()
+  expect(result.current.sessionId).toBeUndefined()
+  await act(async () => finish(snapshotFixture))
+  await flush()
+  expect(result.current.sessionId).toBe('a-1')
+  rerender({ cluster: 'b', active: true })
+  expect(result.current.sessionId).toBeUndefined()
+  await flush()
+  expect(result.current.sessionId).toBe('b-2')
+  rerender({ cluster: 'b', active: false })
+  expect(result.current.sessionId).toBeUndefined()
+})
+
+it('withholds session IDs while hidden, after pagehide, and after a sampling failure', async () => {
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }))
+  const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
+  await flush()
+  expect(result.current.sessionId).toBe('a-1')
+  await visibility('hidden')
+  expect(result.current.sessionId).toBeUndefined()
+  await visibility('visible')
+  expect(result.current.sessionId).toBe('a-1')
+  await act(async () => window.dispatchEvent(new Event('pagehide')))
+  expect(result.current.sessionId).toBeUndefined()
+  await act(async () => window.dispatchEvent(new Event('pageshow')))
+  await flush()
+  expect(result.current.sessionId).toBe('a-2')
+  vi.mocked(sessionsApi.snapshot).mockRejectedValueOnce(new ApiError(503, { code: 'KAFKA_UNAVAILABLE' }))
+  await act(async () => { await result.current.refresh() })
+  await flush()
+  expect(result.current.status).toBe('error')
+  expect(result.current.sessionId).toBeUndefined()
+})
+
+it('withholds a replacement lease until its own snapshot succeeds', async () => {
+  const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
+  await flush()
+  expect(result.current.sessionId).toBe('a-1')
+  let finish!: (value: typeof snapshotFixture) => void
+  vi.mocked(sessionsApi.snapshot).mockRejectedValueOnce(new ApiError(410, { code: 'SESSION_EXPIRED' }))
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  await act(async () => { void result.current.refresh() })
+  await flush()
+  expect(result.current.sessionId).toBeUndefined()
+  await act(async () => finish(snapshotFixture))
+  await flush()
+  expect(result.current.sessionId).toBe('a-2')
+})
+
+it('withdraws an expired ID even when the next snapshot remains pending', async () => {
+  const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
+  await flush()
+  expect(result.current.sessionId).toBe('a-1')
+  vi.mocked(sessionsApi.snapshot).mockImplementationOnce(() => new Promise(() => {}))
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_001) })
+  expect(result.current.sessionId).toBeUndefined()
+  expect(result.current.status).toBe('connecting')
+})
+
 it.each([3, 5, 10] as const)('collects at %ss without clearing history when cadence changes', async seconds => {
   const { result, rerender, unmount } = renderHook(({ interval }) => useMonitorSession('a', interval), { wrapper: Wrapper, initialProps: { interval: seconds } })
   await flush()

@@ -39,6 +39,7 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
   const [visible, setVisible] = useState(() => document.visibilityState === 'visible')
   const [pageActive, setPageActive] = useState(true)
   const [attempt, setAttempt] = useState(0)
+  const [leaseClock, setLeaseClock] = useState(() => Date.now())
   const [continuity, setContinuity] = useState(0)
   const [failure, setFailure] = useState<{ runtime: object; error: unknown } | null>(null)
   const [data, setData] = useState<{ runtime: object; sessionId: string; snapshot: ClusterSnapshot; display: DisplaySnapshot; history: SnapshotSample[] } | null>(null)
@@ -60,6 +61,7 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
   useEffect(() => {
     const onVisibility = () => {
       const next = document.visibilityState === 'visible'
+      setLeaseClock(Date.now())
       runtime.foreground = next && !runtime.pageHidden
       setVisible(next)
       if (!next) {
@@ -82,6 +84,7 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
       runtime.pageHidden = false
       runtime.foreground = document.visibilityState === 'visible'
       setPageActive(true)
+      setLeaseClock(Date.now())
     }
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('pagehide', onPageHide)
@@ -171,13 +174,29 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
   })
   const snapshot = data?.runtime === runtime ? data.snapshot : null
   const history = data?.runtime === runtime ? data.history : []
-  const sessionReady = Boolean(runtime.lease && data?.runtime === runtime && data.sessionId === runtime.lease.sessionId)
+  useEffect(() => {
+    const lease = runtime.lease
+    if (!lease || data?.runtime !== runtime || data.sessionId !== lease.sessionId) return
+    let timer: ReturnType<typeof setTimeout>
+    const checkExpiry = () => {
+      const remaining = lease.expiresAt - Date.now()
+      // A busy snapshot can renew the same lease without changing accepted data.
+      if (remaining > 0) timer = setTimeout(checkExpiry, remaining)
+      else setLeaseClock(Date.now())
+    }
+    checkExpiry()
+    return () => clearTimeout(timer)
+  }, [runtime, data])
+  const sessionReady = Boolean(runtime.lease && runtime.lease.expiresAt > leaseClock
+    && data?.runtime === runtime && data.sessionId === runtime.lease.sessionId)
+  const sessionId = running && runtime.active && runtime.foreground && sessionReady ? runtime.lease?.sessionId : undefined
   const status: MonitorStatus = !clusterId || !enabled ? 'idle' : error ? 'error'
     : !visible || !pageActive ? 'paused' : sessionReady ? 'connected' : 'connecting'
   return {
     // Raw sampling data owns totals, history and timing. It may be the last accepted
     // snapshot while paused/reconnecting/failed; displaySnapshot is presentation only.
     snapshot, history, status, error, isFetching: query.isFetching,
+    ...(sessionId ? { sessionId } : {}),
     ...({ displaySnapshot: data?.runtime === runtime ? data.display.snapshot : null,
       staleResources: data?.runtime === runtime ? data.display.staleResources : {} } as MonitorDisplay),
     continuityKey: `${clusterId ?? ''}:${continuity}`,
