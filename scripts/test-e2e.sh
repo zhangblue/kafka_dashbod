@@ -113,6 +113,7 @@ done
 E2E_BASE_URL="$(node scripts/e2e-preview.mjs verify "$run_dir/preview.json" "$frontend_pid")"
 export E2E_BASE_URL
 kill -0 "$backend_pid" 2>/dev/null || { printf '%s\n' 'Backend exited before browser tests'; exit 1; }
+(cd frontend && node --test scripts/token-safety.test.mjs)
 (cd frontend && node node_modules/@playwright/test/cli.js test "$@")
 # Assert SIGTERM returns a successful process status before general trap cleanup.
 stop_process "$backend_pid"

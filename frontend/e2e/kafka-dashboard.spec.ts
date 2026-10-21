@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
+import { fillToken, expectTokenEmpty, expectTokenVisibility } from './token-safety.mjs'
 
 const topic = 'dashboard-e2e-orders'
 const group = 'dashboard-e2e-reader'
@@ -51,14 +52,13 @@ test('Feishu settings save real rules, hide saved tokens and isolate cluster dra
     await expect(card.getByText('飞书告警：未配置', { exact: true })).toBeVisible()
     await card.getByRole('button', { name: '配置飞书告警', exact: true }).click()
     const tokenInput = dialog.getByLabel('更新 Token', { exact: true })
-    await expect(tokenInput).toHaveAttribute('type', 'password')
+    await expectTokenVisibility(tokenInput, false)
     await expect(dialog.getByRole('button', { name: '显示 Token', exact: true })).toBeDisabled()
-    await tokenInput.fill(token)
+    await fillToken(tokenInput, token)
     await dialog.getByRole('button', { name: '显示 Token', exact: true }).click()
-    // Avoid putting fixture token values into matcher diagnostics or artifacts.
-    expect(await tokenInput.evaluate((input: HTMLInputElement) => input.type === 'text' && input.value.length > 0)).toBe(true)
+    await expectTokenVisibility(tokenInput, true)
     await dialog.getByRole('button', { name: '隐藏 Token', exact: true }).click()
-    await expect(tokenInput).toHaveAttribute('type', 'password')
+    await expectTokenVisibility(tokenInput, false)
     await dialog.getByRole('button', { name: '测试通知', exact: true }).click()
     await expect(dialog.getByText('测试通知已发送', { exact: true })).toBeVisible()
     notificationFails = true
@@ -92,7 +92,7 @@ test('Feishu settings save real rules, hide saved tokens and isolate cluster dra
     expect(response.status()).toBe(200)
     expect((await response.text()).includes(token)).toBe(false)
     await expect(dialog.getByText('飞书告警配置已保存', { exact: true })).toBeVisible()
-    await expect(tokenInput).toHaveValue('')
+    await expectTokenEmpty(tokenInput)
     await expect(dialog.getByRole('button', { name: '显示 Token', exact: true })).toBeDisabled()
     const settings = await (await request.get(`/api/clusters/${first}/feishu-alert`)).json()
     expect(JSON.stringify(settings).includes(token)).toBe(false)
@@ -101,13 +101,13 @@ test('Feishu settings save real rules, hide saved tokens and isolate cluster dra
     await expect(dialog.getByText(settings.maskedAccessToken, { exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: '关闭', exact: true }).click()
     await card.getByRole('button', { name: '配置飞书告警', exact: true }).click()
-    await expect(tokenInput).toHaveValue('')
+    await expectTokenEmpty(tokenInput)
     await expect(dialog.getByText(settings.maskedAccessToken, { exact: true })).toBeVisible()
-    await tokenInput.fill(randomUUID())
+    await fillToken(tokenInput, randomUUID())
     await dialog.getByRole('button', { name: '关闭', exact: true }).click()
     const secondCard = page.getByRole('group', { name: 'E2E Feishu second', exact: true })
     await secondCard.getByRole('button', { name: '配置飞书告警', exact: true }).click()
-    await expect(tokenInput).toHaveValue('')
+    await expectTokenEmpty(tokenInput)
     await expect(dialog.getByText('暂无飞书告警规则。', { exact: true })).toBeVisible()
     await expect(dialog.getByRole('button', { name: '测试通知', exact: true })).toBeDisabled()
     await dialog.getByRole('button', { name: '关闭', exact: true }).click()
