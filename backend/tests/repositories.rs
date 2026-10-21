@@ -59,9 +59,31 @@ fn alert_rule(group: &str, topic: &str) -> FeishuAlertRuleInput {
     }
 }
 
+// Never format sensitive values or stringify their assertion expressions on failure.
+#[track_caller]
+fn assert_sensitive(condition: bool) {
+    assert!(condition, "Feishu settings assertion failed");
+}
+
+#[test]
+fn feishu_sensitive_assertions_use_fixed_failure_diagnostics() {
+    let access_token = String::from("diagnostic-fixture-token");
+    let panic = std::panic::catch_unwind(|| assert_sensitive(access_token.is_empty()))
+        .expect_err("sensitive assertion unexpectedly passed");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied());
+    assert!(
+        message == Some("Feishu settings assertion failed"),
+        "sensitive assertion failure diagnostics were unsafe"
+    );
+}
+
 // Public reads may expose only a suffix; persistence and internal reads retain the token.
 #[tokio::test]
 async fn feishu_settings_replace_rules_without_exposing_token() {
+    let access_token = "token-secret";
     let (pool, clusters, _) = repositories().await;
     let alerts = FeishuAlertRepository::new(pool.clone());
     let cluster = clusters
@@ -69,13 +91,13 @@ async fn feishu_settings_replace_rules_without_exposing_token() {
         .await
         .unwrap();
     let initial = alerts.get(&cluster.id).await.unwrap();
-    assert!(!initial.access_token_configured);
-    assert!(initial.masked_access_token.is_none());
-    assert!(initial.rules.is_empty());
+    assert_sensitive(!initial.access_token_configured);
+    assert_sensitive(initial.masked_access_token.is_none());
+    assert_sensitive(initial.rules.is_empty());
     let saved = alerts
         .replace(
             &cluster.id,
-            Some("token-secret"),
+            Some(access_token),
             false,
             &[
                 alert_rule("orders", "events"),
@@ -84,42 +106,43 @@ async fn feishu_settings_replace_rules_without_exposing_token() {
         )
         .await
         .unwrap();
-    assert!(saved.access_token_configured);
-    assert_eq!(saved.masked_access_token.as_deref(), Some("••••••••cret"));
-    assert_eq!(saved.rules.len(), 2);
-    assert_eq!(alerts.get(&cluster.id).await.unwrap(), saved);
-    assert!(
+    assert_sensitive(saved.access_token_configured);
+    assert_sensitive(saved.masked_access_token.as_deref() == Some("••••••••cret"));
+    assert_sensitive(saved.rules.len() == 2);
+    assert_sensitive(alerts.get(&cluster.id).await.unwrap() == saved);
+    assert_sensitive(
         !serde_json::to_string(&saved)
             .unwrap()
-            .contains("token-secret")
+            .contains(access_token),
     );
-    assert!(alerts.token(&cluster.id).await.unwrap().as_deref() == Some("token-secret"));
+    assert_sensitive(alerts.token(&cluster.id).await.unwrap().as_deref() == Some(access_token));
     let stored: Option<String> =
         sqlx::query_scalar("SELECT access_token FROM feishu_alert_settings WHERE cluster_id = ?")
             .bind(&cluster.id)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(stored.as_deref() == Some("token-secret"));
+    assert_sensitive(stored.as_deref() == Some(access_token));
     let enabled = alerts.enabled_clusters().await.unwrap();
-    assert_eq!(enabled.len(), 1);
-    assert_eq!(enabled[0].cluster_id, cluster.id);
-    assert!(enabled[0].access_token == "token-secret");
-    assert_eq!(enabled[0].rules.len(), 2);
-    assert!(!format!("{enabled:?}").contains("token-secret"));
+    assert_sensitive(enabled.len() == 1);
+    assert_sensitive(enabled[0].cluster_id == cluster.id);
+    assert_sensitive(enabled[0].access_token == access_token);
+    assert_sensitive(enabled[0].rules.len() == 2);
+    assert_sensitive(!format!("{enabled:?}").contains(access_token));
     for token in ["x", "短密钥", "a1b2"] {
         let masked = alerts
             .replace(&cluster.id, Some(token), false, &[])
             .await
             .unwrap();
-        assert_eq!(masked.masked_access_token.as_deref(), Some("••••••••"));
-        assert!(!serde_json::to_string(&masked).unwrap().contains(token));
+        assert_sensitive(masked.masked_access_token.as_deref() == Some("••••••••"));
+        assert_sensitive(!serde_json::to_string(&masked).unwrap().contains(token));
     }
 }
 
 // Omitted/blank tokens preserve credentials, clears retain rules, and stable IDs retain creation time.
 #[tokio::test]
 async fn feishu_settings_preserve_tokens_and_rule_ids_but_refresh_revision() {
+    let access_token = "token-secret";
     let (pool, clusters, _) = repositories().await;
     let alerts = FeishuAlertRepository::new(pool.clone());
     let cluster = clusters
@@ -129,7 +152,7 @@ async fn feishu_settings_preserve_tokens_and_rule_ids_but_refresh_revision() {
     let saved = alerts
         .replace(
             &cluster.id,
-            Some("token-secret"),
+            Some(access_token),
             false,
             &[alert_rule("orders", "events")],
         )
@@ -151,38 +174,37 @@ async fn feishu_settings_preserve_tokens_and_rule_ids_but_refresh_revision() {
             .replace(&cluster.id, token, false, &[edited.clone()])
             .await
             .unwrap();
-        assert!(retained.access_token_configured);
-        assert!(alerts.token(&cluster.id).await.unwrap().as_deref() == Some("token-secret"));
-        assert_eq!(retained.rules[0].id, saved.rules[0].id);
-        assert_eq!(retained.rules[0].lag_threshold, 0);
-        assert_eq!(retained.rules[0].growth_seconds, 10);
+        assert_sensitive(retained.access_token_configured);
+        assert_sensitive(alerts.token(&cluster.id).await.unwrap().as_deref() == Some(access_token));
+        assert_sensitive(retained.rules[0].id == saved.rules[0].id);
+        assert_sensitive(retained.rules[0].lag_threshold == 0);
+        assert_sensitive(retained.rules[0].growth_seconds == 10);
     }
-    assert_ne!(
-        alerts.enabled_clusters().await.unwrap()[0].revision,
-        revision
-    );
+    assert_sensitive(alerts.enabled_clusters().await.unwrap()[0].revision != revision);
     let retained_created_at: String =
         sqlx::query_scalar("SELECT created_at FROM feishu_alert_rules WHERE id = ?")
             .bind(&saved.rules[0].id)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(retained_created_at, created_at);
+    assert_sensitive(retained_created_at == created_at);
     let cleared = alerts
         .replace(&cluster.id, None, true, &[edited])
         .await
         .unwrap();
-    assert!(!cleared.access_token_configured);
-    assert!(cleared.masked_access_token.is_none());
-    assert!(alerts.token(&cluster.id).await.unwrap().is_none());
-    assert_eq!(cleared.rules.len(), 1);
-    assert!(cleared.rules[0].enabled);
-    assert!(alerts.enabled_clusters().await.unwrap().is_empty());
+    assert_sensitive(!cleared.access_token_configured);
+    assert_sensitive(cleared.masked_access_token.is_none());
+    assert_sensitive(alerts.token(&cluster.id).await.unwrap().is_none());
+    assert_sensitive(cleared.rules.len() == 1);
+    assert_sensitive(cleared.rules[0].enabled);
+    assert_sensitive(alerts.enabled_clusters().await.unwrap().is_empty());
 }
 
 // A late database error must roll back the token, revision, deleted rules, and new inserts together.
 #[tokio::test]
 async fn feishu_settings_replace_is_atomic_and_validates_rule_ownership() {
+    let access_token = "token-secret";
+    let replacement_token = "replacement-secret";
     let (pool, clusters, _) = repositories().await;
     let alerts = FeishuAlertRepository::new(pool.clone());
     let cluster = clusters
@@ -196,7 +218,7 @@ async fn feishu_settings_replace_is_atomic_and_validates_rule_ownership() {
     let before = alerts
         .replace(
             &cluster.id,
-            Some("token-secret"),
+            Some(access_token),
             false,
             &[alert_rule("orders", "events")],
         )
@@ -223,21 +245,21 @@ async fn feishu_settings_replace_is_atomic_and_validates_rule_ownership() {
         alert_rule(" ", "topic"),
         alert_rule("group", ""),
     ] {
-        assert!(
+        assert_sensitive(
             alerts
-                .replace(&cluster.id, Some("replacement-secret"), false, &[invalid])
+                .replace(&cluster.id, Some(replacement_token), false, &[invalid])
                 .await
-                .is_err()
+                .is_err(),
         );
-        assert_eq!(alerts.get(&cluster.id).await.unwrap(), before);
+        assert_sensitive(alerts.get(&cluster.id).await.unwrap() == before);
     }
-    assert!(
+    assert_sensitive(
         alerts
-            .replace(&cluster.id, Some("replacement-secret"), true, &[])
+            .replace(&cluster.id, Some(replacement_token), true, &[])
             .await
-            .is_err()
+            .is_err(),
     );
-    assert!(
+    assert_sensitive(
         alerts
             .replace(
                 &cluster.id,
@@ -245,45 +267,42 @@ async fn feishu_settings_replace_is_atomic_and_validates_rule_ownership() {
                 false,
                 &[
                     alert_rule("orders", "events"),
-                    alert_rule("orders", "events")
-                ]
+                    alert_rule("orders", "events"),
+                ],
             )
             .await
-            .is_err()
+            .is_err(),
     );
     let mut repeated_id = alert_rule("different", "topic");
     repeated_id.id = Some(before.rules[0].id.clone());
     let mut reused_id = alert_rule("orders", "events");
     reused_id.id = repeated_id.id.clone();
-    assert!(
+    assert_sensitive(
         alerts
             .replace(&cluster.id, None, false, &[reused_id, repeated_id])
             .await
-            .is_err()
+            .is_err(),
     );
     sqlx::query("CREATE TRIGGER reject_feishu_rule BEFORE INSERT ON feishu_alert_rules WHEN NEW.group_id = 'reject' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END").execute(&pool).await.unwrap();
-    assert!(
+    assert_sensitive(
         alerts
             .replace(
                 &cluster.id,
-                Some("replacement-secret"),
+                Some(replacement_token),
                 false,
-                &[alert_rule("first", "topic"), alert_rule("reject", "topic")]
+                &[alert_rule("first", "topic"), alert_rule("reject", "topic")],
             )
             .await
-            .is_err()
+            .is_err(),
     );
-    assert_eq!(alerts.get(&cluster.id).await.unwrap(), before);
-    assert!(alerts.token(&cluster.id).await.unwrap().as_deref() == Some("token-secret"));
-    assert_eq!(
-        alerts.enabled_clusters().await.unwrap()[0].revision,
-        revision
-    );
-    assert!(matches!(
+    assert_sensitive(alerts.get(&cluster.id).await.unwrap() == before);
+    assert_sensitive(alerts.token(&cluster.id).await.unwrap().as_deref() == Some(access_token));
+    assert_sensitive(alerts.enabled_clusters().await.unwrap()[0].revision == revision);
+    assert_sensitive(matches!(
         alerts.replace("missing", None, false, &[]).await,
         Err(db::RepositoryError::ClusterNotFound)
     ));
-    assert!(matches!(
+    assert_sensitive(matches!(
         alerts.get("missing").await,
         Err(db::RepositoryError::ClusterNotFound)
     ));
@@ -299,27 +318,29 @@ async fn feishu_settings_replace_is_atomic_and_validates_rule_ownership() {
         )
         .await
         .unwrap();
-    assert_eq!(replaced.rules.len(), 2);
-    assert_eq!(replaced.rules[1].topic, " events ");
-    assert!(
+    assert_sensitive(replaced.rules.len() == 2);
+    assert_sensitive(replaced.rules[1].topic == " events ");
+    assert_sensitive(
         replaced
             .rules
             .iter()
-            .all(|rule| rule.id != before.rules[0].id)
+            .all(|rule| rule.id != before.rules[0].id),
     );
-    assert!(
+    assert_sensitive(
         alerts
             .replace(&cluster.id, None, false, &[])
             .await
             .unwrap()
             .rules
-            .is_empty()
+            .is_empty(),
     );
 }
 
 // The worker sees exactly eligible clusters and enabled rules; deletion removes both tables.
 #[tokio::test]
 async fn feishu_settings_filter_workers_and_cascade_on_cluster_delete() {
+    let access_token = "token-secret";
+    let other_token = "other-secret";
     let (pool, clusters, _) = repositories().await;
     let alerts = FeishuAlertRepository::new(pool.clone());
     let mut ids = Vec::new();
@@ -337,14 +358,14 @@ async fn feishu_settings_filter_workers_and_cascade_on_cluster_delete() {
     alerts
         .replace(
             &ids[0],
-            Some("token-secret"),
+            Some(access_token),
             false,
             &[alert_rule("enabled", "events"), disabled.clone()],
         )
         .await
         .unwrap();
     alerts
-        .replace(&ids[1], Some("other-secret"), false, &[disabled])
+        .replace(&ids[1], Some(other_token), false, &[disabled])
         .await
         .unwrap();
     alerts
@@ -352,20 +373,20 @@ async fn feishu_settings_filter_workers_and_cascade_on_cluster_delete() {
         .await
         .unwrap();
     alerts
-        .replace(&ids[3], Some("other-secret"), false, &[])
+        .replace(&ids[3], Some(other_token), false, &[])
         .await
         .unwrap();
     let eligible = alerts.enabled_clusters().await.unwrap();
-    assert_eq!(eligible.len(), 1);
-    assert_eq!(eligible[0].cluster_id, ids[0]);
-    assert_eq!(eligible[0].rules.len(), 1);
-    assert_eq!(eligible[0].rules[0].group_id, "enabled");
+    assert_sensitive(eligible.len() == 1);
+    assert_sensitive(eligible[0].cluster_id == ids[0]);
+    assert_sensitive(eligible[0].rules.len() == 1);
+    assert_sensitive(eligible[0].rules[0].group_id == "enabled");
     sqlx::query("UPDATE feishu_alert_settings SET access_token = '   ' WHERE cluster_id = ?")
         .bind(&ids[0])
         .execute(&pool)
         .await
         .unwrap();
-    assert!(alerts.enabled_clusters().await.unwrap().is_empty());
+    assert_sensitive(alerts.enabled_clusters().await.unwrap().is_empty());
     clusters.delete(&ids[0]).await.unwrap();
     for query in [
         "SELECT count(*) FROM feishu_alert_settings WHERE cluster_id = ?",
@@ -376,9 +397,9 @@ async fn feishu_settings_filter_workers_and_cascade_on_cluster_delete() {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(remaining, 0);
+        assert_sensitive(remaining == 0);
     }
-    assert_eq!(alerts.get(&ids[1]).await.unwrap().rules.len(), 1);
+    assert_sensitive(alerts.get(&ids[1]).await.unwrap().rules.len() == 1);
     db::MIGRATOR.run(&pool).await.unwrap();
 }
 
@@ -391,7 +412,7 @@ async fn feishu_settings_migration_rejects_invalid_rules_and_duplicate_pairs() {
         .await
         .unwrap();
     for (threshold, seconds, enabled) in [(-1, 10, 1), (0, 9, 1), (0, 10, 2)] {
-        assert!(sqlx::query("INSERT INTO feishu_alert_rules (id, cluster_id, group_id, topic, lag_threshold, growth_seconds, enabled, created_at, updated_at) VALUES ('invalid', ?, 'orders', 'events', ?, ?, ?, 'time', 'time')")
+        assert_sensitive(sqlx::query("INSERT INTO feishu_alert_rules (id, cluster_id, group_id, topic, lag_threshold, growth_seconds, enabled, created_at, updated_at) VALUES ('invalid', ?, 'orders', 'events', ?, ?, ?, 'time', 'time')")
             .bind(&cluster.id).bind(threshold).bind(seconds).bind(enabled).execute(&pool).await.is_err());
     }
     let alerts = FeishuAlertRepository::new(pool.clone());
@@ -399,7 +420,7 @@ async fn feishu_settings_migration_rejects_invalid_rules_and_duplicate_pairs() {
         .replace(&cluster.id, None, false, &[alert_rule("orders", "events")])
         .await
         .unwrap();
-    assert!(sqlx::query("INSERT INTO feishu_alert_rules (id, cluster_id, group_id, topic, lag_threshold, growth_seconds, enabled, created_at, updated_at) VALUES ('duplicate', ?, 'orders', 'events', 0, 10, 1, 'time', 'time')")
+    assert_sensitive(sqlx::query("INSERT INTO feishu_alert_rules (id, cluster_id, group_id, topic, lag_threshold, growth_seconds, enabled, created_at, updated_at) VALUES ('duplicate', ?, 'orders', 'events', 0, 10, 1, 'time', 'time')")
         .bind(&cluster.id).execute(&pool).await.unwrap_err().as_database_error().unwrap().is_unique_violation());
 }
 
