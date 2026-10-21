@@ -150,6 +150,7 @@ impl Drop for Awake {
 }
 
 struct Fixture {
+    pool: sqlx::SqlitePool,
     clusters: ClusterRepository,
     settings: FeishuAlertRepository,
     cluster_id: String,
@@ -191,6 +192,7 @@ impl Fixture {
             .unwrap()
             .id;
         Self {
+            pool: pool.clone(),
             clusters,
             settings: FeishuAlertRepository::new(pool),
             cluster_id,
@@ -626,6 +628,158 @@ async fn configuration_replacement_waits_for_old_client_drop() {
     assert_eq!(fixture.created(), 1);
     drop_gate.release();
     until(|| fixture.created() == 2).await;
+    handle.shutdown().await;
+}
+
+// A second save while native destruction is blocked must revoke replacement
+// eligibility before any new client is accepted, including between reconcile ticks.
+#[tokio::test(start_paused = true)]
+async fn replacement_rechecks_eligibility_after_blocked_drop() {
+    for action in 0..3 {
+        let mut fixture = Fixture::new(vec![]).await;
+        let sentinel = fixture
+            .clusters
+            .create(&ClusterInput::plaintext(
+                "sentinel",
+                "sentinel.invalid:9092",
+            ))
+            .await
+            .unwrap();
+        let drop_gate = Arc::new(DropGate::default());
+        fixture.factory.drop_gate = Some(drop_gate.clone());
+        fixture.enable().await;
+        let handle = fixture.start();
+        until(|| fixture.samples() == 1).await;
+        fixture.enable().await;
+        fixture.tick().await;
+        until(|| drop_gate.started.load(Ordering::SeqCst)).await;
+        match action {
+            0 => {
+                fixture
+                    .settings
+                    .replace(&fixture.cluster_id, None, true, &[rule(true)])
+                    .await
+                    .unwrap();
+            }
+            1 => {
+                fixture
+                    .settings
+                    .replace(&fixture.cluster_id, None, false, &[rule(false)])
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                fixture.clusters.delete(&fixture.cluster_id).await.unwrap();
+            }
+        }
+        fixture
+            .settings
+            .replace(&sentinel.id, Some("test-alert-token"), false, &[rule(true)])
+            .await
+            .unwrap();
+        drop_gate.release();
+        until(|| fixture.factory.dropped.load(Ordering::SeqCst) == 1).await;
+        fixture.tick().await;
+        // The sentinel is an observable reconciliation barrier: reaching it
+        // means the coordinator has resumed after the blocked destruction.
+        until(|| {
+            fixture
+                .factory
+                .configs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|config| config.bootstrap_servers == "sentinel.invalid:9092")
+        })
+        .await;
+        let revoked_client_creations = fixture
+            .factory
+            .configs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|config| config.bootstrap_servers == "fixture.invalid:9092")
+            .count();
+        assert_eq!(
+            revoked_client_creations, 1,
+            "revoked worker was replaced for action {action}"
+        );
+        handle.shutdown().await;
+    }
+}
+
+// A replacement must combine current alert rules, cluster name and connection
+// settings, rather than old alert metadata with newly read connection settings.
+#[tokio::test(start_paused = true)]
+async fn replacement_uses_latest_alert_and_cluster_revisions_after_blocked_drop() {
+    let mut fixture = Fixture::new(vec![
+        snapshot(&[5_100]),
+        snapshot(&[5_200]),
+        snapshot(&[5_300]),
+        snapshot(&[5_400]),
+        snapshot(&[5_500]),
+        snapshot(&[5_600]),
+    ])
+    .await;
+    let drop_gate = Arc::new(DropGate::default());
+    fixture.factory.drop_gate = Some(drop_gate.clone());
+    fixture.enable().await;
+    let handle = fixture.start();
+    until(|| fixture.samples() == 1).await;
+    fixture.enable().await;
+    fixture.tick().await;
+    until(|| drop_gate.started.load(Ordering::SeqCst)).await;
+    let mut latest_rule = rule(true);
+    latest_rule.lag_threshold = 0;
+    fixture
+        .settings
+        .replace(&fixture.cluster_id, None, false, &[latest_rule])
+        .await
+        .unwrap();
+    fixture
+        .clusters
+        .update(
+            &fixture.cluster_id,
+            &ClusterInput::plaintext("最新集群名称", "latest.invalid:9092"),
+        )
+        .await
+        .unwrap();
+    let old_samples = fixture.samples();
+    drop_gate.release();
+    until(|| fixture.created() == 2).await;
+    until(|| fixture.samples() > old_samples).await;
+    assert_eq!(
+        fixture.factory.configs.lock().unwrap()[1].bootstrap_servers,
+        "latest.invalid:9092"
+    );
+    fixture.tick().await;
+    fixture.tick().await;
+    assert_eq!(
+        fixture.created(),
+        2,
+        "replacement must not require another rebuild for changes saved during drop"
+    );
+    assert_eq!(fixture.messages().len(), 1);
+    assert!(fixture.messages()[0].contains("集群：最新集群名称"));
+    assert!(fixture.messages()[0].contains("阈值：0"));
+    handle.shutdown().await;
+}
+
+// Lost access to persisted eligibility must stop an existing worker, not leave
+// it sampling forever with the last known token and rules.
+#[tokio::test(start_paused = true)]
+async fn repository_read_failure_stops_existing_worker() {
+    let fixture = Fixture::new(vec![]).await;
+    fixture.enable().await;
+    let handle = fixture.start();
+    until(|| fixture.samples() == 1).await;
+    fixture.pool.close().await;
+    fixture.tick().await;
+    until(|| fixture.factory.dropped.load(Ordering::SeqCst) == 1).await;
+    let samples = fixture.samples();
+    fixture.tick().await;
+    assert_eq!(fixture.samples(), samples);
+    assert_eq!(fixture.created(), 1);
     handle.shutdown().await;
 }
 

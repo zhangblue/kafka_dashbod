@@ -85,12 +85,16 @@ async fn coordinate<F: SessionClientFactory>(
     let mut workers: HashMap<String, Worker> = HashMap::new();
     let mut timer = tokio::time::interval(reconcile_interval);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut reconcile_now = false;
     loop {
-        tokio::select! {
-            biased;
-            _ = stop.changed() => break,
-            _ = timer.tick() => {},
+        if !reconcile_now {
+            tokio::select! {
+                biased;
+                _ = stop.changed() => break,
+                _ = timer.tick() => {},
+            }
         }
+        reconcile_now = false;
         if stopped(&stop) {
             break;
         }
@@ -134,9 +138,16 @@ async fn coordinate<F: SessionClientFactory>(
                 retiring.push(worker.task);
             }
         }
-        // Signal every retiring worker before waiting on any native operation.
-        for task in retiring {
-            let _ = task.await;
+        if !retiring.is_empty() {
+            // Signal every retiring worker before waiting on any native operation.
+            for task in retiring {
+                let _ = task.await;
+            }
+            // Native destruction can block across further configuration saves.
+            // Discard the entire old view and immediately reconcile fresh
+            // eligibility and both revisions before accepting any replacement.
+            reconcile_now = true;
+            continue;
         }
         for (id, (setting, cluster)) in desired {
             if stopped(&stop) {
@@ -153,6 +164,30 @@ async fn coordinate<F: SessionClientFactory>(
                     continue;
                 }
             };
+            // These repositories read separately. Bracket the connection read
+            // with revision checks so old alert/name metadata cannot be paired
+            // with a connection from a newer cluster revision.
+            let cluster_unchanged = match clusters.get(&id).await {
+                Ok(Some(current)) => current.updated_at == cluster.updated_at,
+                Ok(None) => false,
+                Err(_) => {
+                    tracing::warn!(cluster_id = %id, code = "ALERT_CONFIG_READ_FAILED");
+                    false
+                }
+            };
+            let settings_unchanged = match settings.enabled_clusters().await {
+                Ok(current) => current.iter().any(|current| {
+                    current.cluster_id == id && current.revision == setting.revision
+                }),
+                Err(_) => {
+                    tracing::warn!(cluster_id = %id, code = "ALERT_CONFIG_READ_FAILED");
+                    false
+                }
+            };
+            if !cluster_unchanged || !settings_unchanged {
+                reconcile_now = true;
+                break;
+            }
             if stopped(&stop) {
                 break;
             }
