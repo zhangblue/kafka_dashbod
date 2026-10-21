@@ -136,10 +136,14 @@ where
 }
 
 fn map_error(error: rdkafka::error::KafkaError) -> TopicAdminError {
-    error
-        .rdkafka_error_code()
-        .map(map_code)
-        .unwrap_or(TopicAdminError::Unavailable)
+    match error {
+        // rust-rdkafka 0.39 does not expose AdminOp through rdkafka_error_code().
+        rdkafka::error::KafkaError::AdminOp(code) => map_code(code),
+        error => error
+            .rdkafka_error_code()
+            .map(map_code)
+            .unwrap_or(TopicAdminError::Unavailable),
+    }
 }
 
 fn check_resource_result(
@@ -654,17 +658,102 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_resource_result, map_code, map_entries, map_topic_result, new_topic, update_with,
+        TopicAdminClient, check_resource_result, map_code, map_entries, map_error,
+        map_topic_result, new_topic, update_with,
     };
     use crate::domain::topic_admin::{
         CreateTopicInput, TopicConfigUpdateOutcome, UpdateTopicConfigsInput,
     };
     use crate::domain::topic_admin::{TopicAdminError, TopicConfigSource, TopicConfigValue};
     use rdkafka::{
+        ClientConfig,
         admin::{ConfigEntry, ConfigSource},
-        error::RDKafkaErrorCode,
+        error::{KafkaError, RDKafkaErrorCode},
     };
-    use std::{collections::BTreeMap, future::ready};
+    use std::{collections::BTreeMap, future::ready, sync::Arc, time::Duration};
+
+    // Catches request-level AdminOp errors being lost by rdkafka_error_code().
+    #[test]
+    fn maps_admin_operation_wrappers_to_safe_errors() {
+        for (code, expected) in [
+            (
+                RDKafkaErrorCode::OperationTimedOut,
+                TopicAdminError::Timeout,
+            ),
+            (RDKafkaErrorCode::RequestTimedOut, TopicAdminError::Timeout),
+            (RDKafkaErrorCode::TimedOutQueue, TopicAdminError::Timeout),
+            (
+                RDKafkaErrorCode::TopicAuthorizationFailed,
+                TopicAdminError::Authorization,
+            ),
+            (
+                RDKafkaErrorCode::TopicAlreadyExists,
+                TopicAdminError::AlreadyExists,
+            ),
+            (
+                RDKafkaErrorCode::UnknownTopicOrPartition,
+                TopicAdminError::NotFound,
+            ),
+            (
+                RDKafkaErrorCode::InvalidConfig,
+                TopicAdminError::InvalidConfig,
+            ),
+            (
+                RDKafkaErrorCode::BrokerTransportFailure,
+                TopicAdminError::Unavailable,
+            ),
+        ] {
+            assert_eq!(map_error(KafkaError::AdminOp(code)), expected);
+        }
+        assert_eq!(
+            map_error(KafkaError::MetadataFetch(
+                RDKafkaErrorCode::OperationTimedOut
+            )),
+            TopicAdminError::Timeout
+        );
+        assert_eq!(
+            map_error(KafkaError::AdminOpCreation(
+                "native error must remain private".into()
+            )),
+            TopicAdminError::Unavailable
+        );
+    }
+
+    fn admin_without_broker() -> TopicAdminClient {
+        // No bootstrap address: these operations cannot reach any Kafka cluster.
+        TopicAdminClient::new(
+            Arc::new(
+                ClientConfig::new()
+                    .create_with_context(crate::sessions::manager::SessionContext)
+                    .unwrap(),
+            ),
+            Duration::from_millis(5),
+        )
+    }
+
+    // Catches losing a real create Future's request-level timeout at the adapter boundary.
+    #[tokio::test]
+    async fn create_without_a_broker_returns_timeout() {
+        let input = CreateTopicInput {
+            name: "orders".into(),
+            partitions: 1,
+            replication_factor: None,
+            configs: BTreeMap::new(),
+        };
+        assert_eq!(
+            admin_without_broker().create(&input).await,
+            Err(TopicAdminError::Timeout)
+        );
+    }
+
+    // Catches losing a real delete Future's request-level timeout at the adapter boundary.
+    #[tokio::test]
+    async fn delete_without_a_broker_returns_timeout() {
+        assert_eq!(
+            admin_without_broker().delete("orders").await,
+            Err(TopicAdminError::Timeout)
+        );
+    }
 
     fn entry(
         name: &str,

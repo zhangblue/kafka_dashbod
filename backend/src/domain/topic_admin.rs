@@ -34,11 +34,24 @@ impl CreateTopicInput {
                 "partitions".into(),
                 "Partitions must be greater than zero".into(),
             );
+        } else if self.partitions > 100_000 {
+            errors.insert(
+                "partitions".into(),
+                "Partitions must not exceed 100000".into(),
+            );
         }
         if self.replication_factor.is_some_and(|factor| factor <= 0) {
             errors.insert(
                 "replicationFactor".into(),
                 "Replication factor must be greater than zero".into(),
+            );
+        } else if self
+            .replication_factor
+            .is_some_and(|factor| factor > 10_000)
+        {
+            errors.insert(
+                "replicationFactor".into(),
+                "Replication factor must not exceed 10000".into(),
             );
         }
 
@@ -322,6 +335,64 @@ mod tests {
         }
     }
 
+    // Catches rejecting the supported native upper boundaries before contacting Kafka.
+    #[test]
+    fn accepts_creation_counts_at_native_upper_boundaries() {
+        let mut input = create_input("orders");
+        input.partitions = 100_000;
+        input.replication_factor = Some(10_000);
+        assert!(input.validate().is_ok());
+    }
+
+    // Catches passing locally unsupported counts into AdminOpCreation instead of validation.
+    #[test]
+    fn rejects_partition_counts_above_native_limit() {
+        for partitions in [100_001, i32::MAX] {
+            let mut input = create_input("orders");
+            input.partitions = partitions;
+            assert_eq!(
+                input.validate().unwrap_err(),
+                BTreeMap::from([(
+                    "partitions".into(),
+                    "Partitions must not exceed 100000".into()
+                )])
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_replication_counts_above_native_limit() {
+        for factor in [10_001, i32::MAX] {
+            let mut input = create_input("orders");
+            input.replication_factor = Some(factor);
+            assert_eq!(
+                input.validate().unwrap_err(),
+                BTreeMap::from([(
+                    "replicationFactor".into(),
+                    "Replication factor must not exceed 10000".into()
+                )])
+            );
+        }
+    }
+
+    // Catches defaults or unknown-field acceptance changing the HTTP creation contract.
+    #[test]
+    fn deserializes_creation_defaults_and_rejects_unknown_fields() {
+        let input: CreateTopicInput =
+            serde_json::from_value(serde_json::json!({"name":"orders"})).unwrap();
+        assert_eq!(input.name, "orders");
+        assert_eq!(input.partitions, 1);
+        assert_eq!(input.replication_factor, None);
+        assert!(input.configs.is_empty());
+        assert!(input.validate().is_ok());
+        assert!(
+            serde_json::from_value::<CreateTopicInput>(serde_json::json!({
+                "name":"orders", "unexpected":true
+            }))
+            .is_err()
+        );
+    }
+
     #[test]
     fn accepts_each_topic_config_key_and_rejects_unknown_configs() {
         let valid_values = [
@@ -489,11 +560,10 @@ mod tests {
                 "key": "retention.ms", "value": "60000", "source": "topicOverride", "readOnly": false
             })
         );
-        let outcome = TopicConfigUpdateOutcome::AppliedButUnconfirmed;
-        assert!(matches!(
-            outcome,
-            TopicConfigUpdateOutcome::AppliedButUnconfirmed
-        ));
+        assert_eq!(
+            serde_json::to_value(TopicConfigUpdateOutcome::AppliedButUnconfirmed).unwrap(),
+            serde_json::json!("appliedButUnconfirmed")
+        );
     }
 
     #[test]

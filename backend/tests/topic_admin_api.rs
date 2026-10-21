@@ -286,6 +286,18 @@ async fn invalid_create_and_update_fields_are_rejected_before_native_work() {
         (
             "POST",
             base.clone(),
+            json!({"name":"orders","partitions":100001}),
+            "partitions",
+        ),
+        (
+            "POST",
+            base.clone(),
+            json!({"name":"orders","replicationFactor":10001}),
+            "replicationFactor",
+        ),
+        (
+            "POST",
+            base.clone(),
             json!({"name":"orders","configs":{"ssl.password":"never-return-value"}}),
             "configs",
         ),

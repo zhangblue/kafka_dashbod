@@ -95,6 +95,48 @@ it('validates inputs and retains optional values and API field errors after fail
     configs: { 'retention.ms': '3600000', 'cleanup.policy': 'compact' } })
 })
 
+// Catches accepting counts that the native create API cannot represent.
+it.each([
+  ['分区数', '100001'],
+  ['副本因子', '10001'],
+])('rejects %s above the native limit before sending a request', async (label, value) => {
+  const user = userEvent.setup()
+  const requests: CreateTopicInput[] = []
+  server.use(http.post('/api/sessions/:id/topics', async ({ request }) => {
+    requests.push(await request.json() as CreateTopicInput)
+    return HttpResponse.json({ status: 'created' }, { status: 201 })
+  }))
+  render(<CreateTopicModal sessionId="session-a" onClose={() => {}} onApplied={() => {}} />)
+  await user.type(screen.getByLabelText('Topic 名称'), 'orders')
+  await user.clear(screen.getByLabelText(label))
+  await user.type(screen.getByLabelText(label), value)
+  await user.click(screen.getByRole('button', { name: '创建 Topic' }))
+  expect(screen.getByLabelText(label)).toHaveAttribute('aria-invalid', 'true')
+  expect(screen.getByLabelText(label)).toHaveAccessibleDescription(label === '分区数'
+    ? '分区数必须为 1–100000 的整数。'
+    : '副本因子必须为 1–10000 的整数，或留空使用集群默认值。')
+  expect(requests).toEqual([])
+})
+
+// Catches an off-by-one upper-bound check rejecting supported creation values.
+it('submits creation counts at the native upper boundaries', async () => {
+  const user = userEvent.setup()
+  const requests: CreateTopicInput[] = []
+  server.use(http.post('/api/sessions/:id/topics', async ({ request }) => {
+    requests.push(await request.json() as CreateTopicInput)
+    return HttpResponse.json({ status: 'created' }, { status: 201 })
+  }))
+  render(<CreateTopicModal sessionId="session-a" onClose={() => {}} onApplied={() => {}} />)
+  await user.type(screen.getByLabelText('Topic 名称'), 'orders')
+  await user.clear(screen.getByLabelText('分区数'))
+  await user.type(screen.getByLabelText('分区数'), '100000')
+  await user.type(screen.getByLabelText('副本因子'), '10000')
+  await user.click(screen.getByRole('button', { name: '创建 Topic' }))
+  await waitFor(() => expect(requests).toEqual([
+    { name: 'orders', partitions: 100000, replicationFactor: 10000 },
+  ]))
+})
+
 // Catches silently discarding a partly completed form.
 it('confirms before discarding a dirty form and closes a pristine form directly', async () => {
   const user = userEvent.setup()

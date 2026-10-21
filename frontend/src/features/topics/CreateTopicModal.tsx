@@ -43,8 +43,8 @@ function CreateTopicForm({ sessionId, onClose, onApplied }: CreateTopicModalProp
     if (submitting.current || created) return
     const errors: Record<string, string> = {}
     if (!/^[a-zA-Z0-9._-]{1,249}$/.test(name) || name === '.' || name === '..') errors.name = '请输入 1–249 个字母、数字、点、下划线或短横线；名称不能是 . 或 ..。'
-    if (!/^[0-9]+$/.test(partitions) || !Number.isSafeInteger(Number(partitions)) || Number(partitions) < 1 || Number(partitions) > 2147483647) errors.partitions = '分区数必须为有效的正整数。'
-    if (replicationFactor !== '' && (!/^[0-9]+$/.test(replicationFactor) || Number(replicationFactor) < 1 || Number(replicationFactor) > 32767)) errors.replicationFactor = '副本因子必须为 1–32767 的整数，或留空使用集群默认值。'
+    if (!/^[0-9]+$/.test(partitions) || !Number.isSafeInteger(Number(partitions)) || Number(partitions) < 1 || Number(partitions) > 100000) errors.partitions = '分区数必须为 1–100000 的整数。'
+    if (replicationFactor !== '' && (!/^[0-9]+$/.test(replicationFactor) || Number(replicationFactor) < 1 || Number(replicationFactor) > 10000)) errors.replicationFactor = '副本因子必须为 1–10000 的整数，或留空使用集群默认值。'
     const suppliedConfigs = Object.fromEntries(Object.entries(configs).filter(([, value]) => value !== ''))
     for (const [key, value] of Object.entries(suppliedConfigs)) {
       const error = validateTopicConfigValue(key, value)
