@@ -51,7 +51,7 @@ async function fixture(t, osName = 'Darwin', arch = 'arm64') {
   await executable(path.join(commands, 'uname'), `#!/bin/sh\ncase "$1" in -s) echo '${osName}';; -m) echo '${arch}';; esac\n`);
   for (const platform of ['darwin-arm64', 'linux-amd64']) {
     await executable(path.join(release, 'bin', `kafka-dashboard-${platform}`), `#!/bin/sh
-[ "\${1-}" != --version ] || { echo 'kafka-dashboard 0.1.0'; exit 0; }
+[ "\${1-}" != --version ] || { echo 'kafka-dashboard 0.2.0'; exit 0; }
 printf '%s\\n' "$$" >> "$FAKE_PID_FILE"
 [ -z "\${FAKE_EVENTS_FILE-}" ] || printf 'START:%s\\n' "$$" >> "$FAKE_EVENTS_FILE"
 printf '%s\\n' '${platform}' "$PWD" "\${DATABASE_URL-}" "\${KAFKA_DASHBOARD_WEB_DIR-}" "$@"
@@ -579,7 +579,7 @@ test('version runs in the foreground without creating data, pid, or log', async 
   const f = await fixture(t);
   const result = f.run(['--version']);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, 'kafka-dashboard 0.1.0\n');
+  assert.equal(result.stdout, 'kafka-dashboard 0.2.0\n');
   assert.equal(existsSync(path.join(f.release, 'data')), false);
 });
 for (const args of [['unknown'], ['--bind', '127.0.0.1:9090'], ['start', 'extra'], ['--version', 'extra']]) {
