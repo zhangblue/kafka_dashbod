@@ -5,7 +5,8 @@ release_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 case "$(uname -s)/$(uname -m)" in
     Darwin/arm64) platform=darwin-arm64 ;;
     Linux/x86_64) platform=linux-amd64 ;;
-    *) echo 'Unsupported platform. Supported: Darwin/arm64, Linux/x86_64.' >&2; exit 1 ;;
+    Linux/aarch64|Linux/arm64) platform=linux-arm64 ;;
+    *) echo 'Unsupported platform. Supported: Darwin/arm64, Linux/x86_64, Linux/aarch64.' >&2; exit 1 ;;
 esac
 binary="$release_dir/bin/kafka-dashboard-$platform"
 data_dir="$release_dir/data"
@@ -89,7 +90,7 @@ matches_process_identity() {
             ' "$pid" "$binary" 2>/dev/null) || return 1
             [ "$identity" = match ]
             ;;
-        linux-amd64)
+        linux-amd64|linux-arm64)
             process_executable=$(readlink "/proc/$pid/exe") || return 1
             case "$process_command" in
                 "$binary")
@@ -105,8 +106,8 @@ matches_process_identity() {
                     # launcher, not an unrelated process merely named qemu.
                     launcher_executable=$(readlink "/proc/$$/exe") || return 1
                     [ "$process_executable" = "$launcher_executable" ] || return 1
-                    case "$process_executable" in
-                        */qemu-x86_64|*/qemu-x86_64-static|*/x86_64-binfmt-P) ;;
+                    case "$platform:$process_executable" in
+                        linux-amd64:*/qemu-x86_64|linux-amd64:*/qemu-x86_64-static|linux-amd64:*/x86_64-binfmt-P|linux-arm64:*/qemu-aarch64|linux-arm64:*/qemu-aarch64-static|linux-arm64:*/aarch64-binfmt-P) ;;
                         *) return 1 ;;
                     esac
                     printf '%s\000' '[qemu]' "$binary" "$binary" | cmp -s - "/proc/$pid/cmdline"

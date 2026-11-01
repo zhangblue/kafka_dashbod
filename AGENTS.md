@@ -11,7 +11,7 @@
 - `backend/src/sessions/`：按需客户端和 15 秒短租约。快照续租，同一会话采集互斥；5 秒清理过期会话。关闭、删除集群、取消任务及进程退出必须等待在途创建/采集/释放，不能把阻塞原生工作遗留到后台。
 - `frontend/src/api/`：唯一 HTTP 客户端、共享类型；`frontend/src/features/`：设置、概览、Topics、Consumer Groups、Lag 规则、会话及内存历史；`frontend/src/components/`：公共展示组件。
 - `backend/tests/`、前端 `*.test.ts(x)`：领域、仓储、API、进程、交互测试；`frontend/e2e/` 与 `scripts/`：一次性 Kafka + 浏览器验收；`tests/`：发行脚本回归。
-- `packaging/`：启动器和发行模板；`tools/`：唯一构建/验证入口；`dist/`：生成的双平台发行包。
+- `packaging/`：启动器和发行模板；`tools/`：唯一构建/验证入口；`dist/`：生成的三平台独立发行包。
 
 ## 已确认的页面风格
 
@@ -55,16 +55,22 @@ npm --prefix frontend run build
 node --test scripts/e2e-preview.test.mjs
 node --test tests/release_scripts.test.mjs
 npm --prefix frontend run test:e2e
-./tools/build-release.sh
-./tools/verify-release.sh dist/kafka-dashboard
+./tools/build-release.sh --platform linux-amd64
+./tools/build-release.sh --platform linux-arm64
+./tools/build-release.sh --platform darwin-arm64
+./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-linux-amd64
+./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-linux-arm64
+./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-darwin-arm64
 git diff --check
 ```
 
-功能和缺陷修改遵循 TDD：先写有意义的失败测试，确认失败原因，再做最小实现并重跑相关回归。纯文档修改无需虚构测试。单元测试不依赖真实 Kafka；broker 测试默认 ignored，由明确的一次性环境执行。E2E 启动/清理由脚本统一管理，不复用未知健康服务。打包及双平台验证需要 Apple Silicon macOS 和可运行 Linux/amd64 的 Docker；不要并发打包。
+功能和缺陷修改遵循 TDD：先写有意义的失败测试，确认失败原因，再做最小实现并重跑相关回归。纯文档修改无需虚构测试。单元测试不依赖真实 Kafka；broker 测试默认 ignored，由明确的一次性环境执行。E2E 启动/清理由脚本统一管理，不复用未知健康服务。三平台独立打包须显式 --platform；Linux 使用 cargo-zigbuild / Zig 和隔离 curl 头文件，macOS 使用本机 Apple Silicon Cargo。验证只运行所选平台，Linux 需要对应架构 Docker；不要并发打包。CARGO_TARGET_DIR 可复用缓存；产物按版本和平台命名并带归档 checksum 与 RELEASE.json 来源记录。已有 data/ 或 .env 的目录禁止替换。
 
 提交前自审差异、运行与影响范围相称的验证和秘密扫描，记录实际结果与限制，禁止把未运行、被跳过或失败的检查报告为通过。提交应保持单一目的并包含所需源码、测试和文档；不要自动推送、强推或覆盖远端历史，遵循当前用户授权的交付流程。
 
 ## Context7 文档流程
+
+发布入口为 `node tools/publish-release.mjs <vX.Y.Z> <artifacts-dir>`；只接受三平台归档和 checksum 共六件普通文件，必须匹配精确标签提交与 Cargo 版本，包内 dirty=false。先完成三平台 build/verify，再由唯一发布 job 上传草稿、下载六件逐字节核验、复核远端标签与清单后取消草稿。已正式发布版本不可覆盖；认证/网络失败不可当作 404。草稿重试只接受同一份原始六附件字节，不能盲用 clobber；重跑失败 publish job 可复用同次 run artifacts，重跑构建产生差异时需维护者人工检查草稿。相同标签 concurrency 不取消在途发布。发布测试 `node --test tests/publish_release.test.mjs` 只 fake 外部 gh，禁止测试实际 GitHub 写入。
 
 涉及库、框架、SDK、API、CLI 工具或云服务的语法、配置、版本迁移、专属调试及安装问题时，必须查询 Context7 当前文档，即使熟悉该技术也不凭记忆回答。优先于网页搜索。纯重构、从头编写普通脚本、业务逻辑调试、代码审查及通用编程概念不触发此要求。
 

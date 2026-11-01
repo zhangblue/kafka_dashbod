@@ -1,0 +1,123 @@
+name: Three-platform release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to release
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+jobs:
+  build:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - platform: linux-arm64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - platform: darwin-arm64
+            target: aarch64-apple-darwin
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      RUST_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Verify exact source and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          node --input-type=module -e 'import fs from "node:fs"; const version=fs.readFileSync("backend/Cargo.toml","utf8").match(/^version\s*=\s*"([^"]+)"/m)?.[1]; if (`v${version}` !== process.env.RELEASE_TAG) process.exit(1)'
+      - name: Install fixed Rust and target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
+          rustup target add "$RUST_TARGET"
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cmake make perl pkg-config libcurl4-openssl-dev sqlite3
+          python3 -m venv "$RUNNER_TEMP/zig"
+          "$RUNNER_TEMP/zig/bin/pip" install ziglang==0.15.2
+          echo "$RUNNER_TEMP/zig/lib/$(ls "$RUNNER_TEMP/zig/lib")/site-packages/ziglang" >> "$GITHUB_PATH"
+          cargo install cargo-zigbuild --version 0.23.0 --locked
+      - name: macOS build dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v cmake >/dev/null || brew install cmake
+          command -v sqlite3
+      - name: Build and verify single platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/build-release.sh --platform "$PLATFORM" --version "$RELEASE_TAG"
+          ./tools/verify-release.sh "dist/kafka-dashboard-$RELEASE_TAG-$PLATFORM"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            dist/kafka-dashboard-${{ env.RELEASE_TAG }}-${{ matrix.platform }}.tar.gz
+            dist/kafka-dashboard-${{ env.RELEASE_TAG }}-${{ matrix.platform }}.tar.gz.sha256
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-linux-amd64
+          path: dist
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-linux-arm64
+          path: dist
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-darwin-arm64
+          path: dist
+      - name: Verify six attachments and publish draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: node tools/publish-release.mjs "$RELEASE_TAG" dist

@@ -1,9 +1,14 @@
-Kafka Lens — 离线发行说明
+Kafka Lens — 三平台独立半离线发行说明
 
 一、支持平台
 
-支持 macOS Apple Silicon（Darwin/arm64）和 Linux x86-64（Linux/x86_64）。
-将整个 kafka-dashboard 目录复制或解压到可写位置，并进入该目录。
+支持 macOS Apple Silicon（Darwin/arm64）、Linux x86-64（Linux/x86_64）
+和 Linux ARM64（Linux/aarch64，兼容 arm64 别名）。每包只含对应平台
+的一个二进制；将整个 kafka-dashboard-v版本-平台 目录复制或解压到
+可写位置，并进入该目录。RELEASE.json 记录版本、平台、target、源码
+commit 和 dirty 状态；SHA256SUMS 覆盖除自身外的完整文件。
+归档旁的 .tar.gz.sha256 校验压缩文件真实字节，在归档目录先执行
+shasum -a 256 -c <归档名>.tar.gz.sha256，再解压校验内部文件。
 运行机器无需安装 Node.js、Rust、系统 librdkafka 或系统 OpenSSL。
 Linux 使用 musl，静态链接 librdkafka、SQLite 和 vendored OpenSSL。
 macOS 依赖 libSystem 等系统原生库，并非完全静态；执行许可遵循本机

@@ -49,7 +49,7 @@ async function fixture(t, osName = 'Darwin', arch = 'arm64') {
   await mkdir(commands);
   await copyFile(path.join(root, 'packaging/start.sh'), path.join(release, 'start.sh'));
   await executable(path.join(commands, 'uname'), `#!/bin/sh\ncase "$1" in -s) echo '${osName}';; -m) echo '${arch}';; esac\n`);
-  for (const platform of ['darwin-arm64', 'linux-amd64']) {
+  for (const platform of ['darwin-arm64', 'linux-amd64', 'linux-arm64']) {
     await executable(path.join(release, 'bin', `kafka-dashboard-${platform}`), `#!/bin/sh
 [ "\${1-}" != --version ] || { echo 'kafka-dashboard 0.2.0'; exit 0; }
 printf '%s\\n' "$$" >> "$FAKE_PID_FILE"
@@ -109,7 +109,7 @@ async function serviceLog(release) {
 }
 
 // Detect foreground blocking, injected configuration, and a wrong working directory or binary.
-for (const [osName, arch, platform] of [['Darwin', 'arm64', 'darwin-arm64'], ['Linux', 'x86_64', 'linux-amd64']]) {
+for (const [osName, arch, platform] of [['Darwin', 'arm64', 'darwin-arm64'], ['Linux', 'x86_64', 'linux-amd64'], ['Linux', 'aarch64', 'linux-arm64']]) {
   test(`${osName}/${arch} background start selects its binary and working directory`, async t => {
     const f = await fixture(t, osName, arch);
     const result = f.run(['start']);
@@ -134,12 +134,13 @@ test('default command starts in background without reading an env file', async t
   assert.match(result.stdout, /Kafka Lens 已在后台启动，PID: [1-9][0-9]*/);
   assert.equal((await serviceLog(f.release)).split('\n')[0], 'darwin-arm64');
 });
-test('unsupported platform reports both supported platforms', async t => {
-  const f = await fixture(t, 'Linux', 'aarch64');
+test('unsupported platform reports all three supported platforms', async t => {
+  const f = await fixture(t, 'Linux', 'riscv64');
   const result = f.run();
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Darwin\/arm64/);
   assert.match(result.stderr, /Linux\/x86_64/);
+  assert.match(result.stderr, /Linux\/aarch64/);
 });
 test('moved package background startup resolves its working directory', async t => {
   const f = await fixture(t);
@@ -593,7 +594,7 @@ for (const args of [['unknown'], ['--bind', '127.0.0.1:9090'], ['start', 'extra'
 }
 
 // Exercise SQLx's real URI parser: literal '?' and '%20' must remain directory names.
-const nativeBinary = path.join(root, 'dist/kafka-dashboard/bin/kafka-dashboard-darwin-arm64');
+const nativeBinary = path.join(root, 'dist/kafka-dashboard-v0.2.0-darwin-arm64/bin/kafka-dashboard-darwin-arm64');
 for (const directory of ['release?query', 'release%20encoded', 'release with spaces', '中文发行目录']) {
   test(`real binary starts after relocation to ${directory}`, {
     skip: process.platform !== 'darwin' || process.arch !== 'arm64' || !existsSync(nativeBinary)
@@ -638,57 +639,83 @@ for (const directory of ['release?query', 'release%20encoded', 'release with spa
   });
 }
 
+const releaseName = 'kafka-dashboard-v0.2.0-darwin-arm64';
 async function buildFixture(t, fail = '') {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'release-build-test-'));
   t.after(() => rm(temp, { recursive: true, force: true }));
-  for (const dir of ['tools', 'packaging', 'frontend', 'commands', 'dist/kafka-dashboard']) await mkdir(path.join(temp, dir), { recursive: true });
+  for (const dir of ['tools', 'packaging', 'backend', 'frontend', 'commands', 'headers/curl', `dist/${releaseName}`]) await mkdir(path.join(temp, dir), { recursive: true });
   await copyFile(path.join(root, 'tools/build-release.sh'), path.join(temp, 'tools/build-release.sh'));
+  await writeFile(path.join(temp, 'headers/curl/curl.h'), 'fixture header');
+  await writeFile(path.join(temp, 'headers/stdio.h'), 'must not copy host libc');
+  await writeFile(path.join(temp, 'backend/Cargo.toml'), '[package]\nname = "backend"\nversion = "0.2.0"\n');
   for (const file of ['start.sh', '.env.example', 'README.txt']) await copyFile(path.join(root, 'packaging', file), path.join(temp, 'packaging', file));
-  await writeFile(path.join(temp, 'dist/kafka-dashboard/old'), 'previous release');
-  await writeFile(path.join(temp, 'dist/kafka-dashboard.tar.gz'), 'previous archive');
+  await writeFile(path.join(temp, `dist/${releaseName}/old`), 'previous release');
+  await writeFile(path.join(temp, `dist/${releaseName}.tar.gz`), 'previous archive');
+  await writeFile(path.join(temp, `dist/${releaseName}.tar.gz.sha256`), 'previous checksum');
   await executable(path.join(temp, 'commands/uname'), '#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo arm64;; esac\n');
-  // Only external compilers are faked: package assembly, hashing, and archive are real.
+  await executable(path.join(temp, 'commands/git'), '#!/bin/sh\n[ \"$1\" != status ] || exit 0\nprintf "0123456789012345678901234567890123456789\\n"\n');
+  // Only expensive external compilers are faked; tar, hashes and filesystem are real.
   await executable(path.join(temp, 'commands/npm'), '#!/bin/sh\n[ "$FAIL_STEP" != npm ] || exit 12\nmkdir -p frontend/dist/assets\nprintf "<html>release</html>" > frontend/dist/index.html\nprintf "asset" > frontend/dist/assets/app.js\n');
-  await executable(path.join(temp, 'commands/cargo'), '#!/bin/sh\n[ "$FAIL_STEP" != cargo ] || exit 13\nmkdir -p target/aarch64-apple-darwin/release\nprintf "mac binary" > target/aarch64-apple-darwin/release/kafka-dashboard\n');
-  await executable(path.join(temp, 'commands/docker'), '#!/bin/sh\n[ "$FAIL_STEP" != docker ] || exit 14\nfor arg do\ncase "$arg" in type=local,dest=*) dest=${arg#type=local,dest=}; mkdir -p "$dest"; printf "linux binary" > "$dest/kafka-dashboard-linux-amd64";; esac\ndone\n');
-  return { temp, run() { return spawnSync('/bin/sh', [path.join(temp, 'tools/build-release.sh')], { cwd: temp, encoding: 'utf8', env: { ...process.env, PATH: `${temp}/commands:${process.env.PATH}`, FAIL_STEP: fail } }); } };
+  await executable(path.join(temp, 'commands/cargo'), `#!/bin/sh
+[ "$FAIL_STEP" != cargo ] || exit 13
+printf '%s\\n' "$*" >> cargo-calls
+while [ "$#" -gt 0 ]; do
+  case "$1" in --target) target=$2; shift;; --target-dir) output=$2; shift;; esac
+  shift
+done
+mkdir -p "$output/$target/release"
+printf '%s' "$target" > "$output/$target/release/kafka-dashboard"
+`);
+  return { temp, run(args = ['--platform', 'darwin-arm64'], env = {}) { return spawnSync('/bin/sh', [path.join(temp, 'tools/build-release.sh'), ...args], { cwd: temp, encoding: 'utf8', env: { ...process.env, PATH: `${temp}/commands:${process.env.PATH}`, FAIL_STEP: fail, KAFKA_DASHBOARD_CURL_INCLUDE_DIR: path.join(temp, 'headers'), ...env } }); } };
 }
-test('build assembles a complete checksummed archive without stale files', async t => {
+test('build requires an explicit supported platform and matching version before compilation', async t => {
   const f = await buildFixture(t);
-  const result = f.run();
-  assert.equal(result.status, 0, result.stderr);
-  const release = path.join(f.temp, 'dist/kafka-dashboard');
-  assert.deepEqual((await readdir(release)).sort(), ['.env.example', 'README.txt', 'SHA256SUMS', 'bin', 'start.sh', 'web']);
-  assert.equal(spawnSync('shasum', ['-a', '256', '-c', 'SHA256SUMS'], { cwd: release }).status, 0);
-  assert.equal((await stat(path.join(release, 'bin/kafka-dashboard-linux-amd64'))).mode & 0o111, 0o111);
-  const archive = spawnSync('tar', ['-tzf', path.join(f.temp, 'dist/kafka-dashboard.tar.gz')], { encoding: 'utf8' });
-  assert.equal(archive.status, 0);
-  assert.match(archive.stdout, /kafka-dashboard\/web\/index.html/);
-  assert.doesNotMatch(archive.stdout, /\/old/);
+  for (const args of [[], ['--platform', 'all'], ['--platform', 'linux-riscv64'], ['--platform', 'darwin-arm64', '--version', 'v9.0.0'], ['--platform', 'darwin-arm64', '--version', '']]) assert.notEqual(f.run(args).status, 0);
+  assert.equal(existsSync(path.join(f.temp, 'cargo-calls')), false);
 });
-for (const step of ['npm', 'cargo', 'docker']) {
-  test(`${step} failure preserves prior release and archive`, async t => {
-    const f = await buildFixture(t, step);
-    assert.notEqual(f.run().status, 0);
-    assert.equal(await readFile(path.join(f.temp, 'dist/kafka-dashboard/old'), 'utf8'), 'previous release');
-    assert.equal(await readFile(path.join(f.temp, 'dist/kafka-dashboard.tar.gz'), 'utf8'), 'previous archive');
-    assert.deepEqual((await readdir(path.join(f.temp, 'dist'))).sort(), ['kafka-dashboard', 'kafka-dashboard.tar.gz']);
+for (const [platform, target, command] of [['darwin-arm64', 'aarch64-apple-darwin', 'build'], ['linux-amd64', 'x86_64-unknown-linux-musl', 'zigbuild'], ['linux-arm64', 'aarch64-unknown-linux-musl', 'zigbuild']]) {
+  test(`build ${platform} emits one target and genuine archive checksum`, async t => {
+    const f = await buildFixture(t);
+    const result = f.run(['--platform', platform, '--version', 'v0.2.0'], { CARGO_TARGET_DIR: path.join(f.temp, 'custom target') });
+    assert.equal(result.status, 0, result.stderr);
+    const name = `kafka-dashboard-v0.2.0-${platform}`;
+    const release = path.join(f.temp, 'dist', name);
+    assert.deepEqual(await readdir(path.join(release, 'bin')), [`kafka-dashboard-${platform}`]);
+    const calls = await readFile(path.join(f.temp, 'cargo-calls'), 'utf8');
+    assert.match(calls, new RegExp(`^${command} .*--target ${target} `));
+    assert.match(calls, /--locked/); assert.match(calls, /-p backend --bin kafka-dashboard/);
+    assert.equal(spawnSync('shasum', ['-a', '256', '-c', 'SHA256SUMS'], { cwd: release }).status, 0);
+    assert.equal(spawnSync('shasum', ['-a', '256', '-c', `${name}.tar.gz.sha256`], { cwd: path.join(f.temp, 'dist') }).status, 0);
+    const archive = spawnSync('tar', ['-tzf', path.join(f.temp, 'dist', `${name}.tar.gz`)], { encoding: 'utf8' });
+    assert.equal(archive.status, 0); assert.match(archive.stdout, /web\/index.html/); assert.doesNotMatch(archive.stdout, /\/old|\/data\/|\/\.env$/);
+    assert.deepEqual(JSON.parse(await readFile(path.join(release, 'RELEASE.json'))), { version: '0.2.0', platform, target, commit: '0123456789012345678901234567890123456789', dirty: false });
+    if (platform !== 'darwin-arm64') {
+      assert.equal(await readFile(path.join(f.temp, 'custom target/release-curl-headers/curl/curl.h'), 'utf8'), 'fixture header');
+      assert.equal(existsSync(path.join(f.temp, 'custom target/release-curl-headers/stdio.h')), false);
+    }
+    if (platform !== 'darwin-arm64') assert.equal(await readFile(path.join(f.temp, `dist/${releaseName}/old`), 'utf8'), 'previous release');
   });
 }
-
-test('archive publication failure rolls back the directory and prior archive', async t => {
-  const f = await buildFixture(t);
-  await executable(path.join(f.temp, 'commands/mv'), '#!/bin/sh\ncase "$1" in */.release.*/kafka-dashboard.tar.gz) exit 19;; esac\nexec /bin/mv "$@"\n');
-  const result = f.run();
-  assert.notEqual(result.status, 0);
-  assert.equal(await readFile(path.join(f.temp, 'dist/kafka-dashboard/old'), 'utf8'), 'previous release');
-  assert.equal(await readFile(path.join(f.temp, 'dist/kafka-dashboard.tar.gz'), 'utf8'), 'previous archive');
-  assert.deepEqual((await readdir(path.join(f.temp, 'dist'))).sort(), ['kafka-dashboard', 'kafka-dashboard.tar.gz']);
-});
+for (const step of ['npm', 'cargo', 'tar', 'publication', 'checksum-publication']) {
+  test(`${step} failure preserves all prior artifacts`, async t => {
+    const f = await buildFixture(t, step);
+    if (step === 'tar') await executable(path.join(f.temp, 'commands/tar'), '#!/bin/sh\nexit 18\n');
+    if (step.includes('publication')) await executable(path.join(f.temp, 'commands/mv'), `#!/bin/sh
+case "$1" in */.release.*/${releaseName}.${step === 'publication' ? 'tar.gz' : 'tar.gz.sha256'}) exit 19;; esac
+exec /bin/mv "$@"
+`);
+    assert.notEqual(f.run().status, 0);
+    assert.equal(await readFile(path.join(f.temp, `dist/${releaseName}/old`), 'utf8'), 'previous release');
+    assert.equal(await readFile(path.join(f.temp, `dist/${releaseName}.tar.gz`), 'utf8'), 'previous archive');
+    assert.equal(await readFile(path.join(f.temp, `dist/${releaseName}.tar.gz.sha256`), 'utf8'), 'previous checksum');
+    assert.deepEqual((await readdir(path.join(f.temp, 'dist'))).sort(), [releaseName, `${releaseName}.tar.gz`, `${releaseName}.tar.gz.sha256`]);
+  });
+}
 
 // Detect skipping artifact hygiene or checksum validation before executing binaries.
 for (const [name, file, message] of [
   ['secret file', '.env', /Unexpected release file/],
+  ['extra binary', 'bin/kafka-dashboard-linux-arm64', /Unexpected release file/],
   ['database', 'data/config.db', /Unexpected release/],
   ['source', 'web/main.ts', /Unexpected release file/],
   ['dependencies', 'web/node_modules/pkg/index.js', /Unexpected release/],
@@ -697,7 +724,7 @@ for (const [name, file, message] of [
   test(`verification rejects ${name} before running binaries`, async t => {
     const f = await buildFixture(t);
     assert.equal(f.run().status, 0);
-    const release = path.join(f.temp, 'dist/kafka-dashboard');
+    const release = path.join(f.temp, 'dist', releaseName);
     await mkdir(path.dirname(path.join(release, file)), { recursive: true });
     await writeFile(path.join(release, file), 'unexpected contents');
     const result = spawnSync('/bin/sh', [path.join(root, 'tools/verify-release.sh'), release], { encoding: 'utf8', timeout: 10000 });
@@ -706,21 +733,21 @@ for (const [name, file, message] of [
   });
 }
 
-async function runtimeFixture(t, ignoreTerm = false) {
+async function runtimeFixture(t, ignoreTerm = false, platform = 'darwin-arm64') {
   const f = await buildFixture(t);
-  assert.equal(f.run().status, 0);
-  const release = path.join(f.temp, 'dist/kafka-dashboard');
-  await executable(path.join(release, 'bin/kafka-dashboard-darwin-arm64'), `#!/bin/sh
-[ "\${1-}" != --version ] || exit 0
+  assert.equal(f.run(['--platform', platform]).status, 0);
+  const release = path.join(f.temp, 'dist', `kafka-dashboard-v0.2.0-${platform}`);
+  await executable(path.join(release, `bin/kafka-dashboard-${platform}`), `#!/bin/sh
+[ "\${1-}" != --version ] || { echo "kafka-dashboard 0.2.0"; exit 0; }
 printf '%s\\n' "$$" > "$SERVER_PID_FILE"
 trap '${ignoreTerm ? ':' : 'exit 0'}' TERM
 [ "$RUST_LOG" != info ] || echo 'address=127.0.0.1:12345'
 while :; do sleep 0.1; done
 `);
   const manifest = await readFile(path.join(release, 'SHA256SUMS'), 'utf8');
-  const digest = createHash('sha256').update(await readFile(path.join(release, 'bin/kafka-dashboard-darwin-arm64'))).digest('hex');
-  await writeFile(path.join(release, 'SHA256SUMS'), manifest.replace(/^[a-f0-9]{64}(  \.\/bin\/kafka-dashboard-darwin-arm64)$/m, `${digest}$1`));
-  await executable(path.join(f.temp, 'commands/file'), '#!/bin/sh\nprintf "Mach-O 64-bit executable arm64 ELF 64-bit x86-64 statically linked\\n"\n');
+  const digest = createHash('sha256').update(await readFile(path.join(release, `bin/kafka-dashboard-${platform}`))).digest('hex');
+  await writeFile(path.join(release, 'SHA256SUMS'), manifest.replace(new RegExp(`^[a-f0-9]{64}(  \\.\\/bin\\/kafka-dashboard-${platform})$`, 'm'), `${digest}$1`));
+  await executable(path.join(f.temp, 'commands/file'), '#!/bin/sh\nprintf "Mach-O 64-bit executable arm64 ELF 64-bit x86-64 ARM aarch64 statically linked\\n"\n');
   await executable(path.join(f.temp, 'commands/otool'), '#!/bin/sh\nprintf "binary:\\n"\n');
   // Trace the real launcher, keeping its startup, identity and signal handling.
   const launcher = path.join(release, 'start.sh');
@@ -796,8 +823,8 @@ test('failed verification never kills a pid after the launcher refuses its ident
   assert.equal(isRunning(serverPid), true, 'identity refusal must prevent forced cleanup of this pid');
 });
 
-async function verifyDualPlatformLifecycle(t, fault) {
-  const f = await runtimeFixture(t);
+async function verifyPlatformLifecycle(t, fault, platform = 'darwin-arm64') {
+  const f = await runtimeFixture(t, false, platform);
   const serverPidFile = path.join(f.temp, 'server.pid');
   const dockerEvents = path.join(f.temp, 'docker-events');
   const macEvents = path.join(f.temp, 'mac-events');
@@ -808,9 +835,20 @@ async function verifyDualPlatformLifecycle(t, fault) {
   await executable(path.join(f.temp, 'commands/docker'), `#!/bin/sh
 case "$1" in
   run)
+    case " $* " in *" --platform $EXPECTED_DOCKER_PLATFORM "*) ;; *) echo "wrong Docker platform" >&2; exit 9;; esac
     case " $* " in
-      *' --rm '*) exit 0 ;;
+      *' --rm '*) echo 'kafka-dashboard 0.2.0'; exit 0 ;;
     esac
+    user_count=0
+    previous=
+    for argument do
+      if [ "$previous" = --user ]; then
+        [ "$argument" = "$EXPECTED_DOCKER_USER" ] || { echo 'wrong Docker user' >&2; exit 9; }
+        user_count=$((user_count + 1))
+      fi
+      previous=$argument
+    done
+    [ "$user_count" = 1 ] || { echo 'missing or duplicate Docker --user' >&2; exit 9; }
     for argument do
       case "$argument" in */start.sh) echo 'launcher cannot be container PID 1' >&2; exit 1;; esac
     done
@@ -825,7 +863,7 @@ case "$1" in
           start) : ;;
           stop) touch "$DOCKER_EVENTS.stopped" ;;
           status)
-            if [ -e "$DOCKER_EVENTS.stopped" ]; then echo 'Kafka Lens 未运行'; else echo 'Kafka Lens 正在运行，PID: 12345'; fi ;;
+            if [ -e "$DOCKER_EVENTS.stopped" ]; then\n              case "$MAC_STATUS_FAULT" in wrong-stopped) echo 'Kafka Lens 未运行 extra';; stopped-error) exit 17;; *) echo 'Kafka Lens 未运行';; esac\n            else\n              case "$MAC_STATUS_FAULT" in wrong-pid) echo 'Kafka Lens 正在运行，PID: 1';; running-error) exit 17;; *) echo 'Kafka Lens 正在运行，PID: 12345';; esac\n            fi ;;
           *) exit 3 ;;
         esac ;;
       cat) echo 12345 ;;
@@ -852,10 +890,19 @@ esac
   await writeFile(path.join(f.release, 'SHA256SUMS'), manifest.replace(/^[a-f0-9]{64}(  \.\/web\/index.html)$/m, `${digest}$1`));
   const result = spawnSync('/bin/sh', [path.join(root, 'tools/verify-release.sh'), f.release], {
     encoding: 'utf8', timeout: runtimeVerificationTimeoutMs,
-    env: { ...process.env, PATH: `${f.temp}/commands:${process.env.PATH}`, SERVER_PID_FILE: serverPidFile, TEST_RELEASE: f.release, DOCKER_EVENTS: dockerEvents, MAC_EVENTS: macEvents, MAC_STATUS_FAULT: fault },
+    env: { ...process.env, PATH: `${f.temp}/commands:${process.env.PATH}`, SERVER_PID_FILE: serverPidFile, TEST_RELEASE: f.release, DOCKER_EVENTS: dockerEvents, MAC_EVENTS: macEvents, MAC_STATUS_FAULT: fault, EXPECTED_DOCKER_PLATFORM: platform.replace('linux-', 'linux/'), EXPECTED_DOCKER_USER: `${process.getuid()}:${process.getgid()}` },
   });
-  serverPid = Number(await readFile(serverPidFile, 'utf8'));
+  if (platform === 'darwin-arm64') serverPid = Number(await readFile(serverPidFile, 'utf8'));
   assert.equal(result.error, undefined);
+  if (platform !== 'darwin-arm64') {
+    assert.equal(result.status === 0, !fault, result.stderr);
+    if (fault) assert.match(result.stderr, /Linux status did not report|Linux status command failed/);
+    assert.equal(existsSync(macEvents), false);
+    const events = (await readFile(dockerEvents, 'utf8')).trim().split('\n');
+    assert.equal(events.at(-1), 'remove');
+    if (!fault) assert.deepEqual(events, ['container', 'start', 'status', 'stop', 'status', 'remove']);
+    return;
+  }
   if (fault) {
     assert.notEqual(result.status, 0, `verification must reject ${fault}`);
     const expectedError = {
@@ -871,11 +918,150 @@ esac
   } else {
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual((await readFile(macEvents, 'utf8')).trim().split('\n'), ['start', 'status', 'stop', 'status', 'stop']);
-    assert.deepEqual((await readFile(dockerEvents, 'utf8')).trim().split('\n'), ['container', 'start', 'status', 'stop', 'status', 'remove']);
+    assert.equal(existsSync(dockerEvents), false, 'single macOS verification must not run Docker');
   }
   assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
 }
 for (const fault of ['', 'wrong-pid', 'running-error', 'wrong-stopped', 'stopped-error']) {
-  test(`dual-platform lifecycle verification checks both macOS statuses${fault ? ` and rejects ${fault}` : ''}`,
-    t => verifyDualPlatformLifecycle(t, fault));
+  test(`single-platform lifecycle verification checks both macOS statuses${fault ? ` and rejects ${fault}` : ''}`,
+    t => verifyPlatformLifecycle(t, fault));
 }
+
+for (const platform of ['linux-amd64', 'linux-arm64']) {
+  for (const fault of ['', 'wrong-pid', 'running-error', 'wrong-stopped', 'stopped-error']) {
+    test(`${platform} lifecycle verification${fault ? ` rejects ${fault}` : ' passes'}`, t => verifyPlatformLifecycle(t, fault, platform));
+  }
+}
+
+// These exercise the shared worktree lock and publication alongside genuine tar/hash operations.
+test('all three platform packages coexist without replacing other architectures', async t => {
+  const f = await buildFixture(t);
+  for (const platform of ['darwin-arm64', 'linux-amd64', 'linux-arm64']) assert.equal(f.run(['--platform', platform]).status, 0);
+  assert.equal((await readdir(path.join(f.temp, 'dist'))).length, 9);
+});
+test('exclusive build lock rejects work before invoking compilers', async t => {
+  const f = await buildFixture(t);
+  await mkdir(path.join(f.temp, 'dist/.build-release.lock'));
+  assert.notEqual(f.run().status, 0);
+  assert.equal(existsSync(path.join(f.temp, 'cargo-calls')), false);
+  assert.equal(await readFile(path.join(f.temp, `dist/${releaseName}/old`), 'utf8'), 'previous release');
+});
+test('verification rejects a checksum-valid binary with the wrong version', async t => {
+  const f = await runtimeFixture(t);
+  const binary = path.join(f.release, 'bin/kafka-dashboard-darwin-arm64');
+  await executable(binary, '#!/bin/sh\necho "kafka-dashboard 9.9.9"\n');
+  const digest = createHash('sha256').update(await readFile(binary)).digest('hex');
+  await writeFile(path.join(f.release, 'SHA256SUMS'), (await readFile(path.join(f.release, 'SHA256SUMS'), 'utf8')).replace(/^[a-f0-9]{64}(  \.\/bin\/kafka-dashboard-darwin-arm64)$/m, `${digest}$1`));
+  const result = spawnSync('/bin/sh', [path.join(root, 'tools/verify-release.sh'), f.release], { encoding: 'utf8', env: { ...process.env, PATH: `${f.temp}/commands:${process.env.PATH}` } });
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /Binary version does not match/);
+  assert.equal(existsSync(path.join(f.release, 'data')), false);
+});
+
+for (const runtime of ['data/kafka-dashboard.db', '.env']) {
+  test(`build refuses to replace deployment with ${runtime}`, async t => {
+    const f = await buildFixture(t);
+    const file = path.join(f.temp, 'dist', releaseName, runtime);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, 'private runtime state');
+    assert.notEqual(f.run().status, 0);
+    assert.equal(await readFile(file, 'utf8'), 'private runtime state');
+    assert.equal(existsSync(path.join(f.temp, 'cargo-calls')), false);
+  });
+}
+
+test('Linux ARM64 management retains proc executable and exact NUL argv checks', async t => {
+  const f = await fixture(t, 'Linux', 'aarch64');
+  assert.equal(f.run(['start']).status, 0);
+  const pid = await readPid(f.release);
+  await serviceReady(f, pid);
+  await executable(path.join(f.commands, 'readlink'), '#!/bin/sh\ncase "$1" in /proc/*/exe) echo /bin/sh;; -f) echo /bin/sh;; *) exit 1;; esac\n');
+  await executable(path.join(f.commands, 'cmp'), `#!/usr/bin/env node
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const expected = Buffer.from('/bin/sh\\0' + process.env.TEST_BINARY + '\\0');
+process.exit(Buffer.concat(chunks).equals(expected) && process.argv.at(-1) === '/proc/' + process.env.TEST_PID + '/cmdline' ? 0 : 1);
+`);
+  const env = { TEST_PID: String(pid), TEST_BINARY: path.join(f.release, 'bin/kafka-dashboard-linux-arm64') };
+  assert.equal(f.run(['status'], env).status, 0);
+  await executable(path.join(f.commands, 'cmp'), '#!/bin/sh\nexit 1\n');
+  assert.notEqual(f.run(['stop'], env).status, 0, 'a failed kernel argv proof must prohibit signalling');
+  assert.equal(isRunning(pid), true);
+  assert.equal(await readPid(f.release), pid);
+});
+
+test('source metadata marks nonignored local source changes dirty', async t => {
+  const f = await buildFixture(t);
+  await executable(path.join(f.temp, 'commands/git'), '#!/bin/sh\ncase "$1" in status) echo " M README.md";; *) echo 0123456789012345678901234567890123456789;; esac\n');
+  assert.equal(f.run().status, 0);
+  assert.equal(JSON.parse(await readFile(path.join(f.temp, 'dist', releaseName, 'RELEASE.json'))).dirty, true);
+});
+
+for (const runtime of ['data/kafka-dashboard.db', '.env']) {
+  test(`publication preserves ${runtime} created during compilation`, async t => {
+    const f = await buildFixture(t);
+    const cargo = path.join(f.temp, 'commands/cargo');
+    await executable(cargo, (await readFile(cargo, 'utf8')) + `\nmkdir -p 'dist/${releaseName}/${path.dirname(runtime)}'\nprintf 'new private runtime state' > 'dist/${releaseName}/${runtime}'\n`);
+    const result = f.run();
+    assert.notEqual(result.status, 0, 'must reject runtime state appearing after preflight');
+    assert.equal(await readFile(path.join(f.temp, 'dist', releaseName, runtime), 'utf8'), 'new private runtime state');
+    assert.equal(await readFile(path.join(f.temp, 'dist', releaseName, 'old'), 'utf8'), 'previous release');
+    assert.equal(await readFile(path.join(f.temp, 'dist', `${releaseName}.tar.gz`), 'utf8'), 'previous archive');
+  });
+}
+
+for (const change of ['clean-source', 'dirty-source', 'untracked-source', 'head']) {
+  test(`source guard rejects ${change} mutation during compilation`, async t => {
+    const f = await buildFixture(t);
+    await executable(path.join(f.temp, 'commands/git'), '#!/bin/sh\nexec /usr/bin/git "$@"\n');
+    const git = args => {
+      const result = spawnSync('/usr/bin/git', args, { cwd: f.temp, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+    };
+    await writeFile(path.join(f.temp, '.gitignore'), 'commands/\ndist/\nfrontend/dist/\ntarget/\ncargo-calls\nheaders/\n');
+    await writeFile(path.join(f.temp, 'source.txt'), 'original source');
+    git(['init', '-q']); git(['add', '.']);
+    git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']);
+    if (change === 'dirty-source') await writeFile(path.join(f.temp, 'source.txt'), 'already dirty');
+    if (change === 'untracked-source') await writeFile(path.join(f.temp, 'new-source.txt'), 'untracked before');
+    const cargo = path.join(f.temp, 'commands/cargo');
+    const mutation = change === 'head'
+      ? '/usr/bin/git -c user.name=Fixture -c user.email=fixture@example.invalid commit --allow-empty -qm changed-head'
+      : `printf 'changed during compilation' > ${change === 'untracked-source' ? 'new-source.txt' : 'source.txt'}`;
+    await executable(cargo, (await readFile(cargo, 'utf8')) + `\n${mutation}\n`);
+    const result = f.run();
+    assert.notEqual(result.status, 0, 'source mutation must prevent claiming stale provenance');
+    assert.match(result.stderr, /Source changed during release build/);
+    assert.equal(await readFile(path.join(f.temp, 'dist', releaseName, 'old'), 'utf8'), 'previous release');
+    assert.equal(await readFile(path.join(f.temp, 'dist', `${releaseName}.tar.gz`), 'utf8'), 'previous archive');
+  });
+}
+
+test('publication checks runtime data after moving the old directory', async t => {
+  const f = await buildFixture(t);
+  await executable(path.join(f.temp, 'commands/mv'), `#!/bin/sh
+/bin/mv "$@" || exit $?
+case "$2" in */previous${releaseName}) mkdir -p "$2/data"; printf 'moved runtime' > "$2/data/config.db";; esac
+`);
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.equal(await readFile(path.join(f.temp, 'dist', releaseName, 'data/config.db'), 'utf8'), 'moved runtime');
+  assert.equal(await readFile(path.join(f.temp, 'dist', releaseName, 'old'), 'utf8'), 'previous release');
+});
+test('rollback preserves a newly running destination and retains its old backup', async t => {
+  const f = await buildFixture(t);
+  await executable(path.join(f.temp, 'commands/mv'), `#!/bin/sh
+case "$1" in */.release.*/${releaseName}.tar.gz)
+  mkdir -p 'dist/${releaseName}/data'
+  printf 'new running state' > 'dist/${releaseName}/data/config.db'
+  exit 19;;
+esac
+exec /bin/mv "$@"
+`);
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.equal(await readFile(path.join(f.temp, 'dist', releaseName, 'data/config.db'), 'utf8'), 'new running state');
+  const recovery = (await readdir(path.join(f.temp, 'dist'))).find(name => name.startsWith('.release.'));
+  assert.ok(recovery, 'unsafe-to-delete backups must be retained for recovery');
+  assert.equal(await readFile(path.join(f.temp, 'dist', recovery, `previous${releaseName}`, 'old'), 'utf8'), 'previous release');
+  assert.equal(await readFile(path.join(f.temp, 'dist', `${releaseName}.tar.gz`), 'utf8'), 'previous archive');
+});

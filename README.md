@@ -98,7 +98,7 @@ Bootstrap Servers 填写逗号分隔的 `host:port`。后端必须能访问 Kafk
 
 停用时取消规则的「启用规则」并保存，或删除规则后保存；清除时勾选「清除已保存 Token」并保存，摘要变为「未配置」，全部规则停止发送。**Token 与 Kafka 凭据一样以明文保存在 SQLite**；限制数据库、`-wal` / `-shm` / `-journal` sidecar、备份及 `.env` 的读取权限，不在日志、截图、trace 或故障附件中保存 Token、通知请求体或响应正文。服务无内置认证，必须按下文部署边界控制全部 HTTP/API 访问；不要把通知配置接口暴露到公网。
 
-本地开发按「本地运行」启动后端和前端；离线部署按「双平台离线发行包」构建，在发行目录复制 `.env.example` 为 `.env` 后执行 `./start.sh`，再在集群设置配置告警。后台监控依赖后端进程持续运行及到 Kafka、飞书的可达网络，关闭启动后端的进程会停止告警。
+本地开发按「本地运行」启动后端和前端；离线部署按「三平台独立半离线发行包」构建，在发行目录复制 `.env.example` 为 `.env` 后执行 `./start.sh`，再在集群设置配置告警。后台监控依赖后端进程持续运行及到 Kafka、飞书的可达网络，关闭启动后端的进程会停止告警。
 
 ## Topic 管理
 
@@ -177,36 +177,47 @@ docker compose -f docker-compose.test.yml -p kafka-lens-manual down --volumes --
 
 当前服务没有内置用户登录或权限系统。能够访问管理 API 的调用者可以使用所配置 Kafka 凭据的管理权限，页面确认框不是身份认证。生产环境必须置于受保护的内网或带身份验证的 HTTPS 反向代理之后，对全部 `/api` 配置访问控制，不得直接暴露到公网。发行包由后端直接提供静态资源和 SPA fallback。Vite preview 仅用于本地验收。后端默认只绑定回环地址；代理请求体限制应与 256 KiB 上限一致，超时需容纳 Kafka 采集及管理操作。限制数据库、sidecar 和备份的文件权限，受控保存备份；建议启用磁盘加密。仅监控时使用最小只读权限；需要管理时按上表限定 Topic 范围和操作权限，优先选择 SASL_SSL / SSL。
 
-## 双平台离线发行包
+## 三平台独立半离线发行包
 
-构建主机限定为 Apple Silicon macOS（Darwin/arm64），需要前述 Rust / C / Node 构建工具，以及能运行 `linux/amd64` 的 Docker Engine / Buildx。Rust 需安装 `aarch64-apple-darwin` target；Docker 构建阶段负责 Linux musl 工具链。首次构建需要网络下载 npm、Cargo 和容器镜像依赖。
+每次必须显式选择一个平台，不提供默认平台或 `all`：
 
-唯一打包入口：
+| 平台 | Rust target | 构建命令 |
+| --- | --- | --- |
+| `linux-amd64` | `x86_64-unknown-linux-musl` | `cargo zigbuild` |
+| `linux-arm64` | `aarch64-unknown-linux-musl` | `cargo zigbuild` |
+| `darwin-arm64` | `aarch64-apple-darwin` | `cargo build`（须 Apple Silicon macOS） |
+
+构建需要前述 Rust / C / Node 工具、相应 Rust target；Linux 交叉编译另需 cargo-zigbuild、Zig 与 curl 开发头文件。macOS 自动从 Xcode SDK 提取 `curl/`；Linux 可安装 curl 开发包（如 `libcurl4-openssl-dev`），或设置 `KAFKA_DASHBOARD_CURL_INCLUDE_DIR` 为含 `curl/curl.h` 的 include 目录。脚本只复制 `curl/` 到 Cargo 缓存的 `release-curl-headers/`，不会引入宿主 libc 头文件，不修改 Cargo registry。此头文件兼容处理不启用 OIDC/curl 运行依赖。首次构建需要网络下载 npm / Cargo 依赖；半离线指目标机器无需下载编译依赖，运行仍需 Kafka、飞书业务网络。
+
+唯一打包入口（示例版本应替换为 `backend/Cargo.toml` 当前版本）：
 
 ```bash
-./tools/build-release.sh
-./tools/verify-release.sh dist/kafka-dashboard
+./tools/build-release.sh --platform linux-amd64
+./tools/build-release.sh --platform linux-arm64
+./tools/build-release.sh --platform darwin-arm64 --version v0.3.0
+./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-linux-amd64
+./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-linux-arm64
+./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-darwin-arm64
 ```
 
-构建按锁文件安装依赖，先完成前端、macOS 和 Linux 编译，在临时目录组装、校验和压缩后通过同文件系统重命名发布；失败会恢复已有发行包。不要并发运行打包命令，也不要直接覆盖正在使用的发行目录。`dist/` 不进入 Git。产物为 `dist/kafka-dashboard.tar.gz` 及以下目录：
+`--version` 可省略；显式版本必须为 `vX.Y.Z` 且与 Cargo 包版本一致。每次只编译并打包所选架构，保留 Cargo 锁文件检查。`CARGO_TARGET_DIR` 可指定共享构建缓存；默认使用仓库 `target/`。同一 worktree 的独占构建锁防止前端和 dist 竞争，不要并发打包。构建、归档或发布任一步失败均保留已有三件产物；若目标目录有 `data/` 或真实 `.env`，脚本拒绝替换，避免删除部署数据。不同架构可共存。`dist/` 不进入 Git。
+
+每个平台输出 `dist/kafka-dashboard-v<版本>-<platform>/`、同名 `.tar.gz` 和 `.tar.gz.sha256`。归档 sidecar 校验真实压缩字节；例如在 dist 下执行 `shasum -a 256 -c kafka-dashboard-v0.3.0-linux-arm64.tar.gz.sha256`。目录结构如下（每包只含一个二进制）：
 
 ```text
-kafka-dashboard/
-├── bin/
-│   ├── kafka-dashboard-darwin-arm64
-│   └── kafka-dashboard-linux-amd64
-├── web/                 # 已构建的前端页面和 assets
+kafka-dashboard-v0.3.0-linux-arm64/
+├── bin/kafka-dashboard-linux-arm64
+├── web/                 # 完整前端页面和 assets
 ├── start.sh
-├── .env.example         # 启动前复制为 .env 的配置模板
-├── README.txt           # 离线运行说明
-├── SHA256SUMS
-└── data/                # 首次启动后创建，不进入发行归档
-    ├── kafka-dashboard.pid
-    ├── kafka-dashboard.log
-    └── kafka-dashboard.db  # 模板配置的 SQLite 数据库
+├── .env.example
+├── README.txt
+├── RELEASE.json         # version/platform/target/commit/dirty 来源记录
+└── SHA256SUMS           # 除自身外全部文件的有序完整清单
 ```
 
-复制整个目录或解压归档到目标机器的可写位置，进入发行目录后核验 `shasum -a 256 -c SHA256SUMS`（Linux 也可用 `sha256sum -c SHA256SUMS`），执行 `cp .env.example .env`，按需编辑配置并执行 `chmod 600 .env` 限制权限。支持 **macOS arm64 和 Linux x86_64**；启动器将 `Darwin/arm64` 映射到 `bin/kafka-dashboard-darwin-arm64`，将 `Linux/x86_64` 映射到 `bin/kafka-dashboard-linux-amd64`，其他平台拒绝启动。
+`RELEASE.json` 的 `dirty` 仅统计 Git 未忽略的源码变更；本地验证允许 dirty 包，正式发布要求标签精确提交且源码干净。运行时创建的 data、PID、日志、数据库及真实 `.env` 不进入归档。
+
+复制整个目录或解压归档到目标机器可写位置，进入发行目录核验 `shasum -a 256 -c SHA256SUMS`（Linux 也可用 `sha256sum -c SHA256SUMS`），再执行 `cp .env.example .env`，按需编辑并执行 `chmod 600 .env`。支持 **macOS arm64、Linux x86_64 和 Linux aarch64**；启动器分别映射到同名平台二进制，Linux `arm64` 别名也受支持，其他平台拒绝启动。
 
 ```bash
 ./start.sh                 # 后台启动，等同于 ./start.sh start
@@ -226,7 +237,19 @@ kafka-dashboard/
 
 运行机器不需要 Node.js、Rust、系统 librdkafka 或系统 OpenSSL。Linux 二进制使用 musl，静态链接 librdkafka、SQLite 和 vendored OpenSSL；macOS 保留操作系统原生库依赖（如 libSystem），并非完全静态。Linux 包不携带宿主机 CA 信任库，私有 TLS 请在集群设置显式配置 CA PEM。网络/DNS、可写存储和操作系统执行许可仍需可用。
 
-验证命令需在构建主机执行，使用 `curl`、`file`、`shasum`、`sqlite3`、`otool` 和 Docker。它校验完整文件清单、哈希、架构和静态链接边界，在临时发行副本中复制 `.env.example` 为 `.env`，通过 `start/status/stop` 管理 macOS 与 Linux/amd64 容器中的真实程序，验证版本、后台生命周期、SQLite 迁移、健康接口、页面/资源、SPA fallback 和正常停止；验证后清理临时进程和容器，不向原发行目录写入 `.env`、数据库、PID 或日志。
+验证命令只验证传入的一个平台，使用 `curl`、`file`、`shasum`、`sqlite3`；macOS 包还需 Apple Silicon macOS 与 `otool`，Linux 包需要可运行对应 `linux/amd64` 或 `linux/arm64` 的 Docker。它校验完整文件清单、哈希、来源、版本、架构和静态链接边界，在临时发行副本中复制 `.env.example` 为 `.env`，通过 `start/status/stop` 管理本机 macOS 或对应 Linux 容器中的真实程序，验证版本、后台生命周期、SQLite 迁移、健康接口、页面/资源、SPA fallback 和正常停止；验证后清理临时进程和容器，不向原发行目录写入 `.env`、数据库、PID 或日志。
+
+## 六附件发布门禁
+
+`.github/workflows/release.yml` 接受 `v*` 标签推送，或手动指定已存在的 `vX.Y.Z` 标签。三个独立 runner 分别构建并验证 Linux AMD64、Linux ARM64、macOS ARM64；全部成功后，唯一发布 job 下载本次运行的三份 artifact。构建固定 Rust 1.99.1、Zig 0.15.2、cargo-zigbuild 0.23.0，Node 使用 24 系列。构建权限为 `contents:read`，仅发布 job 为 `contents:write`；相同标签的发布不会取消在途运行。
+
+发布入口为 `node tools/publish-release.mjs vX.Y.Z <artifacts-dir>`，本机需要 Node.js、Python 3.9+、Git 和已鉴权且有仓库写权限的 GitHub CLI。目录必须只有三个 `.tar.gz` 与各自 `.tar.gz.sha256`，共六件普通文件。手工发布时须在 `dist/` 内另建只含这六件的子目录；构建输出的 `dist/` 同时有展开目录，不能直接作为发布输入。门禁核对 Cargo 版本、checkout 与本地及远端标签精确 commit、包内 version/platform/target/commit/dirty（必须为 false）及压缩字节 checksum，同时验证内部完整 checksum、必需文件、单对应架构二进制与安全文件清单，不执行归档内程序。Release 先保持草稿；上传后检查远端六件名称/大小，重新下载并逐字节比对全部六件，再次确认标签和草稿状态，最后取消草稿并核对正式状态。通过成功的鉴权分页列表查找草稿；已正式发布的版本一律拒绝改写，404、鉴权或网络失败均不会当作可创建新 Release 的证据。
+
+发布 CLI 的静态检查验证完整 ELF64/Mach-O 可执行结构、段/加载命令及文件边界和入口，Linux 拒绝 `PT_INTERP` 与 `DT_NEEDED` 动态依赖。静态结构与 checksum 不能证明启动器或二进制的实际行为，不能替代三个平台各自的 `tools/verify-release.sh` 真实运行验收。推荐使用上述 Actions，在每个平台构建及运行验收成功后汇总发布；手工调用发布 CLI 前也必须完成三平台验收，CLI 不会自行执行包内程序。
+
+失败可用**同一份六附件原始字节**重试，仅续传缺少的文件；已有草稿附件须与本地一致，不使用 `--clobber`。Actions 可重跑失败的发布 job，复用本次 run 的构建 artifacts。重跑构建可能改变归档字节；若已有附件不同、额外附件或 checksum 损坏，应先由维护者检查草稿，再人工处理草稿或使用新版本标签，脚本不会自动删除附件。发布前构建和上传仍需依赖下载与 GitHub 网络；半离线仅描述目标机器的运行依赖边界。
+
+本地发布回归使用 `node --test tests/publish_release.test.mjs`，真实执行临时 Git 标签、tar 和 SHA-256，只替代外部 `gh`，不写入 GitHub。
 
 ## 故障排查
 
@@ -240,6 +263,6 @@ kafka-dashboard/
 | 状态一直正常或计时重置 | 检查默认/自定义阈值、持续时间及页面可见性；仅连续有效超限采样累积计时 |
 | 页面 404 或 `/api` 请求失败 | 源码运行先启动 Vite；生产检查 `KAFKA_DASHBOARD_WEB_DIR` 中的 `index.html`，开发检查代理目的地；未知 `/api` 返回 JSON 404 是预期行为 |
 | E2E 无法启动 | 检查 Docker 是否运行、Compose v2 是否支持 `--wait`、Chromium 是否已安装，并允许测试进程监听本地临时端口 |
-| 发行验证失败 | 在 Apple Silicon macOS 上运行，确认 Docker 可运行 Linux/amd64；哈希不匹配时重新构建或重新复制完整发行包 |
+| 发行验证失败 | macOS 包需 Apple Silicon macOS；Linux 包需可运行对应架构的 Docker；哈希不匹配时重新构建或重新复制完整发行包 |
 
 提交故障信息时只提供安全错误、Request ID、版本与复现步骤；不要附真实数据库、环境变量转储、PEM 或包含请求体的 trace。
