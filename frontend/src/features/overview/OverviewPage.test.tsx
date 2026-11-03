@@ -10,7 +10,7 @@ import type { DashboardContext } from '../dashboard/useDashboard'
 import { OverviewPage } from './OverviewPage'
 import { retainDisplaySnapshot } from '../dashboard/displaySnapshot'
 
-vi.mock('echarts/core', /* 在测试模块准备阶段建立图表边界替身，记录生命周期调用而不依赖真实画布。 */ () => ({ init: /* 在页面测试挂载图表时返回最小图表替身，将断言聚焦页面数据与交互。 */ () => ({ /* 在页面测试更新图表时承接配置调用，避免执行真实画布绘制。 */ setOption() {}, /* 在图表测试中模拟尺寸通知，验证实例响应布局变化。 */ resize() {}, /* 在图表替身卸载阶段提供释放接口，避免依赖真实绘制环境。 */ dispose() {} }), /* 在页面测试加载图表模块时替代扩展注册，隔离真实图表运行环境。 */ use() {} }))
+vi.mock('echarts/core', /* 在测试模块准备阶段建立图表边界替身，记录生命周期调用而不依赖真实画布。 */ () => ({ init: /* 在页面测试挂载图表时返回最小图表替身，将断言聚焦页面数据与交互。 */ () => ({ /* 在页面测试更新图表时承接配置调用，避免执行真实画布绘制。 */ setOption() {}, /* 页面测试触发图表尺寸同步时接收调用，避免执行真实画布布局。 */ resize() {}, /* 在图表替身卸载阶段提供释放接口，避免依赖真实绘制环境。 */ dispose() {} }), /* 在页面测试加载图表模块时替代扩展注册，隔离真实图表运行环境。 */ use() {} }))
 beforeEach(/* 在每个用例开始时重置环境和受控时钟，避免跨用例共享状态。 */ () => {
   vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
   vi.setSystemTime(new Date('2026-10-15T00:00:00Z'))

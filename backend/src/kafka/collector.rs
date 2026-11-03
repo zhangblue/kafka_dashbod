@@ -744,7 +744,7 @@ mod tests {
             self.peak.fetch_max(active, Ordering::SeqCst);
             struct Release<'a>(&'a AtomicUsize);
             impl Drop for Release<'_> {
-                // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
+                // 水位查询结束或被取消时递减活动查询计数，避免后续并发峰值统计包含已退出任务。
                 fn drop(&mut self) {
                     self.0.fetch_sub(1, Ordering::SeqCst);
                 }

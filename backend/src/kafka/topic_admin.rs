@@ -417,6 +417,7 @@ mod native {
         // caller retains admin until after that event is decoded and destroyed.
         unsafe {
             let client = admin.inner().native_ptr();
+            // 先接管队列和选项的唯一所有权，后续设置或请求失败也通过匹配析构器回收。
             let queue =
                 Queue::from_raw(ffi::rd_kafka_queue_new(client), ffi::rd_kafka_queue_destroy)?;
             let options = Options::from_raw(
@@ -433,6 +434,7 @@ mod native {
             if code != ffi::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR {
                 return Err(map_code(code.into()));
             }
+            // 选项及超时设置成功后才提交单 Topic 请求；修改只使用增量接口，不退回整体替换。
             let mut resources = [resource.ptr()];
             match operation {
                 Operation::Describe => ffi::rd_kafka_DescribeConfigs(

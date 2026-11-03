@@ -9,7 +9,7 @@ import type { DashboardContext } from '../dashboard/useDashboard'
 import { ConsumerGroupsPage } from './ConsumerGroupsPage'
 import { ConsumerGroupLagProvider } from './ConsumerGroupLagProvider'
 
-const chart = vi.hoisted(/* 在测试模块准备阶段建立图表边界替身，记录生命周期调用而不依赖真实画布。 */ () => ({ setOption: vi.fn(), /* 在图表测试中模拟尺寸通知，验证实例响应布局变化。 */ resize() {}, /* 在图表替身卸载阶段提供释放接口，避免依赖真实绘制环境。 */ dispose() {} }))
+const chart = vi.hoisted(/* 在测试模块准备阶段建立图表边界替身，记录生命周期调用而不依赖真实画布。 */ () => ({ setOption: vi.fn(), /* 页面测试触发图表尺寸同步时接收调用，避免执行真实画布布局。 */ resize() {}, /* 在图表替身卸载阶段提供释放接口，避免依赖真实绘制环境。 */ dispose() {} }))
 vi.mock('echarts/core', /* 在测试模块准备阶段建立图表边界替身，记录生命周期调用而不依赖真实画布。 */ () => ({ init: /* 在页面测试挂载图表时返回最小图表替身，将断言聚焦页面数据与交互。 */ () => chart, /* 在页面测试加载图表模块时替代扩展注册，隔离真实图表运行环境。 */ use() {} }))
 afterEach(/* 在每个用例结束时恢复本用例修改的测试环境，避免拦截或模拟状态影响后续断言。 */ () => { vi.useRealTimers(); vi.clearAllMocks() })
 

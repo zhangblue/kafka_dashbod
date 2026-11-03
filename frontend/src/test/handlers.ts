@@ -38,10 +38,10 @@ export const topicConfigsFixture: TopicConfigsResponse = { configs: [
 ] }
 
 export const handlers = [
-  http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json([clusterFixture])),
-  http.get('/api/clusters/:id/lag-rules', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(rulesFixture)),
-  http.post('/api/sessions/:id/topics', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ status: 'created' }, { status: 201 })),
-  http.get('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(topicConfigsFixture)),
+  http.get('/api/clusters', /* 组件请求集群列表时返回固定集群，供测试建立可选集群上下文。 */ () => HttpResponse.json([clusterFixture])),
+  http.get('/api/clusters/:id/lag-rules', /* 组件加载 Lag 规则时返回默认规则夹具，隔离真实配置服务。 */ () => HttpResponse.json(rulesFixture)),
+  http.post('/api/sessions/:id/topics', /* 组件提交创建 Topic 时返回成功夹具，不向真实 Kafka 创建资源。 */ () => HttpResponse.json({ status: 'created' }, { status: 201 })),
+  http.get('/api/sessions/:id/topics/:topic/configs', /* 组件读取 Topic 配置时返回包含来源与只读状态的固定夹具。 */ () => HttpResponse.json(topicConfigsFixture)),
 ]
 
 export const server = setupServer(...handlers)

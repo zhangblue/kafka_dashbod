@@ -8,7 +8,7 @@ import type { ClusterDto, ClusterSnapshot, FeishuAlertSettings, LagRuleSet } fro
 import { clusterFixture, server, snapshotFixture } from '../../test/handlers'
 
 beforeAll(/* 在测试组开始时启动请求拦截，避免单元测试访问真实服务。 */ () => server.listen({ onUnhandledFrame: 'error' }))
-beforeEach(/* 在每个用例前安装不含 Token 的飞书配置响应，隔离摘要加载与当前交互断言。 */ () => server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ accessTokenConfigured: false, maskedAccessToken: null, rules: [] }))))
+beforeEach(/* 在每个用例前安装不含 Token 的飞书配置响应，隔离摘要加载与当前交互断言。 */ () => server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ accessTokenConfigured: false, maskedAccessToken: null, rules: [] }))))
 afterEach(/* 在每个用例结束时恢复本用例修改的测试环境，避免拦截或模拟状态影响后续断言。 */ () => {
   onlineManager.setOnline(true)
   server.resetHandlers()
@@ -16,7 +16,7 @@ afterEach(/* 在每个用例结束时恢复本用例修改的测试环境，避�
   vi.restoreAllMocks()
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
 })
-afterAll(/* 在测试组结束时关闭拦截并恢复全局配置。 */ () => server.close())
+afterAll(/* 在测试组结束时关闭请求拦截，释放本文件注册的模拟服务。 */ () => server.close())
 
 // 在集群交互测试准备时挂载查询上下文及设置页，隔离每次测试缓存。
 function renderPage(snapshot: ClusterSnapshot | null = snapshotFixture, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
@@ -32,14 +32,14 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let saved: unknown
     let sessions = 0, tests = 0
     server.use(
-      http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(settings)),
-      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { sessions++; return HttpResponse.json({ sessionId: 'unneeded', leaseSeconds: 15 }) }),
-      http.put('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+      http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json(settings)),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { sessions++; return HttpResponse.json({ sessionId: 'unneeded', leaseSeconds: 15 }) }),
+      http.put('/api/clusters/:id/feishu-alert', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
         saved = await request.json()
         settings = { accessTokenConfigured: true, maskedAccessToken: '****demo', rules: [{ id: 'saved-rule', groupId: 'flink-order-enrich', topic: 'raw-orders', lagThreshold: 25, growthSeconds: 10, enabled: true }] }
         return HttpResponse.json(settings)
       }),
-      http.post('/api/clusters/:id/feishu-alert/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { tests++; return HttpResponse.json({ ok: true }) }),
+      http.post('/api/clusters/:id/feishu-alert/test', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { tests++; return HttpResponse.json({ ok: true }) }),
     )
     renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
     await screen.findByText('飞书告警：未配置')
@@ -72,11 +72,11 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let clusters = [clusterFixture]
     let created = 0, closed = 0
     server.use(
-      http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(clusters)),
-      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: `feishu-${++created}`, leaseSeconds: 15 }, { status: 201 })),
-      http.get('/api/sessions/:id/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ ...snapshotFixture, collectedAt: new Date().toISOString() })),
-      http.delete('/api/sessions/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
-      http.delete('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { clusters = []; return new HttpResponse(null, { status: 204 }) }),
+      http.get('/api/clusters', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json(clusters)),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ sessionId: `feishu-${++created}`, leaseSeconds: 15 }, { status: 201 })),
+      http.get('/api/sessions/:id/snapshot', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ ...snapshotFixture, collectedAt: new Date().toISOString() })),
+      http.delete('/api/sessions/:id', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
+      http.delete('/api/clusters/:id', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { clusters = []; return new HttpResponse(null, { status: 204 }) }),
     )
     renderPage(snapshotFixture)
     await user.click(await screen.findByRole('button', { name: '配置飞书告警' }))
@@ -99,15 +99,15 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     const pending = new Promise<void>(resolve => { finish = resolve })
     let readsA = 0, aborted = false
     server.use(
-      http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json([clusterFixture, { ...clusterFixture, id: 'cluster-b', name: '集群 B' }])),
-      http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ params, request }) => {
+      http.get('/api/clusters', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json([clusterFixture, { ...clusterFixture, id: 'cluster-b', name: '集群 B' }])),
+      http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ params, request }) => {
         if (params.id === 'cluster-a' && ++readsA === 3) {
           request.signal.addEventListener('abort', () => { aborted = true })
           await pending
         }
         return HttpResponse.json({ accessTokenConfigured: true, maskedAccessToken: params.id === 'cluster-a' ? '****old-a' : '****new-b', rules: [] })
       }),
-      http.post('/api/clusters/:id/feishu-alert/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ ok: true })),
+      http.post('/api/clusters/:id/feishu-alert/test', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ ok: true })),
     )
     renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
     const cards = await screen.findAllByRole('button', { name: '配置飞书告警' })
@@ -137,7 +137,7 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let finish!: () => void
     const pending = new Promise<void>(resolve => { finish = resolve })
     let fail = true
-    server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => {
+    server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async () => {
       await pending
       return fail ? HttpResponse.json({ code: 'INTERNAL', message: 'sensitive-token-from-server', requestId: 'unsafe' }, { status: 500 })
         : HttpResponse.json({ accessTokenConfigured: false, maskedAccessToken: null, rules: [] })
@@ -157,7 +157,7 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
   it('requires a successful current GET before restoring a previously cached Feishu form', /* 在本用例执行时验证必须取得本次成功读取后才恢复缓存表单。 */ async () => {
     const user = userEvent.setup()
     let fail = false
-    server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => fail
+    server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => fail
       ? HttpResponse.json({ code: 'INTERNAL', message: 'unsafe-response' }, { status: 500 })
       : HttpResponse.json({ accessTokenConfigured: true, maskedAccessToken: '****cached', rules: [] })))
     renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
@@ -180,7 +180,7 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let complete!: () => void
     const responseReady = new Promise<void>(resolve => { complete = resolve })
     let started = false
-    server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => {
+    server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async () => {
       started = true
       await responseReady
       return outcome === 'failure'
@@ -223,9 +223,9 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     const user = userEvent.setup()
     let created = 0, closed = 0
     server.use(
-      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: `feishu-visible-${++created}`, leaseSeconds: 15 }, { status: 201 })),
-      http.get('/api/sessions/:id/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ ...snapshotFixture, collectedAt: new Date().toISOString() })),
-      http.delete('/api/sessions/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ sessionId: `feishu-visible-${++created}`, leaseSeconds: 15 }, { status: 201 })),
+      http.get('/api/sessions/:id/snapshot', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ ...snapshotFixture, collectedAt: new Date().toISOString() })),
+      http.delete('/api/sessions/:id', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
     )
     const page = renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置飞书告警' }))
@@ -268,11 +268,11 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let tested: Record<string, unknown> | undefined
     let saves = 0
     server.use(
-      http.post('/api/clusters/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+      http.post('/api/clusters/test', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
         tested = await request.json() as Record<string, unknown>
         return HttpResponse.json({ brokerCount: 2, topicCount: 4, elapsedMs: 10 })
       }),
-      http.post('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { saves++; return HttpResponse.json(clusterFixture) }),
+      http.post('/api/clusters', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { saves++; return HttpResponse.json(clusterFixture) }),
     )
     renderPage()
     await user.click(screen.getByRole('button', { name: '新增集群' }))
@@ -294,11 +294,11 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let tested: Record<string, unknown> | undefined
     let saved: Record<string, unknown> | undefined
     server.use(
-      http.post('/api/clusters/:id/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+      http.post('/api/clusters/:id/test', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
         tested = await request.json() as Record<string, unknown>
         return HttpResponse.json({ brokerCount: 1, topicCount: 1, elapsedMs: 1 })
       }),
-      http.put('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+      http.put('/api/clusters/:id', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
         saved = await request.json() as Record<string, unknown>
         return HttpResponse.json(clusterFixture)
       }),
@@ -325,7 +325,7 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
 
   it('shows safe draft-test field errors without discarding unsaved configuration', /* 在本用例执行时验证草稿测试失败保留输入并显示安全字段错误。 */ async () => {
     const user = userEvent.setup()
-    server.use(http.post('/api/clusters/:id/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: '配置无效',
+    server.use(http.post('/api/clusters/:id/test', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: '配置无效',
       details: { clientKeyPassphrase: '私钥口令配置无效' }, requestId: 'draft-request' }, { status: 422 })))
     renderPage()
     await user.click(await screen.findByRole('button', { name: '编辑' }))
@@ -341,9 +341,9 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     const fetch = vi.spyOn(globalThis, 'fetch')
     let created = 0, collected = 0, closed = 0
     server.use(
-      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: `visibility-${++created}`, leaseSeconds: 30 }, { status: 201 })),
-      http.get('/api/sessions/:id/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { collected++; return HttpResponse.json(snapshotFixture) }),
-      http.delete('/api/sessions/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ sessionId: `visibility-${++created}`, leaseSeconds: 30 }, { status: 201 })),
+      http.get('/api/sessions/:id/snapshot', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { collected++; return HttpResponse.json(snapshotFixture) }),
+      http.delete('/api/sessions/:id', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
     )
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
     renderPage(null)
@@ -384,12 +384,12 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let finishReconnect!: () => void
     const reconnecting = new Promise<void>(resolve => { finishReconnect = resolve })
     server.use(
-      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: 'settings-timer', leaseSeconds: 30 }, { status: 201 })),
-      http.get('/api/sessions/settings-timer/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => {
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ sessionId: 'settings-timer', leaseSeconds: 30 }, { status: 201 })),
+      http.get('/api/sessions/settings-timer/snapshot', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async () => {
         if (++collections === 2) await reconnecting
         return HttpResponse.json(snapshotFixture)
       }),
-      http.delete('/api/sessions/settings-timer', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => new HttpResponse(null, { status: 204 })),
+      http.delete('/api/sessions/settings-timer', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => new HttpResponse(null, { status: 204 })),
     )
     renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
@@ -418,19 +418,19 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let clusters = [clusterFixture]
     let saved: Record<string, unknown> | undefined
     server.use(
-      http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(clusters)),
-      http.post('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+      http.get('/api/clusters', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json(clusters)),
+      http.post('/api/clusters', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
         saved = await request.json() as Record<string, unknown>
         clusters = [...clusters, { ...clusterFixture, ...saved, id: 'new' } as typeof clusterFixture]
         return HttpResponse.json(clusters[1], { status: 201 })
       }),
-      http.put('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+      http.put('/api/clusters/:id', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
         saved = await request.json() as Record<string, unknown>
         clusters = clusters.map(cluster => cluster.id === 'new' ? { ...cluster, ...saved } as typeof clusterFixture : cluster)
         return HttpResponse.json(clusters[1])
       }),
-      http.post('/api/clusters/:id/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ brokerCount: 3, topicCount: 12, elapsedMs: 20 })),
-      http.delete('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ ({ params }) => {
+      http.post('/api/clusters/:id/test', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ brokerCount: 3, topicCount: 12, elapsedMs: 20 })),
+      http.delete('/api/clusters/:id', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ ({ params }) => {
         clusters = clusters.filter(cluster => cluster.id !== params.id)
         return new HttpResponse(null, { status: 204 })
       }),
@@ -460,7 +460,7 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
 
   it('displays server field errors and request ID without discarding input', /* 在本用例执行时验证服务端字段错误与请求编号展示时保留输入。 */ async () => {
     const user = userEvent.setup()
-    server.use(http.post('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: 'The request contains invalid fields',
+    server.use(http.post('/api/clusters', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: 'The request contains invalid fields',
       details: { bootstrapServers: '地址无效' }, requestId: 'req-ui' }, { status: 422 })))
     renderPage()
     await user.click(screen.getByRole('button', { name: '新增集群' }))
@@ -476,7 +476,7 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
   it('reuses an active snapshot and atomically saves defaults and group/topic rules', /* 在本用例执行时验证复用有效快照一次保存默认和覆盖规则。 */ async () => {
     const user = userEvent.setup()
     let saved: unknown
-    server.use(http.put('/api/clusters/:id/lag-rules', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+    server.use(http.put('/api/clusters/:id/lag-rules', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
       const body = await request.json() as Record<string, unknown>
       saved = body
       return HttpResponse.json(body)
@@ -494,7 +494,7 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
 
   it('associates rule API field errors with the numeric input and topic selector', /* 在本用例执行时验证规则 API 字段错误准确关联数值和 Topic 控件。 */ async () => {
     const user = userEvent.setup()
-    server.use(http.put('/api/clusters/:id/lag-rules', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: 'Invalid rule fields',
+    server.use(http.put('/api/clusters/:id/lag-rules', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: 'Invalid rule fields',
       details: { 'defaults.normalMax': '正常上限无效', 'overrides.0.topic': 'Topic 目前不可选' }, requestId: 'req-rules' }, { status: 422 })))
     renderPage()
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
@@ -512,9 +512,9 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     const user = userEvent.setup()
     let closed = false
     server.use(
-      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: 'settings-session', leaseSeconds: 30 }, { status: 201 })),
-      http.get('/api/sessions/settings-session/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(snapshotFixture)),
-      http.delete('/api/sessions/settings-session', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { closed = true; return new HttpResponse(null, { status: 204 }) }),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ sessionId: 'settings-session', leaseSeconds: 30 }, { status: 201 })),
+      http.get('/api/sessions/settings-session/snapshot', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json(snapshotFixture)),
+      http.delete('/api/sessions/settings-session', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { closed = true; return new HttpResponse(null, { status: 204 }) }),
     )
     renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
@@ -527,11 +527,11 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     const user = userEvent.setup()
     let reachable = false
     server.use(
-      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => reachable
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => reachable
         ? HttpResponse.json({ sessionId: 'reconnected', leaseSeconds: 30 }, { status: 201 })
         : HttpResponse.json({ code: 'KAFKA_TIMEOUT', message: '连接超时', requestId: 'req-connect' }, { status: 502 })),
-      http.get('/api/sessions/reconnected/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(snapshotFixture)),
-      http.delete('/api/sessions/reconnected', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => new HttpResponse(null, { status: 204 })),
+      http.get('/api/sessions/reconnected/snapshot', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json(snapshotFixture)),
+      http.delete('/api/sessions/reconnected', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => new HttpResponse(null, { status: 204 })),
     )
     renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
@@ -547,13 +547,13 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let collections = 0
     let closed = 0
     server.use(
-      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: 'full-failure', leaseSeconds: 30 }, { status: 201 })),
-      http.get('/api/sessions/full-failure/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(++collections === 1
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ sessionId: 'full-failure', leaseSeconds: 30 }, { status: 201 })),
+      http.get('/api/sessions/full-failure/snapshot', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json(++collections === 1
         ? { ...snapshotFixture, consumerGroupIds: [], consumerGroups: [], partialFailures: [
           { scope: 'topics', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'All topics failed' },
           { scope: 'groups', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'All groups failed' },
         ] } : snapshotFixture)),
-      http.delete('/api/sessions/full-failure', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
+      http.delete('/api/sessions/full-failure', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
     )
     renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
@@ -569,9 +569,9 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
   it('offers reconnect when the reused monitoring snapshot has failed all discovery', /* 在本用例执行时验证共享监控快照发现全失败时仍提供重连。 */ async () => {
     const user = userEvent.setup()
     server.use(
-      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: 'shared-retry', leaseSeconds: 30 }, { status: 201 })),
-      http.get('/api/sessions/shared-retry/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(snapshotFixture)),
-      http.delete('/api/sessions/shared-retry', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => new HttpResponse(null, { status: 204 })),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ sessionId: 'shared-retry', leaseSeconds: 30 }, { status: 201 })),
+      http.get('/api/sessions/shared-retry/snapshot', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json(snapshotFixture)),
+      http.delete('/api/sessions/shared-retry', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => new HttpResponse(null, { status: 204 })),
     )
     renderPage({ ...snapshotFixture, consumerGroupIds: [], consumerGroups: [], partialFailures: [
       { scope: 'topics', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'All topics failed' },
@@ -589,14 +589,14 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let cluster: ClusterDto = { ...clusterFixture }
     let rules: LagRuleSet = { defaults: { normalMax: 999, highMin: 5000, overLimitSeconds: 30 }, overrides: [] }
     server.use(
-      http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json([cluster])),
-      http.get('/api/clusters/:id/lag-rules', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(rules)),
-      http.put('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+      http.get('/api/clusters', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json([cluster])),
+      http.get('/api/clusters/:id/lag-rules', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json(rules)),
+      http.put('/api/clusters/:id', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
         cluster = { ...cluster, ...await request.json() as ClusterDto }
         rules = { ...rules, defaults: { normalMax: cluster.defaultNormalLagMax, highMin: cluster.defaultHighLagMin, overLimitSeconds: cluster.defaultOverLimitSeconds } }
         return HttpResponse.json(cluster)
       }),
-      http.put('/api/clusters/:id/lag-rules', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+      http.put('/api/clusters/:id/lag-rules', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
         rules = await request.json() as LagRuleSet
         cluster = { ...cluster, defaultNormalLagMax: rules.defaults.normalMax, defaultHighLagMin: rules.defaults.highMin, defaultOverLimitSeconds: rules.defaults.overLimitSeconds }
         return HttpResponse.json(rules)
@@ -632,8 +632,8 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     let finish!: () => void
     const pending = new Promise<void>(resolve => { finish = resolve })
     server.use(
-      http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json([clusterFixture, { ...clusterFixture, id: 'cluster-b', name: '集群 B' }])),
-      http.put('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => { await pending; return HttpResponse.json(clusterFixture) }),
+      http.get('/api/clusters', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json([clusterFixture, { ...clusterFixture, id: 'cluster-b', name: '集群 B' }])),
+      http.put('/api/clusters/:id', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async () => { await pending; return HttpResponse.json(clusterFixture) }),
     )
     renderPage()
     await user.click((await screen.findAllByRole('button', { name: '编辑' }))[0])

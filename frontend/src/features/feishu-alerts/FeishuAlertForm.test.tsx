@@ -54,7 +54,7 @@ describe('飞书告警配置', /* 在测试组注册阶段组织当前功能的�
   it('clears a new draft when selecting token removal and persists the explicit clear', /* 在本用例执行时验证勾选清除立即丢弃新草稿并提交显式清除。 */ async () => {
     const user = userEvent.setup()
     let body: Record<string, unknown> | undefined
-    server.use(http.put('/api/clusters/cluster-a/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+    server.use(http.put('/api/clusters/cluster-a/feishu-alert', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
       body = await request.json() as Record<string, unknown>
       return HttpResponse.json({ ...settings, accessTokenConfigured: false, maskedAccessToken: null })
     }))
@@ -96,7 +96,7 @@ describe('飞书告警配置', /* 在测试组注册阶段组织当前功能的�
     ['Lag 阈值', '9007199254740992', /非负安全整数/],
   ])('rejects invalid %s before sending any save', /* 在本用例执行时验证非法字段在保存请求发出前被拒绝。 */ async (name, value, message) => {
     let saves = 0
-    server.use(http.put('/api/clusters/cluster-a/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { saves++; return HttpResponse.json(settings) }))
+    server.use(http.put('/api/clusters/cluster-a/feishu-alert', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => { saves++; return HttpResponse.json(settings) }))
     mount()
     fireEvent.change(input(name), { target: { value } })
     expect(screen.getByRole('alert')).toHaveTextContent(message)
@@ -109,7 +109,7 @@ describe('飞书告警配置', /* 在测试组注册阶段组织当前功能的�
     const user = userEvent.setup()
     let body: Record<string, unknown> | undefined
     let saved = false
-    server.use(http.put('/api/clusters/cluster-a/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+    server.use(http.put('/api/clusters/cluster-a/feishu-alert', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
       body = await request.json() as Record<string, unknown>
       return HttpResponse.json({ ...settings, rules: [{ ...settings.rules[0], lagThreshold: 250, growthSeconds: 30, enabled: false }] })
     }))
@@ -158,7 +158,7 @@ describe('飞书告警配置', /* 在测试组注册阶段组织当前功能的�
   it('tests the saved token without sending it, and a new token without saving it', /* 在本用例执行时验证测试已存 Token 无需传回凭据，新 Token 测试不持久化。 */ async () => {
     const user = userEvent.setup()
     const bodies: Record<string, unknown>[] = []
-    server.use(http.post('/api/clusters/cluster-a/feishu-alert/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+    server.use(http.post('/api/clusters/cluster-a/feishu-alert/test', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
       bodies.push(await request.json() as Record<string, unknown>)
       return HttpResponse.json({ ok: true })
     }))
@@ -185,7 +185,7 @@ describe('飞书告警配置', /* 在测试组注册阶段组织当前功能的�
 
   it('shows Chinese safe failures without rendering remote messages or submitted credentials', /* 在本用例执行时验证失败只显示固定中文提示，不渲染远端信息和凭据。 */ async () => {
     const user = userEvent.setup()
-    server.use(http.post('/api/clusters/cluster-a/feishu-alert/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ code: 'FEISHU_SEND_FAILED', message: draftToken() }, { status: 502 })))
+    server.use(http.post('/api/clusters/cluster-a/feishu-alert/test', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ code: 'FEISHU_SEND_FAILED', message: draftToken() }, { status: 502 })))
     mount()
     await user.type(input('更新 Token'), draftToken())
     await user.click(screen.getByRole('button', { name: '测试通知' }))
@@ -224,7 +224,7 @@ describe('飞书告警配置', /* 在测试组注册阶段组织当前功能的�
 describe('飞书告警 API boundary', /* 在测试组注册阶段组织当前功能的交互与边界回归。 */ () => {
   it('encodes cluster IDs, sends exact endpoint bodies, and supports cancelled reads', /* 在本用例执行时验证集群标识编码、端点请求体和读取取消边界。 */ async () => {
     const calls: { method: string; path: string; body: unknown }[] = []
-    server.use(http.all('*', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+    server.use(http.all('*', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
       calls.push({ method: request.method, path: new URL(request.url).pathname, body: request.method === 'GET' ? null : await request.json() })
       return HttpResponse.json(request.url.endsWith('/test') ? { ok: true } : settings)
     }))

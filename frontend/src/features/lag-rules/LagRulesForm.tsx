@@ -100,7 +100,7 @@ export function LagRulesForm({ clusterId, snapshot, value, onChange, onSave, sav
           <button type="button" className="danger-button" disabled={saving} onClick={/* 在删除规则按钮点击时从覆盖草稿移除当前项，允许清理已不可用规则。 */ () => onChange({ ...value, overrides: value.overrides.filter((_, i) => i !== index) })}>删除规则</button>
         </fieldset>
       })}
-      <button type="button" disabled={!available || saving} onClick={/* 在按钮点击时，更新消费组并清空旧 Topic，避免沿用跨组无效组合。 */ () => onChange({ ...value,
+      <button type="button" disabled={!available || saving} onClick={/* 点击新增规则时追加待选择 Group / Topic 的覆盖草稿，初始阈值和持续时间沿用当前默认规则。 */ () => onChange({ ...value,
         overrides: [...value.overrides, { groupId: '', topic: '', ...value.defaults }] })}>新增规则</button>
     </section>
     {!valid && <p id={`${id}-validation`} role="alert">请填写完整规则，确保组合唯一、数值非负且高 Lag 起始值大于正常上限。</p>}

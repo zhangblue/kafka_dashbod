@@ -145,7 +145,7 @@ function FeishuAlertEditor({ clusterId, value, snapshot, snapshotStale = false, 
     <p className="form-note">Lag 超过阈值并持续增长达到设定时间后发送通知；启用规则且配置 Token 后，后台会持续监控。</p>
     <section aria-labelledby={`${id}-rules-title`} className="feishu-rules-box">
       <div className="feishu-rules-heading"><h3 id={`${id}-rules-title`}>Consumer Group + Topic 告警规则</h3>
-        <button type="button" disabled={!available || !!busy} onClick={/* 在按钮点击时，更新消费组并清空旧 Topic，避免沿用跨组无效组合。 */ () => { setRules(current => [...current, { groupId: '', topic: '', lagThreshold: 0, growthSeconds: 10, enabled: true }]); setFeedback(null) }}>新增规则</button>
+        <button type="button" disabled={!available || !!busy} onClick={/* 点击新增规则时追加待选择 Group / Topic 的草稿，初始化阈值、持续时间和启用状态并清除旧反馈。 */ () => { setRules(current => [...current, { groupId: '', topic: '', lagThreshold: 0, growthSeconds: 10, enabled: true }]); setFeedback(null) }}>新增规则</button>
       </div>
       {!available && <p role="status" className="form-note">暂无新鲜的同集群快照，请重新连接后新增或更换 Consumer Group / Topic；仍可修改阈值、持续时间或停用规则。</p>}
       {available && !!snapshot.partialFailures.length && <p role="status" className="form-note">快照部分采集失败，下拉选项仅包含已发现且具有提交位置的 Topic。</p>}

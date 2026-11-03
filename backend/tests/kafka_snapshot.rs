@@ -144,6 +144,7 @@ async fn snapshot_api_renews_rejects_overlap_and_close_waits_after_http_cancella
 // 验证独立提交位置预期必须完整且有效，不能静默忽略不完整环境配置。
 #[test]
 fn known_committed_fixture_requires_complete_and_valid_environment_values() {
+    // 构造环境参数边界用例时将可选字符串转为拥有值，便于组合缺项和非法输入。
     let values = |group: Option<&str>,
                   topic: Option<&str>,
                   partition: Option<&str>,

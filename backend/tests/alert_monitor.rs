@@ -1116,7 +1116,7 @@ async fn all_rules_observe_the_same_sampling_time_despite_a_slow_send() {
         1,
         "send delay must not make an old sample satisfy another rule's duration"
     );
-    // 并发请求停机后先观察其等待状态，再释放受控闸门，验证在途工作确实被排空。
+    // 结束用例时发起停机并让出调度，再放行采样闸门，使在途采样完成后可等待停机收尾。
     let shutdown = tokio::spawn(async move { handle.shutdown().await });
     settle().await;
     sample_gate.add_permits(1);

@@ -39,13 +39,13 @@ SQLite 含明文 Kafka 凭据，须限制数据库、sidecar 和备份的访问�
 
 禁止提交 `dist/`、`frontend/dist/`、`target/`、`node_modules/`、SQLite 文件及 sidecar、`.env`、私钥、真实证书、日志、PID 文件、启动器锁目录、Playwright 报告/trace。`packaging/.env.example` 只含占位符，可以提交。锁文件 `Cargo.lock`、`frontend/package-lock.json` 必须保留。生成产物从源码重建，不手改发布文件；`.superpowers/` 是本地工作记录，不属于交付源码。
 
-## 开发与验证
-
 ## 中文代码注释
 
 - 每个具名函数、方法、React 组件、Hook 和脚本函数都必须有中文注释，说明它负责什么、何时调用；测试函数说明验证的行为或风险。
 - 关键函数调用处必须说明调用原因与顺序，重点覆盖异步任务、锁、事务、Kafka、会话、告警、Topic 管理和发布流程，避免只复述代码表面操作。
 - 行为变化时同步更新相关注释，确保注释与实际实现一致；删除或重构代码时一并维护失效注释。
+
+## 开发与验证
 
 后端使用 `cargo run -p backend --bin kafka-dashboard` 启动，正常启动必须读取当前工作目录中可读且格式有效的 `.env`；可先执行 `cp packaging/.env.example .env`，源码开发时按需调整或移除发行静态目录配置 `KAFKA_DASHBOARD_WEB_DIR=web`，并调整数据库路径或创建模板所需的可写 `data/` 目录。父进程已设置的同名环境变量优先于 `.env`；`--version` 查询例外，无需 `.env`。前端使用 `npm --prefix frontend ci`、`npm --prefix frontend run dev -- --host 127.0.0.1`。生产静态目录由 `KAFKA_DASHBOARD_WEB_DIR` 配置；开发代理地址用 `KAFKA_DASHBOARD_API_TARGET`。
 

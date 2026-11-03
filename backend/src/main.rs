@@ -7,6 +7,7 @@ fn main() -> std::io::Result<()> {
         println!("kafka-dashboard {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    // 配置读取或解析失败时统一生成固定错误，避免原始环境值随底层诊断泄漏。
     let invalid_dotenv = || std::io::Error::other("failed to load required .env configuration");
     let dotenv = std::fs::read(".env").map_err(|_| invalid_dotenv())?;
     // 先拒绝 NUL，避免 set_var 的 panic 把配置值带入诊断输出。

@@ -8,11 +8,13 @@ import sys
 import tarfile
 
 
+# 解析二进制结构前校验偏移与长度，避免越界读取或负长度绕过边界。
 def bounded(offset, size, length):
     if offset < 0 or size < 0 or offset > length or size > length - offset:
         raise ValueError("binary structure outside file")
 
 
+# 发布归档核验 Linux 程序时检查 ELF64 架构、段、入口与依赖，拒绝动态解释器和共享库需求。
 def validate_elf(data, machine):
     if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01":
         raise ValueError("incomplete ELF64 header")
@@ -55,6 +57,7 @@ def validate_elf(data, machine):
                 bounded(offset, size, len(data))
 
 
+# 发布归档核验 macOS 程序时检查 ARM64 可执行结构、入口及加载命令，仅允许系统库路径。
 def validate_macho(data):
     if len(data) < 32 or data[:4] != b"\xcf\xfa\xed\xfe":
         raise ValueError("incomplete Mach-O header")
@@ -111,11 +114,13 @@ def validate_macho(data):
         raise ValueError("invalid Mach-O executable entry/load structure")
 
 
+# 上传草稿前读取归档，核对安全路径、完整清单、文件哈希和目标二进制，再返回来源记录供发布入口复核。
 def validate(archive, root, platform):
     binary = f"bin/kafka-dashboard-{platform}"
     required = {binary, "start.sh", ".env.example", "README.txt", "RELEASE.json", "SHA256SUMS", "web/index.html"}
     files = {}
     names = set()
+    # 仅从归档读取普通文件内容，不解压或执行；先验证路径和类型，防止链接、敏感文件和越界成员混入。
     with tarfile.open(archive, "r:gz") as package:
         for member in package:
             name = member.name.rstrip("/")
@@ -154,11 +159,13 @@ def validate(archive, root, platform):
         if name in checksums:
             raise ValueError("duplicate internal checksum entry")
         checksums[name] = match[1]
+    # 先要求清单精确覆盖全部文件，再逐项计算字节哈希，避免漏列文件绕过完整性校验。
     if set(checksums) != set(files) - {"SHA256SUMS"}:
         raise ValueError("incomplete internal checksum manifest")
     for name, digest in checksums.items():
         if hashlib.sha256(files[name]).hexdigest() != digest:
             raise ValueError("internal checksum mismatch")
+    # 完整性确认后按目标平台解析二进制结构；此静态门禁仍不能替代各平台的真实启动验证。
     if platform.startswith("linux-"):
         validate_elf(files[binary], 62 if platform == "linux-amd64" else 183)
     else:
@@ -168,6 +175,7 @@ def validate(archive, root, platform):
 
 if __name__ == "__main__":
     try:
+        # 所有检查成功才输出来源 JSON，让发布入口继续核对标签、版本与干净状态。
         print(json.dumps(validate(*sys.argv[1:])))
     except (ValueError, OSError, tarfile.TarError, KeyError, UnicodeError, struct.error) as error:
         sys.exit(f"archive validation failed: {error}")

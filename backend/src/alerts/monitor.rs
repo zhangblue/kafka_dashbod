@@ -180,7 +180,7 @@ async fn coordinate<F: SessionClientFactory>(
             // These repositories read separately. Bracket the connection read
             // with revision checks so old alert/name metadata cannot be paired
             // with a connection from a newer cluster revision.
-            // 解密读取前后复核集群及告警版本，避免把新连接与旧规则或旧名称组合使用。
+            // 读取完整连接配置前后复核集群及告警版本，避免把新连接与旧规则或旧名称组合使用。
             let cluster_unchanged = match clusters.get(&id).await {
                 Ok(Some(current)) => current.updated_at == cluster.updated_at,
                 Ok(None) => false,
@@ -206,6 +206,7 @@ async fn coordinate<F: SessionClientFactory>(
                 break;
             }
             let (worker_stop, worker_stopped) = watch::channel(false);
+            // 资格与两个版本复核通过后才派发独立 worker，并保存停止信号与句柄供替换或退出时排空。
             let worker = Worker {
                 settings_revision: setting.revision.clone(),
                 cluster_revision: cluster.updated_at,

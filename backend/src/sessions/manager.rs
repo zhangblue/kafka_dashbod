@@ -586,6 +586,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         let factory = self.factory.clone();
         // Registration and spawn happen under the same lock, with no cancellation point.
         // Cancelling this request drops only the reply receiver, never the owning task.
+        // 创建登记与任务派发在同一状态锁内完成；请求取消只丢弃接收端，关闭仍能追踪创建及释放。
         tokio::spawn(async move {
             match factory.create(config).await {
                 Ok(client) => {
@@ -889,7 +890,7 @@ mod tests {
     struct FakeClient(Arc<AtomicUsize>, Arc<tokio::sync::Notify>);
 
     impl Drop for FakeClient {
-        // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
+        // fake 客户端析构时累加释放次数并通知等待者，供生命周期测试确认实际释放。
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
             self.1.notify_one();
@@ -1149,7 +1150,7 @@ mod tests {
                     std::sync::mpsc::Receiver<()>,
                 );
                 impl Drop for ClientDrop {
-                    // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
+                    // 连接测试的模拟客户端析构时先发出进入信号，等待闸门放行后再通知完成，区分工作结束与析构结束。
                     fn drop(&mut self) {
                         self.0.notify_one();
                         self.2.recv().unwrap();
@@ -1590,7 +1591,7 @@ mod tests {
     struct BlockingTopicClient(BlockingTopicFactory);
 
     impl Drop for BlockingTopicClient {
-        // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
+        // 管理测试客户端析构时通知进入释放阶段，等待可选闸门后累加释放次数，供关闭等待断言使用。
         fn drop(&mut self) {
             self.0.dropping.notify_one();
             if let Some(release) = self.0.release_drop.lock().unwrap().take() {
@@ -1916,7 +1917,7 @@ mod tests {
     }
 
     impl Drop for UnscheduledTopicFactory {
-        // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
+        // 未调度任务捕获的工厂析构时仅阻塞被标记的副本，供测试确认关闭等待捕获值释放。
         fn drop(&mut self) {
             if self.block_drop {
                 let _ = self.shared.dropping.send(());

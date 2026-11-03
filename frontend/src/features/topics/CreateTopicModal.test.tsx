@@ -8,13 +8,13 @@ import { CreateTopicModal } from './CreateTopicModal'
 
 beforeAll(/* 在测试组开始时启动请求拦截，避免单元测试访问真实服务。 */ () => server.listen())
 afterEach(/* 在每个用例结束时恢复本用例修改的测试环境，避免拦截或模拟状态影响后续断言。 */ () => { server.resetHandlers(); vi.restoreAllMocks() })
-afterAll(/* 在测试组结束时关闭拦截并恢复全局配置。 */ () => server.close())
+afterAll(/* 在测试组结束时关闭请求拦截，释放本文件注册的模拟服务。 */ () => server.close())
 
 // Catches sending demo config values, a fixed replica factor, or duplicate create requests.
 it('creates with one partition, cluster-default replicas and no unset configs while locking submission', /* 在本用例执行时验证默认单分区、默认副本且不发送未填参数，提交中锁定表单。 */ async () => {
   const user = userEvent.setup()
   const requests: CreateTopicInput[] = []
-  server.use(http.post('/api/sessions/session-a/topics', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+  server.use(http.post('/api/sessions/session-a/topics', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
     requests.push(await request.json() as CreateTopicInput)
     await delay(150)
     return HttpResponse.json({ status: 'created' }, { status: 201 })
@@ -42,7 +42,7 @@ it('creates with one partition, cluster-default replicas and no unset configs wh
 it('keeps a successful creation locked and offers direct close when the list refresh rejects', /* 在本用例执行时验证创建成功后即使刷新失败也锁定写入并允许直接关闭。 */ async () => {
   const user = userEvent.setup()
   let creates = 0
-  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => {
+  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => {
     creates++
     return HttpResponse.json({ status: 'created' }, { status: 201 })
   }))
@@ -69,7 +69,7 @@ it('keeps a successful creation locked and offers direct close when the list ref
 it('validates inputs and retains optional values and API field errors after failure', /* 在本用例执行时验证非法输入被拒绝且请求失败后保留可选值和字段错误。 */ async () => {
   const user = userEvent.setup()
   let received: CreateTopicInput | undefined
-  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
     received = await request.json() as CreateTopicInput
     return HttpResponse.json({ code: 'TOPIC_ALREADY_EXISTS', message: '同名 Topic 已存在。',
       fields: { name: '请使用其他 Topic 名称。' }, requestId: 'request-create' }, { status: 409 })
@@ -102,7 +102,7 @@ it.each([
 ])('rejects %s above the native limit before sending a request', /* 在本用例执行时验证超过原生数量上限时不发送创建请求。 */ async (label, value) => {
   const user = userEvent.setup()
   const requests: CreateTopicInput[] = []
-  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
     requests.push(await request.json() as CreateTopicInput)
     return HttpResponse.json({ status: 'created' }, { status: 201 })
   }))
@@ -122,7 +122,7 @@ it.each([
 it('submits creation counts at the native upper boundaries', /* 在本用例执行时验证原生数量上限边界可以提交。 */ async () => {
   const user = userEvent.setup()
   const requests: CreateTopicInput[] = []
-  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
     requests.push(await request.json() as CreateTopicInput)
     return HttpResponse.json({ status: 'created' }, { status: 201 })
   }))
@@ -160,7 +160,7 @@ it('does not apply a completed creation to a page that has already left the sess
   let release!: () => void
   const pending = new Promise<void>(resolve => { release = resolve })
   let finished = false
-  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => {
+  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async () => {
     await pending
     finished = true
     return HttpResponse.json({ status: 'created' }, { status: 201 })

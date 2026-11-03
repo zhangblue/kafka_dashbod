@@ -31,13 +31,13 @@ export function retainDisplaySnapshot(current: ClusterSnapshot, previous?: Displ
   // 合并消费分区时结合发现、水位与提交位置失败，判断旧 Lag 是否可展示。
   const committedFailed = (group: string, topic: string, partition: number) => groupFailed(group)
     || watermarkFailed(topic, partition) || fails('committed', [group, `${group}/${topic}:${partition}`])
-  // 采用旧资源时延续首次陈旧时间，避免连续失败把保留值伪装成新采样。
+  // 采用旧资源时延续其原有成功采集时间，避免连续失败把保留值伪装成新采样。
   const retain = (key: string) => {
     const at = previous.staleResources[key] ?? before.collectedAt
     staleResources[key] = at
     return at
   }
-  // 子分区合并后将最早陈旧时间传播到父行，提示汇总含有保留值。
+  // 子分区合并后将保留值中最早的成功采集时间传播到父行，提示汇总含有保留值。
   const parentTime = (key: string, childKeys: string[]) => {
     const times = childKeys.flatMap(child => staleResources[child] ? [staleResources[child]] : [])
     if (times.length) staleResources[key] = times.sort()[0]

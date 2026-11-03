@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs'
 const appStyles = readFileSync('src/index.css', 'utf8')
 beforeAll(/* 在测试组开始时启动请求拦截，避免单元测试访问真实服务。 */ () => server.listen())
 afterEach(/* 在每个用例结束时恢复本用例修改的测试环境，避免拦截或模拟状态影响后续断言。 */ () => { vi.useRealTimers(); server.resetHandlers(); vi.restoreAllMocks() })
-afterAll(/* 在测试组结束时关闭拦截并恢复全局配置。 */ () => server.close())
+afterAll(/* 在测试组结束时关闭请求拦截，释放本文件注册的模拟服务。 */ () => server.close())
 
 const snapshot: ClusterSnapshot = { ...snapshotFixture, topics: [
   { topic: 'order-events', low: 10, latestMessageOffset: 105101, retainedOffsetSpan: 105097, incomplete: false,
@@ -212,7 +212,7 @@ it('awaits a fresh snapshot before closing successful creation', /* 在本用例
 // Catches falsely claiming a 202 is a confirmed save, especially when the list refresh rejects.
 it.each([false, true])('preserves the fixed unconfirmed notice after config 202 (refresh failure: %s)', /* 在本用例执行时验证配置 202 后保留固定未确认提示，不受刷新失败影响。 */ async failRefresh => {
   const user = userEvent.setup()
-  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () =>
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () =>
     HttpResponse.json({ status: 'appliedButUnconfirmed' }, { status: 202 })))
   const refresh = vi.fn(async () => { if (failRefresh) throw new Error('synthetic refresh failure') })
   show(snapshot, { refresh })
@@ -230,7 +230,7 @@ it.each([false, true])('preserves the fixed unconfirmed notice after config 202 
 it('keeps a created Topic locked after refresh failure and retains its page notice', /* 在本用例执行时验证创建成功但刷新失败时锁定重复写入并保留页面提示。 */ async () => {
   const user = userEvent.setup()
   let creates = 0
-  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => {
+  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => {
     creates++
     return HttpResponse.json({ status: 'created' }, { status: 201 })
   }))
@@ -249,7 +249,7 @@ it('keeps a created Topic locked after refresh failure and retains its page noti
 it('refreshes after deletion and reports metadata propagation until the Topic disappears', /* 在本用例执行时验证删除后刷新，在元数据收敛前提示传播延迟。 */ async () => {
   const user = userEvent.setup()
   let received: unknown
-  server.use(http.delete('/api/sessions/session-a/topics/order-events', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+  server.use(http.delete('/api/sessions/session-a/topics/order-events', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
     received = await request.json()
     return new HttpResponse(null, { status: 204 })
   }))
@@ -269,7 +269,7 @@ it('refreshes after deletion and reports metadata propagation until the Topic di
 // Catches failed configuration writes being treated as successful page actions.
 it('retains the configuration dialog on failure without refreshing or reporting success', /* 在本用例执行时验证配置失败保留弹窗且不刷新或误报成功。 */ async () => {
   const user = userEvent.setup()
-  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({
     code: 'TOPIC_AUTHORIZATION_FAILED', message: 'Forbidden',
   }, { status: 403 })))
   const refresh = vi.fn()
@@ -299,7 +299,7 @@ it('discards an open management target when the live session disappears', /* 在
 // Catches successful configuration writes not refreshing the shared monitor.
 it('refreshes the list after confirmed configuration changes', /* 在本用例执行时验证配置确认成功后刷新列表。 */ async () => {
   const user = userEvent.setup()
-  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ configs: [] })))
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => HttpResponse.json({ configs: [] })))
   const refresh = vi.fn(async () => {})
   show(snapshot, { refresh })
   await user.click(screen.getByRole('button', { name: '配置 order-events' }))
@@ -313,7 +313,7 @@ it('refreshes the list after confirmed configuration changes', /* 在本用例�
 // Catches losing keyboard focus when a successful refresh removes the dialog's original trigger.
 it('restores focus to the toolbar when the deleted Topic row disappears during refresh', /* 在本用例执行时验证删除行刷新消失后焦点回到工具栏。 */ async () => {
   const user = userEvent.setup()
-  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => new HttpResponse(null, { status: 204 })))
+  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => new HttpResponse(null, { status: 204 })))
   const view = show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => { view.update({ snapshot: { ...snapshot, topics: [snapshot.topics[1]] } }) } })
   await user.click(screen.getByRole('button', { name: '删除 order-events' }))
   await user.type(screen.getByLabelText('确认 Topic 名称'), 'order-events')
@@ -325,7 +325,7 @@ it('restores focus to the toolbar when the deleted Topic row disappears during r
 // Catches later metadata propagation removing the restored trigger, and focus recovery stealing a user's new focus.
 it.each(['trigger', 'search', 'background'] as const)('recovers delayed deletion focus only while it remains on the trigger (%s)', /* 在本用例执行时验证延迟删除焦点只在仍停留触发器时恢复。 */ async focus => {
   const user = userEvent.setup()
-  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => new HttpResponse(null, { status: 204 })))
+  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => new HttpResponse(null, { status: 204 })))
   const view = show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => {} })
   const trigger = screen.getByRole('button', { name: '删除 order-events' })
   await user.click(trigger)
@@ -347,7 +347,7 @@ it('bounds the deletion propagation notice without reporting that a successful D
   const user = userEvent.setup()
   let release!: () => void
   const pending = new Promise<void>(resolve => { release = resolve })
-  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => {
+  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async () => {
     await pending
     return new HttpResponse(null, { status: 204 })
   }))
@@ -383,7 +383,7 @@ it('keeps Topic names and their expansion on one table line', /* 在本用例执
 // Catches a refresh failure invalidating the live session and erasing an already successful 202 notice.
 it('retains the submitted outcome when refreshing disconnects the monitor session', /* 在本用例执行时验证刷新断开监控会话后仍保留已提交结果。 */ async () => {
   const user = userEvent.setup()
-  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () =>
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () =>
     HttpResponse.json({ status: 'appliedButUnconfirmed' }, { status: 202 })))
   const view = show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => {
     view.update({ sessionId: undefined, status: 'error' })

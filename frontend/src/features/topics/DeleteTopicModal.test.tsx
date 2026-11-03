@@ -7,13 +7,13 @@ import { DeleteTopicModal } from './DeleteTopicModal'
 
 beforeAll(/* 在测试组开始时启动请求拦截，避免单元测试访问真实服务。 */ () => server.listen())
 afterEach(/* 在每个用例结束时恢复本用例修改的测试环境，避免拦截或模拟状态影响后续断言。 */ () => { server.resetHandlers(); vi.restoreAllMocks() })
-afterAll(/* 在测试组结束时关闭拦截并恢复全局配置。 */ () => server.close())
+afterAll(/* 在测试组结束时关闭请求拦截，释放本文件注册的模拟服务。 */ () => server.close())
 
 // Catches case folding or trimming the confirmation, missing DELETE body, and duplicate submissions.
 it('requires the exact complete case-sensitive name and awaits refresh before closing', /* 在本用例执行时验证名称完整且大小写严格匹配，刷新完成后才关闭。 */ async () => {
   const user = userEvent.setup()
   const requests: unknown[] = []
-  server.use(http.delete('/api/sessions/session-a/topics/Orders.v2', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
+  server.use(http.delete('/api/sessions/session-a/topics/Orders.v2', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
     requests.push(await request.json())
     return new HttpResponse(null, { status: 204 })
   }))
@@ -50,7 +50,7 @@ it('requires the exact complete case-sensitive name and awaits refresh before cl
 it('keeps the confirmation and dialog after a safe API failure and allows retry', /* 在本用例执行时验证安全 API 失败后保留确认和弹窗并允许重试。 */ async () => {
   const user = userEvent.setup()
   let deletes = 0
-  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => {
+  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => {
     deletes++
     return HttpResponse.json({ code: 'TOPIC_AUTHORIZATION_FAILED', message: 'Native broker error', requestId: 'request-delete' }, { status: 403 })
   }))
@@ -73,7 +73,7 @@ it('keeps the confirmation and dialog after a safe API failure and allows retry'
 it('locks a successful deletion and offers close if refreshing rejects', /* 在本用例执行时验证删除成功即锁定操作，刷新失败只提供关闭。 */ async () => {
   const user = userEvent.setup()
   let deletes = 0
-  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => {
+  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => {
     deletes++
     return new HttpResponse(null, { status: 204 })
   }))
@@ -97,7 +97,7 @@ it('ignores a deletion response after unmount', /* 在本用例执行时验证�
   let release!: () => void
   const pending = new Promise<void>(resolve => { release = resolve })
   let finished = false
-  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => {
+  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async () => {
     await pending
     finished = true
     return new HttpResponse(null, { status: 204 })

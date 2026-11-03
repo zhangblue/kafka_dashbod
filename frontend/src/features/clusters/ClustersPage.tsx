@@ -152,7 +152,7 @@ function ConfigurationSession({ clusterId, snapshot = null, attempt = 0, onRecon
     const stop = () => { disposed = true; controller.abort(); clearTimeout(timer); close() }
     stopSession.current = stop
     void connect()
-    return () => { stop(); if (stopSession.current === stop) stopSession.current = () => {} }
+    return () => { stop(); if (stopSession.current === stop) stopSession.current = /* 当前实例清理后将外部停止入口恢复为空操作，避免后续事件重复调用已退出会话。 */ () => {} }
   }, [clusterId, visible, pageActive, snapshot, attempt])
   return <>
     <ApiErrorNotice error={connectionError} />
@@ -171,7 +171,7 @@ function RulesEditor({ cluster, snapshot, onClose }: { cluster: ClusterDto; snap
   const rules = useQuery({ queryKey: ['lag-rules', cluster.id], queryFn: /* 在当前资源查询启动时传递取消信号读取绑定集群的数据，使查询取消能传递到 HTTP 请求。 */ ({ signal }) => lagRulesApi.get(cluster.id, signal) })
   const [draft, setDraft] = useState<LagRuleSet | null>(null)
   const [attempt, setAttempt] = useState(0)
-  const save = useMutation({ mutationKey: ['cluster-settings'], mutationFn: /* 在用户提交当前配置或测试操作时调用对应集群 API，让查询层统一管理在途状态。 */ (value: LagRuleSet) => lagRulesApi.save(cluster.id, value), onSuccess: /* 在当前写入成功后先同步关联缓存，再使摘要查询失效，保证后续编辑使用最新配置。 */ async data => {
+  const save = useMutation({ mutationKey: ['cluster-settings'], mutationFn: /* 在用户提交当前配置或测试操作时调用对应集群 API，让查询层统一管理在途状态。 */ (value: LagRuleSet) => lagRulesApi.save(cluster.id, value), onSuccess: /* 规则保存成功后同步草稿、规则缓存和集群默认阈值，再刷新集群查询，使摘要与编辑值一致。 */ async data => {
     setDraft(data)
     client.setQueryData(['lag-rules', cluster.id], data)
     client.setQueryData<ClusterDto[]>(['clusters'], previous => previous?.map(item => item.id === cluster.id ? {
@@ -204,7 +204,7 @@ export interface ClustersPageProps { snapshot?: ClusterSnapshot | null }
 // 在集群设置路由渲染时协调集群增删改查、连接测试及互斥的配置弹窗。
 export function ClustersPage({ snapshot = null }: ClustersPageProps) {
   const client = useQueryClient()
-  const clusters = useQuery({ queryKey: ['clusters'], queryFn: /* 在当前资源查询启动时传递取消信号读取绑定集群的数据，使查询取消能传递到 HTTP 请求。 */ ({ signal }) => clustersApi.list(signal) })
+  const clusters = useQuery({ queryKey: ['clusters'], queryFn: /* 设置页加载或列表刷新时读取全部集群摘要，并透传取消信号。 */ ({ signal }) => clustersApi.list(signal) })
   const savingSettings = useIsMutating({ mutationKey: ['cluster-settings'] }) > 0
   const [editing, setEditing] = useState<ClusterDto | 'new' | null>(null)
   const [rulesClusterId, setRulesClusterId] = useState<string | null>(null)
@@ -213,7 +213,7 @@ export function ClustersPage({ snapshot = null }: ClustersPageProps) {
   const feishuCluster = clusters.data?.find(cluster => cluster.id === feishuClusterId)
   const [testedId, setTestedId] = useState('')
   const save = useMutation({ mutationKey: ['cluster-settings'], mutationFn: /* 在用户提交当前配置或测试操作时调用对应集群 API，让查询层统一管理在途状态。 */ ({ id, value }: { id?: string; value: ClusterInput }) => id ? clustersApi.update(id, value) : clustersApi.create(value),
-    onSuccess: /* 在当前写入成功后先同步关联缓存，再使摘要查询失效，保证后续编辑使用最新配置。 */ async saved => {
+    onSuccess: /* 集群保存成功后同步列表和规则默认值，等待两类查询刷新后关闭编辑器。 */ async saved => {
       client.setQueryData<ClusterDto[]>(['clusters'], previous => previous?.some(cluster => cluster.id === saved.id)
         ? previous.map(cluster => cluster.id === saved.id ? saved : cluster) : [...previous ?? [], saved])
       client.setQueryData<LagRuleSet>(['lag-rules', saved.id], previous => previous ? { ...previous, defaults: {

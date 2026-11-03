@@ -306,7 +306,7 @@ mod tests {
     }
 
     impl Drop for GroupListFixture {
-        // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
+        // 原生消费组列表夹具析构时递增释放计数，供测试验证所有权只释放一次。
         fn drop(&mut self) {
             self.drops.fetch_add(1, Ordering::SeqCst);
         }
