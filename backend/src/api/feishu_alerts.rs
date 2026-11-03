@@ -35,6 +35,7 @@ pub struct TestNotification {
     access_token: Option<String>,
 }
 
+// 处理飞书告警配置查询，打开配置弹窗时返回规则及 Token 配置摘要。
 pub async fn get(
     Extension(repository): Extension<FeishuAlertRepository>,
     Path(id): Path<String>,
@@ -42,6 +43,7 @@ pub async fn get(
     Ok(Json(repository.get(&id).await?))
 }
 
+// 处理飞书告警配置保存，先校验 Token、规则取值及 Group/Topic 唯一性再整体替换。
 pub async fn put(
     Extension(repository): Extension<FeishuAlertRepository>,
     Path(id): Path<String>,
@@ -99,6 +101,7 @@ pub async fn put(
     ))
 }
 
+// 处理测试通知请求，优先使用当前草稿 Token，否则读取已存 Token，且不保存草稿。
 pub async fn test(
     Extension(repository): Extension<FeishuAlertRepository>,
     Extension(clusters): Extension<ClusterRepository>,
@@ -129,6 +132,7 @@ pub async fn test(
         })?
     };
     let text = format!("飞书通知测试\n集群：{}", cluster.name);
+    // 发送错误统一脱敏，禁止把包含 Token 或通知正文的上游响应返回给调用者。
     sender.send_text(token, &text).await.map_err(|_| {
         ApiError::new(
             StatusCode::BAD_GATEWAY,
@@ -139,6 +143,7 @@ pub async fn test(
     Ok(Json(json!({"ok":true})))
 }
 
+// 在保存或测试前规范化可选 Token，将非法输入转换为不包含秘密的字段错误。
 fn normalized_token<'a>(
     token: Option<&'a str>,
     fields: &mut BTreeMap<String, String>,

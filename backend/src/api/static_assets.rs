@@ -22,10 +22,12 @@ use crate::error::{self, ApiError};
 #[derive(Clone)]
 struct BeforeOpen(std::sync::Arc<dyn Fn() + Send + Sync>);
 
+// 在静态回退入口识别 API 路径，确保未知 API 仍使用 JSON 错误响应。
 fn is_api(path: &str) -> bool {
     path == "/api" || path.starts_with("/api/")
 }
 
+// 在读取资源前识别隐藏组件和父目录跳转，拒绝访问私有文件及目录穿越。
 fn has_private_component(path: &Path) -> bool {
     path.components().any(|component| match component {
         Component::Normal(value) => value.to_string_lossy().starts_with('.'),
@@ -34,11 +36,12 @@ fn has_private_component(path: &Path) -> bool {
     })
 }
 
+// 处理已匹配路由之外的请求，先排除 API 和非法路径，再提供资源或允许的 SPA 首页。
 pub(crate) async fn serve(root: StaticRoot, #[allow(unused_mut)] mut request: Request) -> Response {
     let Ok(path) = percent_decode_str(request.uri().path()).decode_utf8() else {
         return error::not_found().await.into_response();
     };
-    // API misses must never read a file or receive the SPA shell, for any method.
+    // API 404 优先于方法和文件检查，任何方法的未知 API 都不能读取文件或返回 SPA 首页。
     if is_api(&path) {
         return error::not_found().await.into_response();
     }
@@ -61,6 +64,7 @@ pub(crate) async fn serve(root: StaticRoot, #[allow(unused_mut)] mut request: Re
         .expect("static fallback request is valid");
     *fallback.headers_mut() = request.headers().clone();
     let mut files = ServeDir::with_backend("", backend).append_index_html_on_directories(false);
+    // 只有资源确实不存在才尝试首页，权限拒绝和符号链接错误不得通过 SPA 回退掩盖。
     let result = match files.try_call(request).await {
         Ok(response) if response.status() == StatusCode::NOT_FOUND => {
             files.try_call(fallback).await
@@ -71,8 +75,7 @@ pub(crate) async fn serve(root: StaticRoot, #[allow(unused_mut)] mut request: Re
     match result {
         Ok(response) => {
             let mut response = response.into_response();
-            // Revalidate both shell and assets so a deployment cannot pin stale HTML
-            // or non-fingerprinted assets in a browser cache.
+            // 首页和资源均要求重新验证，避免部署后浏览器仍固定使用旧 HTML 或未带指纹的资源。
             response
                 .headers_mut()
                 .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
@@ -103,7 +106,8 @@ mod tests {
         http::Request,
     };
 
-    // Replaces a validated regular file at the exact handoff to the file opener.
+    // 在校验到真正打开文件的交接处替换目标，稳定复现符号链接竞态。
+    // 验证校验后文件被替换成符号链接时无法读取根目录外内容，覆盖检查与打开间的竞态。
     #[tokio::test]
     async fn swapping_validated_file_for_symlink_cannot_read_outside_root() {
         let web = tempfile::tempdir().unwrap();
@@ -129,7 +133,8 @@ mod tests {
         assert!(!String::from_utf8_lossy(&body).contains("outside-private-data"));
     }
 
-    // The configured path may change, but serving must stay anchored to the opened root.
+    // 配置路径可以被替换，但服务必须始终锚定启动时打开的根目录。
+    // 验证启动后根路径被替换时仍使用原目录能力，防止请求被重定向到外部目录。
     #[tokio::test]
     async fn replacing_root_path_does_not_redirect_the_opened_directory_capability() {
         let parent = tempfile::tempdir().unwrap();

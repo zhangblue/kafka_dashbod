@@ -35,6 +35,7 @@ pub struct DeleteTopicInput {
     confirmation_name: String,
 }
 
+// 处理 Topic 创建请求，在校验通过后通过当前有效会话执行受控管理操作。
 pub async fn create<F: SessionClientFactory>(
     Extension(sessions): Extension<SessionManager<F>>,
     Path(id): Path<String>,
@@ -44,6 +45,7 @@ pub async fn create<F: SessionClientFactory>(
     let result: Result<_, ApiError> = async {
         let Json(input) = payload.map_err(ApiError::from_json)?;
         input.validate().map_err(ApiError::validation)?;
+        // 复用会话 AdminClient 及采集互斥；管理器跟踪已接受工作以供关闭时等待。
         sessions.create_topic(&id, input).await?;
         Ok((StatusCode::CREATED, Json(TopicMutationResult::Created)).into_response())
     }
@@ -51,6 +53,7 @@ pub async fn create<F: SessionClientFactory>(
     result.map_err(|error| error.with_cluster_id(cluster_id))
 }
 
+// 处理 Topic 配置查询，弹窗打开时通过当前会话实时读取值及来源，不使用配置副本。
 pub async fn configs<F: SessionClientFactory>(
     Extension(sessions): Extension<SessionManager<F>>,
     Path((id, topic)): Path<(String, String)>,
@@ -65,6 +68,7 @@ pub async fn configs<F: SessionClientFactory>(
     result.map_err(|error| error.with_cluster_id(cluster_id))
 }
 
+// 处理 Topic 配置保存，通过会话执行冲突检查和增量修改，保留已应用但未确认的语义。
 pub async fn update<F: SessionClientFactory>(
     Extension(sessions): Extension<SessionManager<F>>,
     Path((id, topic)): Path<(String, String)>,
@@ -80,6 +84,7 @@ pub async fn update<F: SessionClientFactory>(
                 TopicConfigUpdateOutcome::Confirmed(configs) => {
                     Json(TopicConfigsResponse { configs }).into_response()
                 }
+                // 写入已被接受但重读未确认时返回 202，避免误导调用者按失败重复写入。
                 TopicConfigUpdateOutcome::AppliedButUnconfirmed => (
                     StatusCode::ACCEPTED,
                     Json(TopicMutationResult::AppliedButUnconfirmed),
@@ -92,6 +97,7 @@ pub async fn update<F: SessionClientFactory>(
     result.map_err(|error| error.with_cluster_id(cluster_id))
 }
 
+// 处理 Topic 删除请求，先核对完整确认名称并保护内部 Topic，再调用会话管理操作。
 pub async fn delete<F: SessionClientFactory>(
     Extension(sessions): Extension<SessionManager<F>>,
     Path((id, topic)): Path<(String, String)>,
@@ -108,8 +114,9 @@ pub async fn delete<F: SessionClientFactory>(
     result.map_err(|error| error.with_cluster_id(cluster_id))
 }
 
+// 在配置读取和修改前复用领域名称校验，避免对非删除操作施加内部 Topic 删除限制。
 fn validate_path_topic(topic: &str) -> Result<(), ApiError> {
-    // Reuse the domain name contract without imposing deletion's internal-topic restriction.
+    // 仅复用名称约束，读取或修改配置不沿用删除接口的内部 Topic 禁止规则。
     CreateTopicInput {
         name: topic.into(),
         partitions: 1,
@@ -121,6 +128,7 @@ fn validate_path_topic(topic: &str) -> Result<(), ApiError> {
 }
 
 impl From<TopicOperationError> for ApiError {
+    // 在 Topic 操作失败时分别复用会话或管理错误映射，维持统一安全错误结构。
     fn from(error: TopicOperationError) -> Self {
         match error {
             TopicOperationError::Session(error) => error.into(),
@@ -130,6 +138,7 @@ impl From<TopicOperationError> for ApiError {
 }
 
 impl From<TopicAdminError> for ApiError {
+    // 在管理操作失败时映射校验、权限、冲突和超时状态，只返回领域层安全消息。
     fn from(error: TopicAdminError) -> Self {
         let status = match &error {
             TopicAdminError::Validation(fields) => return Self::validation(fields.clone()),

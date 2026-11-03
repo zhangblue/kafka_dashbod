@@ -35,6 +35,7 @@ pub struct LagRules {
     overrides: Vec<Override>,
 }
 
+// 处理 Lag 规则查询，规则页面加载时读取集群默认阈值与自定义覆盖。
 pub async fn get(
     Extension(repository): Extension<LagRuleRepository>,
     Path(id): Path<String>,
@@ -43,6 +44,7 @@ pub async fn get(
     Ok(Json(from_stored(defaults, rules)))
 }
 
+// 处理 Lag 规则保存，全部阈值和组合校验通过后统一更新配置。
 pub async fn put(
     Extension(repository): Extension<LagRuleRepository>,
     Path(id): Path<String>,
@@ -123,6 +125,7 @@ pub async fn put(
     )))
 }
 
+// 在规则读取或保存后将仓储记录转换为前端统一的默认值与覆盖列表。
 fn from_stored(
     defaults: (i64, i64, i64),
     rules: Vec<crate::domain::lag_rule::LagRule>,
@@ -150,6 +153,7 @@ fn from_stored(
     }
 }
 
+// 在集群与规则表单校验时累积阈值错误，保证阈值有序且持续时间非负。
 pub(super) fn validate_thresholds(
     fields: &mut BTreeMap<String, String>,
     normal_field: &str,

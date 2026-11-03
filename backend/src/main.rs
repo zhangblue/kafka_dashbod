@@ -1,3 +1,4 @@
+// 在进程入口同步加载必需的 .env，再初始化日志和异步运行时；版本查询提前返回。
 fn main() -> std::io::Result<()> {
     if std::env::args_os()
         .nth(1)
@@ -8,18 +9,17 @@ fn main() -> std::io::Result<()> {
     }
     let invalid_dotenv = || std::io::Error::other("failed to load required .env configuration");
     let dotenv = std::fs::read(".env").map_err(|_| invalid_dotenv())?;
-    // set_var's NUL panic would expose configuration values.
+    // 先拒绝 NUL，避免 set_var 的 panic 把配置值带入诊断输出。
     if dotenv.contains(&0) {
         return Err(invalid_dotenv());
     }
-    // Unlike from_read, dotenvy's iterator does not strip the UTF-8 BOM.
+    // 迭代解析器不会移除 UTF-8 BOM，因此解析前先兼容文件头。
     let dotenv = dotenv.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&dotenv);
     for item in dotenvy::from_read_iter(dotenv) {
         let (key, value) = item.map_err(|_| invalid_dotenv())?;
         if std::env::var_os(&key).is_none() {
-            // SAFETY: This synchronous entry point has only inspected arguments, read the
-            // file and parsed dotenv, none of which starts threads. Logging, Tokio, SQLx
-            // and Kafka initialization happen below, after every environment write.
+            // SAFETY: 此同步入口目前只检查参数、读文件和解析配置，均未启动线程。
+            // 所有环境写入结束后才初始化日志、Tokio、SQLx 和 Kafka，避免并发修改环境。
             unsafe { std::env::set_var(key, value) };
         }
     }
@@ -31,6 +31,7 @@ fn main() -> std::io::Result<()> {
         .block_on(run())
 }
 
+// 在运行时就绪后初始化数据库与后台监控，启动 HTTP 服务并统一排空退出资源。
 async fn run() -> std::io::Result<()> {
     let config = kafka_dashboard::config::Config::from_env()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -46,8 +47,7 @@ async fn run() -> std::io::Result<()> {
         state.alert_sender.clone(),
         kafka_dashboard::alerts::monitor::MONITOR_INTERVAL,
     );
-    // Keep every fallible server setup step inside this scope, so errors drain
-    // the monitor and sessions just like signal-driven shutdown does.
+    // 所有可能失败的服务装配步骤置于此作用域，使启动错误也走相同的监控和会话排空。
     let result = async {
         let app = kafka_dashboard::api::router_with_state_and_web_root(state, config.web_dir)?;
         let address =
@@ -59,18 +59,20 @@ async fn run() -> std::io::Result<()> {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 shutdown_signal().await;
+                // 收到 SIGINT/SIGTERM 后先停止后台监控并等待采集及已接受通知，再排空浏览器会话。
                 shutdown_monitor.shutdown().await;
                 shutdown_sessions.close_all().await;
             })
             .await
     }
     .await;
-    // Also cover server/setup errors that bypass the shutdown signal future.
+    // 服务或装配错误可能绕过信号分支，仍须等待监控和会话释放，避免原生工作遗留到后台。
     monitor.shutdown().await;
     sessions.close_all().await;
     result
 }
 
+// 在优雅退出流程中等待 SIGINT 或 SIGTERM，让服务有机会释放在途任务及原生资源。
 async fn shutdown_signal() {
     #[cfg(unix)]
     {

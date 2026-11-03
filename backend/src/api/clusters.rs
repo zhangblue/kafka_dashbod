@@ -27,12 +27,14 @@ pub struct ClusterRequest {
     clears: SecretClears,
 }
 
+// 处理集群列表请求，设置页面加载时返回不含凭据内容的配置摘要。
 pub async fn list(
     Extension(repository): Extension<ClusterRepository>,
 ) -> Result<Json<Vec<ClusterDto>>, ApiError> {
     Ok(Json(repository.list().await?))
 }
 
+// 处理单个集群查询，编辑配置前读取摘要并区分不存在的集群。
 pub async fn get(
     Extension(repository): Extension<ClusterRepository>,
     Path(id): Path<String>,
@@ -45,6 +47,7 @@ pub async fn get(
     ))
 }
 
+// 处理新增集群请求，在解析和校验通过后保存配置，不创建 Kafka 会话。
 pub async fn create(
     Extension(repository): Extension<ClusterRepository>,
     payload: Result<Json<ClusterRequest>, JsonRejection>,
@@ -61,6 +64,7 @@ pub async fn create(
     ))
 }
 
+// 处理集群更新请求，在表单校验后交由仓储合并保留或清除的凭据。
 pub async fn update(
     Extension(repository): Extension<ClusterRepository>,
     Path(id): Path<String>,
@@ -76,16 +80,19 @@ pub async fn update(
     ))
 }
 
+// 处理集群删除请求，等待相关会话和在途工作释放后再删除持久化配置。
 pub async fn delete<F: SessionClientFactory>(
     Extension(repository): Extension<ClusterRepository>,
     Extension(sessions): Extension<SessionManager<F>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // 与会话创建、连接测试共享集群操作锁，防止删除期间又接受引用该配置的新工作。
     let _operation = sessions.cluster_operation().await;
     repository
         .get(&id)
         .await?
         .ok_or_else(ApiError::cluster_not_found)?;
+    // 先等待该集群会话、临时测试和已接受的管理工作释放，再删除其配置。
     sessions.close_for_cluster(&id).await;
     if !repository.delete(&id).await? {
         return Err(ApiError::cluster_not_found());
@@ -93,6 +100,7 @@ pub async fn delete<F: SessionClientFactory>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// 处理已保存集群的连接测试，兼容空请求体，也支持复用已存凭据的编辑草稿。
 pub async fn test_connection<F: SessionClientFactory>(
     Extension(repository): Extension<ClusterRepository>,
     Extension(sessions): Extension<SessionManager<F>>,
@@ -101,12 +109,11 @@ pub async fn test_connection<F: SessionClientFactory>(
     payload: Result<Bytes, BytesRejection>,
 ) -> Result<Json<ConnectionTestResult>, ApiError> {
     let body = payload.map_err(|error| ApiError::from_json(error.into()))?;
-    // Empty bodies remain compatible even if a client sends a JSON content type.
+    // 即使客户端声明 JSON 类型，空请求体仍兼容测试已保存配置。
     let request = if body.is_empty() {
         None
     } else {
-        // Reuse Axum's media-type checks before a draft can reuse saved secrets.
-        // The original Bytes extractor has already enforced the request body limit.
+        // 草稿复用已存凭据前先复用 JSON 媒体类型校验；此前的 Bytes 提取已执行请求体上限检查。
         let mut request = Request::new(Body::from(body));
         *request.headers_mut() = headers;
         Some(
@@ -126,9 +133,11 @@ pub async fn test_connection<F: SessionClientFactory>(
         repository.decrypted_config(&id).await?
     }
     .ok_or_else(ApiError::cluster_not_found)?;
+    // 临时测试交给管理器跟踪，确保删除集群或退出时可以等待原生客户端释放。
     Ok(Json(sessions.test_connection(Some(id), config).await?))
 }
 
+// 处理新增草稿的连接测试，保存前临时验证配置且不创建监控会话。
 pub async fn test_draft_connection<F: SessionClientFactory>(
     Extension(repository): Extension<ClusterRepository>,
     Extension(sessions): Extension<SessionManager<F>>,
@@ -143,6 +152,7 @@ pub async fn test_draft_connection<F: SessionClientFactory>(
     Ok(Json(sessions.test_connection(None, config).await?))
 }
 
+// 在集群保存或草稿测试前校验必填字段、超时及默认 Lag 阈值。
 fn validate(input: &ClusterInput) -> Result<(), ApiError> {
     let mut fields = BTreeMap::new();
     if input.name.trim().is_empty() {
