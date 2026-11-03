@@ -38,10 +38,10 @@ export const topicConfigsFixture: TopicConfigsResponse = { configs: [
 ] }
 
 export const handlers = [
-  http.get('/api/clusters', () => HttpResponse.json([clusterFixture])),
-  http.get('/api/clusters/:id/lag-rules', () => HttpResponse.json(rulesFixture)),
-  http.post('/api/sessions/:id/topics', () => HttpResponse.json({ status: 'created' }, { status: 201 })),
-  http.get('/api/sessions/:id/topics/:topic/configs', () => HttpResponse.json(topicConfigsFixture)),
+  http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json([clusterFixture])),
+  http.get('/api/clusters/:id/lag-rules', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(rulesFixture)),
+  http.post('/api/sessions/:id/topics', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ status: 'created' }, { status: 201 })),
+  http.get('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(topicConfigsFixture)),
 ]
 
 export const server = setupServer(...handlers)

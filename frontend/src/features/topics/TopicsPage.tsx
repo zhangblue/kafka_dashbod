@@ -12,10 +12,13 @@ import { DeleteTopicModal } from './DeleteTopicModal'
 type ManagementTarget = { sessionId: string } & ({ kind: 'create' } | { kind: 'config' | 'delete'; topic: string })
 type ManagementNotice = { clusterId: string | undefined; text: string; deletedTopic?: string; waiting?: boolean }
 
+// 在 Topic 与分区单元格渲染时将未知值保留为破折号。
 const format = (value: number | null) => value === null ? '—' : value.toLocaleString('en-US')
+// 在展示分区最大消息 Offset 时对非空分区使用 High 减一，空或未知范围返回未知。
 const latest = (partition: PartitionWatermark) => partition.low === null || partition.high === null
   || partition.high <= partition.low ? null : partition.high - 1
 
+// 在 Topic 汇总行渲染时计算已知 Offset 边界与范围估算，不把缺失分区计为零。
 function summary(topic: TopicSnapshot) {
   const incomplete = topic.incomplete || topic.partitions.some(partition => partition.low === null || partition.high === null)
   const lows = topic.partitions.flatMap(partition => partition.low === null ? [] : [partition.low])
@@ -27,6 +30,7 @@ function summary(topic: TopicSnapshot) {
   }
 }
 
+// 在用户展开 Topic 时展示分区权威水位、范围估算及陈旧标记。
 function PartitionTable({ topic, staleResources }: { topic: TopicSnapshot; staleResources: Record<string, string> | undefined }) {
   return <table aria-label={`${topic.topic} Partitions`}>
     <thead><tr>
@@ -42,6 +46,7 @@ function PartitionTable({ topic, staleResources }: { topic: TopicSnapshot; stale
   </table>
 }
 
+// 在 Topics 路由渲染时汇总 Offset、展开分区并把管理弹窗绑定到当前有效会话。
 export function TopicsPage() {
   const { cluster, monitor, refreshSeconds } = useDashboard()
   const stale = useSnapshotStale(monitor, refreshSeconds)
@@ -56,13 +61,13 @@ export function TopicsPage() {
   const focusedDeleteTrigger = useRef<HTMLButtonElement | null>(null)
   if (target && target.sessionId !== sessionId) setTarget(null)
   if (notice && notice.clusterId !== cluster?.id) setNotice(null)
-  useEffect(() => {
+  useEffect(/* 在快照更新导致已删除行消失时按需恢复工具栏焦点，避免焦点落在已卸载控件。 */ () => {
     const removedTrigger = focusedDeleteTrigger.current && !focusedDeleteTrigger.current.isConnected
     if (((previousTarget.current && !target) || removedTrigger) && document.activeElement === document.body) createButton.current?.focus()
     if (removedTrigger) focusedDeleteTrigger.current = null
     previousTarget.current = target
   }, [target, snapshot])
-  useEffect(() => {
+  useEffect(/* 在删除传播提示出现后启动有界定时器，超时只提示手动确认而不否定成功删除。 */ () => {
     if (!notice?.waiting) return
     const timer = setTimeout(() => setNotice(previous => previous === notice
       ? { ...notice, waiting: false, text: '删除请求已成功，请稍后刷新确认集群状态。' } : previous), 30000)
@@ -70,10 +75,12 @@ export function TopicsPage() {
   }, [notice])
   const id = useId()
   const topics = snapshot?.topics.filter(topic => topic.topic.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) ?? []
+  // 在点击管理按钮时记录当前会话和目标，防止弹窗跨会话执行管理请求。
   const openManagement = (kind: ManagementTarget['kind'], topic?: string) => {
     if (!sessionId) return
     setTarget(kind === 'create' ? { kind, sessionId } : { kind, sessionId, topic: topic! })
   }
+  // 在管理请求成功后先保留提交结果，再等待快照刷新并处理已删除行的焦点恢复。
   const applied = async (result?: TopicMutationResult) => {
     if (!target) return
     setNotice({ clusterId: cluster?.id, ...(result?.status === 'appliedButUnconfirmed' ? { text: '已提交但暂时无法确认当前值' }
@@ -85,7 +92,7 @@ export function TopicsPage() {
     ? 'Topic 已删除。' : notice?.text
   return <section className="page-panel" aria-label="Topics 内容">
     <div className="page-head"><div><h2>Topics</h2><p>查看 Topic 汇总与逐 Partition Offset</p></div>
-    <div className="toolbar"><label className="search-label"><span className="sr-only">搜索 Topic</span><input type="search" placeholder="搜索 Topic…" value={search} onChange={event => setSearch(event.target.value)} /></label><span className="status-badge status-normal">{topics.length} Topics</span><button ref={createButton} type="button" className="primary" disabled={!sessionId} onClick={() => openManagement('create')}>新建 Topic</button></div></div>
+    <div className="toolbar"><label className="search-label"><span className="sr-only">搜索 Topic</span><input type="search" placeholder="搜索 Topic…" value={search} onChange={/* 在搜索内容变化时更新当前过滤词，仅筛选已取得的快照。 */ event => setSearch(event.target.value)} /></label><span className="status-badge status-normal">{topics.length} Topics</span><button ref={createButton} type="button" className="primary" disabled={!sessionId} onClick={/* 在新建按钮点击时把创建目标绑定到当前有效会话。 */ () => openManagement('create')}>新建 Topic</button></div></div>
     {noticeText && <p className="topic-management-notice" role="status" aria-label="Topic 操作结果">{noticeText}</p>}
     {stale && <p role="status" aria-label="Topics 数据已陈旧">数据已陈旧</p>}
     <p className="offset-note"><b>Offset 按 Partition 独立计算。</b> Topic 汇总仅供概览，不同 Partition 的 Offset 不能视为统一序列；以展开后的 Partition 水位为准。</p>
@@ -105,16 +112,16 @@ export function TopicsPage() {
         const detailsId = `${id}-partitions-${index}`
         return <Fragment key={topic.topic}>
           <tr><td className="topic-name-cell"><button className="expand-button" type="button" aria-label={`${open ? '收起' : '展开'} ${topic.topic}`} aria-expanded={open} aria-controls={open ? detailsId : undefined}
-            onClick={() => setExpanded(previous => { const next = new Set(previous); if (open) next.delete(topic.topic); else next.add(topic.topic); return next })}>
+            onClick={/* 在展开按钮点击时切换当前资源明细，不改变后台采样会话。 */ () => setExpanded(previous => { const next = new Set(previous); if (open) next.delete(topic.topic); else next.add(topic.topic); return next })}>
             {open ? '⌄' : '›'}</button> <span className="name">{topic.topic}</span></td>
           <td>{topic.partitions.length}</td><td>{format(values.low)}</td><td>{format(values.max)}</td><td>{format(values.span)}</td>
           <td>{staleAt ? <StaleNotice at={staleAt} /> : values.incomplete ? '不完整：部分分区采集失败，展开查看已知值' : '完整'}</td>
           <td className="topic-actions-column"><div className="topic-row-actions">
-            <button type="button" aria-label={`配置 ${topic.topic}`} disabled={!sessionId} onClick={() => openManagement('config', topic.topic)}>配置</button>
+            <button type="button" aria-label={`配置 ${topic.topic}`} disabled={!sessionId} onClick={/* 在配置按钮点击时记录当前 Topic 与会话，按需打开实时参数编辑器。 */ () => openManagement('config', topic.topic)}>配置</button>
             {!topic.topic.startsWith('__') && <button type="button" className="danger-button" aria-label={`删除 ${topic.topic}`} disabled={!sessionId}
-              onFocus={event => { if (notice?.deletedTopic === topic.topic) focusedDeleteTrigger.current = event.currentTarget }}
-              onBlur={event => { if (event.currentTarget.isConnected) focusedDeleteTrigger.current = null }}
-              onClick={() => openManagement('delete', topic.topic)}>删除</button>}
+              onFocus={/* 在删除按钮聚焦时记录触发器，只在删除行消失后按需恢复焦点。 */ event => { if (notice?.deletedTopic === topic.topic) focusedDeleteTrigger.current = event.currentTarget }}
+              onBlur={/* 在删除按钮失焦时撤销恢复标记，避免抢走用户主动移到别处的焦点。 */ event => { if (event.currentTarget.isConnected) focusedDeleteTrigger.current = null }}
+              onClick={/* 在删除按钮点击时绑定当前 Topic 与会话，由确认弹窗再校验完整名称。 */ () => openManagement('delete', topic.topic)}>删除</button>}
           </div></td></tr>
           {open && <tr className="detail-row"><td colSpan={7} id={detailsId}><PartitionTable topic={topic} staleResources={monitor.staleResources} /></td></tr>}
         </Fragment>
@@ -122,8 +129,8 @@ export function TopicsPage() {
       {!topics.length && <p>{snapshot.topics.length ? '没有匹配的 Topic。' : '暂无 Topic。'}</p>}
     </>}
     {target && target.sessionId === sessionId && (target.kind === 'create'
-      ? <CreateTopicModal sessionId={target.sessionId} onClose={() => setTarget(null)} onApplied={applied} />
-      : target.kind === 'config' ? <TopicConfigModal sessionId={target.sessionId} topic={target.topic} onClose={() => setTarget(null)} onApplied={applied} />
-        : <DeleteTopicModal sessionId={target.sessionId} topic={target.topic} onClose={() => setTarget(null)} onApplied={applied} />)}
+      ? <CreateTopicModal sessionId={target.sessionId} onClose={/* 在关闭弹窗时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => setTarget(null)} onApplied={applied} />
+      : target.kind === 'config' ? <TopicConfigModal sessionId={target.sessionId} topic={target.topic} onClose={/* 在关闭弹窗时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => setTarget(null)} onApplied={applied} />
+        : <DeleteTopicModal sessionId={target.sessionId} topic={target.topic} onClose={/* 在关闭弹窗时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => setTarget(null)} onApplied={applied} />)}
   </section>
 }

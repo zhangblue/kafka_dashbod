@@ -17,6 +17,7 @@ export const ConsumerGroupLagContext = createContext<{
   rows: ConsumerGroupLagRow[]; isPending: boolean; error: unknown; ready: boolean
 } | null>(null)
 
+// 在概览和消费组组件渲染时读取共享 Lag 判定，缺少提供者时立即暴露装配错误。
 export function useConsumerGroupLag() {
   const value = useContext(ConsumerGroupLagContext)
   if (!value) throw new Error('Consumer Groups requires the dashboard lag provider')

@@ -10,6 +10,7 @@ import { rowHealth } from '../consumer-groups/status'
 import { useDashboard } from '../dashboard/useDashboard'
 import { useSnapshotStale } from '../dashboard/useSnapshotStale'
 
+// 在概览卡片和历史曲线生成时汇总已知 Lag，同时保留不完整和完全未知的区别。
 function totalLag(snapshot: ClusterSnapshot) {
   const known = snapshot.consumerGroups.reduce((sum, row) => sum + row.lag, 0)
   const collectionError = snapshot.consumerGroups.some(row => rowHealth(row, snapshot).collectionError)
@@ -19,6 +20,7 @@ function totalLag(snapshot: ClusterSnapshot) {
   return { known, incomplete, collectionError, available: !incomplete || snapshot.consumerGroups.some(row => row.partitions.some(partition => partition.lag !== null)) }
 }
 
+// 在概览快照更新时跨 Topic 汇总消费组 Lag，并给未知分区标记不完整。
 function LagDistribution({ snapshot }: { snapshot: ClusterSnapshot }) {
   const groups = new Map<string, { name: string; known: number; incomplete: boolean }>()
   for (const row of snapshot.consumerGroups) {
@@ -46,6 +48,7 @@ function LagDistribution({ snapshot }: { snapshot: ClusterSnapshot }) {
   </section>
 }
 
+// 在概览路由渲染时组合紧凑指标、历史趋势、消费组分布和待关注表格。
 export function OverviewPage() {
   const { cluster, monitor, refreshSeconds = 5 } = useDashboard()
   const lag = useConsumerGroupLag()

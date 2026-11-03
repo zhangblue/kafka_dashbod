@@ -7,6 +7,7 @@ import { hasCollectionFailure, rowHealth } from './status'
 
 interface Selection { key: string; topic: string; partition?: number; name: string }
 
+// 在选定消费组后生成 Topic 与分区曲线选项，保留局部采集失败的历史断点。
 function GroupHistory({ groupId, snapshots, history, stale }: {
   groupId: string; snapshots: ClusterSnapshot[]; history: SnapshotSample[]; stale: boolean
 }) {
@@ -42,7 +43,7 @@ function GroupHistory({ groupId, snapshots, history, stale }: {
   }))
   return <>
     <fieldset><legend>选择 Topic / Partition 趋势（可多选）</legend>{options.map(option => <label key={option.key}>
-      <input type="checkbox" checked={active.has(option.key)} onChange={() => setSelected(previous => {
+      <input type="checkbox" checked={active.has(option.key)} onChange={/* 在趋势复选框变化时更新选中序列，保留其他 Topic 与分区选择。 */ () => setSelected(previous => {
         const next = new Set(previous ?? active)
         if (next.has(option.key)) next.delete(option.key); else next.add(option.key)
         return next
@@ -53,6 +54,7 @@ function GroupHistory({ groupId, snapshots, history, stale }: {
   </>
 }
 
+// 在消费组页面渲染时从当前及历史快照建立消费组选项，并隔离各组的趋势选择。
 export function ConsumerGroupHistory({ snapshot, history, stale }: { snapshot: ClusterSnapshot | null; history: SnapshotSample[]; stale: boolean }) {
   const [params] = useSearchParams()
   const [chosenGroup, setChosenGroup] = useState(params.get('groupId') ?? '')
@@ -62,7 +64,7 @@ export function ConsumerGroupHistory({ snapshot, history, stale }: { snapshot: C
   if (!groupId) return null
   return <section aria-label="消费组 Lag 历史"><h3>消费组 Lag 历史</h3>
     <p>历史仅保留当前页面最近一小时的原始采样；未提交、采集失败或未发现的序列显示断点。</p>
-    <label>趋势 Consumer Group <select value={groupId} onChange={event => setChosenGroup(event.target.value)}>
+    <label>趋势 Consumer Group <select value={groupId} onChange={/* 在趋势消费组选择变化时切换对应历史视图。 */ event => setChosenGroup(event.target.value)}>
       {groups.map(group => <option key={group}>{group}</option>)}
     </select></label>
     <GroupHistory key={groupId} groupId={groupId} snapshots={snapshots} history={history} stale={stale} />

@@ -7,38 +7,39 @@ import { ClustersPage } from './ClustersPage'
 import type { ClusterDto, ClusterSnapshot, FeishuAlertSettings, LagRuleSet } from '../../api/types'
 import { clusterFixture, server, snapshotFixture } from '../../test/handlers'
 
-beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
-beforeEach(() => server.use(http.get('/api/clusters/:id/feishu-alert', () => HttpResponse.json({ accessTokenConfigured: false, maskedAccessToken: null, rules: [] }))))
-afterEach(() => {
+beforeAll(/* 在测试组开始时启动请求拦截，避免单元测试访问真实服务。 */ () => server.listen({ onUnhandledFrame: 'error' }))
+beforeEach(/* 在每个用例前安装不含 Token 的飞书配置响应，隔离摘要加载与当前交互断言。 */ () => server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ accessTokenConfigured: false, maskedAccessToken: null, rules: [] }))))
+afterEach(/* 在每个用例结束时恢复本用例修改的测试环境，避免拦截或模拟状态影响后续断言。 */ () => {
   onlineManager.setOnline(true)
   server.resetHandlers()
   vi.useRealTimers()
   vi.restoreAllMocks()
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
 })
-afterAll(() => server.close())
+afterAll(/* 在测试组结束时关闭拦截并恢复全局配置。 */ () => server.close())
 
+// 在集群交互测试准备时挂载查询上下文及设置页，隔离每次测试缓存。
 function renderPage(snapshot: ClusterSnapshot | null = snapshotFixture, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return render(<QueryClientProvider client={client}>
     <ClustersPage snapshot={snapshot} />
   </QueryClientProvider>)
 }
 
-describe('cluster settings', () => {
-  it('opens independent Feishu settings using the active snapshot and retains save and test feedback after refreshing the summary', async () => {
+describe('cluster settings', /* 在测试组注册阶段组织当前功能的交互与边界回归。 */ () => {
+  it('opens independent Feishu settings using the active snapshot and retains save and test feedback after refreshing the summary', /* 在本用例执行时验证复用有效快照打开飞书设置，摘要刷新后保留保存与测试反馈。 */ async () => {
     const user = userEvent.setup()
     let settings: FeishuAlertSettings = { accessTokenConfigured: false, maskedAccessToken: null, rules: [] }
     let saved: unknown
     let sessions = 0, tests = 0
     server.use(
-      http.get('/api/clusters/:id/feishu-alert', () => HttpResponse.json(settings)),
-      http.post('/api/clusters/:id/sessions', () => { sessions++; return HttpResponse.json({ sessionId: 'unneeded', leaseSeconds: 15 }) }),
-      http.put('/api/clusters/:id/feishu-alert', async ({ request }) => {
+      http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(settings)),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { sessions++; return HttpResponse.json({ sessionId: 'unneeded', leaseSeconds: 15 }) }),
+      http.put('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
         saved = await request.json()
         settings = { accessTokenConfigured: true, maskedAccessToken: '****demo', rules: [{ id: 'saved-rule', groupId: 'flink-order-enrich', topic: 'raw-orders', lagThreshold: 25, growthSeconds: 10, enabled: true }] }
         return HttpResponse.json(settings)
       }),
-      http.post('/api/clusters/:id/feishu-alert/test', () => { tests++; return HttpResponse.json({ ok: true }) }),
+      http.post('/api/clusters/:id/feishu-alert/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { tests++; return HttpResponse.json({ ok: true }) }),
     )
     renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
     await screen.findByText('飞书告警：未配置')
@@ -66,16 +67,16 @@ describe('cluster settings', () => {
     expect(screen.queryByRole('dialog', { name: '配置飞书告警' })).not.toBeInTheDocument()
   })
 
-  it('opens a temporary Feishu configuration session for stale snapshots and releases it on close and deletion', async () => {
+  it('opens a temporary Feishu configuration session for stale snapshots and releases it on close and deletion', /* 在本用例执行时验证快照陈旧时建立临时飞书会话，关闭或删除集群后释放。 */ async () => {
     const user = userEvent.setup()
     let clusters = [clusterFixture]
     let created = 0, closed = 0
     server.use(
-      http.get('/api/clusters', () => HttpResponse.json(clusters)),
-      http.post('/api/clusters/:id/sessions', () => HttpResponse.json({ sessionId: `feishu-${++created}`, leaseSeconds: 15 }, { status: 201 })),
-      http.get('/api/sessions/:id/snapshot', () => HttpResponse.json({ ...snapshotFixture, collectedAt: new Date().toISOString() })),
-      http.delete('/api/sessions/:id', () => { closed++; return new HttpResponse(null, { status: 204 }) }),
-      http.delete('/api/clusters/:id', () => { clusters = []; return new HttpResponse(null, { status: 204 }) }),
+      http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(clusters)),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: `feishu-${++created}`, leaseSeconds: 15 }, { status: 201 })),
+      http.get('/api/sessions/:id/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ ...snapshotFixture, collectedAt: new Date().toISOString() })),
+      http.delete('/api/sessions/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
+      http.delete('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { clusters = []; return new HttpResponse(null, { status: 204 }) }),
     )
     renderPage(snapshotFixture)
     await user.click(await screen.findByRole('button', { name: '配置飞书告警' }))
@@ -92,21 +93,21 @@ describe('cluster settings', () => {
     expect(screen.queryByDisplayValue('discard-on-delete')).not.toBeInTheDocument()
   })
 
-  it('aborts the previous cluster GET and discards its mask and draft when switching Feishu editors', async () => {
+  it('aborts the previous cluster GET and discards its mask and draft when switching Feishu editors', /* 在本用例执行时验证切换飞书编辑器时取消旧集群读取并丢弃旧掩码和草稿。 */ async () => {
     const user = userEvent.setup()
     let finish!: () => void
     const pending = new Promise<void>(resolve => { finish = resolve })
     let readsA = 0, aborted = false
     server.use(
-      http.get('/api/clusters', () => HttpResponse.json([clusterFixture, { ...clusterFixture, id: 'cluster-b', name: '集群 B' }])),
-      http.get('/api/clusters/:id/feishu-alert', async ({ params, request }) => {
+      http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json([clusterFixture, { ...clusterFixture, id: 'cluster-b', name: '集群 B' }])),
+      http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ params, request }) => {
         if (params.id === 'cluster-a' && ++readsA === 3) {
           request.signal.addEventListener('abort', () => { aborted = true })
           await pending
         }
         return HttpResponse.json({ accessTokenConfigured: true, maskedAccessToken: params.id === 'cluster-a' ? '****old-a' : '****new-b', rules: [] })
       }),
-      http.post('/api/clusters/:id/feishu-alert/test', () => HttpResponse.json({ ok: true })),
+      http.post('/api/clusters/:id/feishu-alert/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ ok: true })),
     )
     renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
     const cards = await screen.findAllByRole('button', { name: '配置飞书告警' })
@@ -131,12 +132,12 @@ describe('cluster settings', () => {
     expect(screen.getByText('****new-b')).toBeInTheDocument()
   })
 
-  it('shows safe Chinese loading and failure messages and retries Feishu settings without exposing response text', async () => {
+  it('shows safe Chinese loading and failure messages and retries Feishu settings without exposing response text', /* 在本用例执行时验证飞书读取失败只显示安全中文错误且允许重试。 */ async () => {
     const user = userEvent.setup()
     let finish!: () => void
     const pending = new Promise<void>(resolve => { finish = resolve })
     let fail = true
-    server.use(http.get('/api/clusters/:id/feishu-alert', async () => {
+    server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => {
       await pending
       return fail ? HttpResponse.json({ code: 'INTERNAL', message: 'sensitive-token-from-server', requestId: 'unsafe' }, { status: 500 })
         : HttpResponse.json({ accessTokenConfigured: false, maskedAccessToken: null, rules: [] })
@@ -153,10 +154,10 @@ describe('cluster settings', () => {
     await screen.findByLabelText('更新 Token')
   })
 
-  it('requires a successful current GET before restoring a previously cached Feishu form', async () => {
+  it('requires a successful current GET before restoring a previously cached Feishu form', /* 在本用例执行时验证必须取得本次成功读取后才恢复缓存表单。 */ async () => {
     const user = userEvent.setup()
     let fail = false
-    server.use(http.get('/api/clusters/:id/feishu-alert', () => fail
+    server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => fail
       ? HttpResponse.json({ code: 'INTERNAL', message: 'unsafe-response' }, { status: 500 })
       : HttpResponse.json({ accessTokenConfigured: true, maskedAccessToken: '****cached', rules: [] })))
     renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
@@ -170,7 +171,7 @@ describe('cluster settings', () => {
     expect(screen.queryByRole('button', { name: '保存配置' })).not.toBeInTheDocument()
   })
 
-  it.each(['success', 'failure'] as const)('hides cached Feishu settings while offline and waits for the resumed GET %s', async outcome => {
+  it.each(['success', 'failure'] as const)('hides cached Feishu settings while offline and waits for the resumed GET %s', /* 在本用例执行时验证离线时隐藏缓存配置，恢复后等待新的读取结果。 */ async outcome => {
     const user = userEvent.setup()
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const cached: FeishuAlertSettings = { accessTokenConfigured: true, maskedAccessToken: '****offline-old', rules: [
@@ -179,7 +180,7 @@ describe('cluster settings', () => {
     let complete!: () => void
     const responseReady = new Promise<void>(resolve => { complete = resolve })
     let started = false
-    server.use(http.get('/api/clusters/:id/feishu-alert', async () => {
+    server.use(http.get('/api/clusters/:id/feishu-alert', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => {
       started = true
       await responseReady
       return outcome === 'failure'
@@ -218,13 +219,13 @@ describe('cluster settings', () => {
     } finally { complete() }
   })
 
-  it('pauses Feishu options while hidden, retains the draft, and releases every temporary session on pagehide and leave', async () => {
+  it('pauses Feishu options while hidden, retains the draft, and releases every temporary session on pagehide and leave', /* 在本用例执行时验证页面隐藏暂停资源选项并保留草稿，离开后释放全部临时会话。 */ async () => {
     const user = userEvent.setup()
     let created = 0, closed = 0
     server.use(
-      http.post('/api/clusters/:id/sessions', () => HttpResponse.json({ sessionId: `feishu-visible-${++created}`, leaseSeconds: 15 }, { status: 201 })),
-      http.get('/api/sessions/:id/snapshot', () => HttpResponse.json({ ...snapshotFixture, collectedAt: new Date().toISOString() })),
-      http.delete('/api/sessions/:id', () => { closed++; return new HttpResponse(null, { status: 204 }) }),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: `feishu-visible-${++created}`, leaseSeconds: 15 }, { status: 201 })),
+      http.get('/api/sessions/:id/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ ...snapshotFixture, collectedAt: new Date().toISOString() })),
+      http.delete('/api/sessions/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
     )
     const page = renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置飞书告警' }))
@@ -252,7 +253,7 @@ describe('cluster settings', () => {
     await waitFor(() => expect(closed).toBe(3))
   })
 
-  it('groups the security protocol label and control for consistent form layout', async () => {
+  it('groups the security protocol label and control for consistent form layout', /* 在本用例执行时验证安全协议标签与控件布局保持一致。 */ async () => {
     const user = userEvent.setup()
     renderPage()
     await user.click(screen.getByRole('button', { name: '新增集群' }))
@@ -262,16 +263,16 @@ describe('cluster settings', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('tests a new unsaved draft without persisting and invalidates the result when edited', async () => {
+  it('tests a new unsaved draft without persisting and invalidates the result when edited', /* 在本用例执行时验证测试未保存配置不持久化，编辑后使旧测试结果失效。 */ async () => {
     const user = userEvent.setup()
     let tested: Record<string, unknown> | undefined
     let saves = 0
     server.use(
-      http.post('/api/clusters/test', async ({ request }) => {
+      http.post('/api/clusters/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
         tested = await request.json() as Record<string, unknown>
         return HttpResponse.json({ brokerCount: 2, topicCount: 4, elapsedMs: 10 })
       }),
-      http.post('/api/clusters', () => { saves++; return HttpResponse.json(clusterFixture) }),
+      http.post('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { saves++; return HttpResponse.json(clusterFixture) }),
     )
     renderPage()
     await user.click(screen.getByRole('button', { name: '新增集群' }))
@@ -288,16 +289,16 @@ describe('cluster settings', () => {
     expect(screen.queryByText(/当前配置连接成功/)).not.toBeInTheDocument()
   })
 
-  it('tests unsaved edits with omitted saved credentials and sends all explicit clear flags on save', async () => {
+  it('tests unsaved edits with omitted saved credentials and sends all explicit clear flags on save', /* 在本用例执行时验证保留已存凭据且保存时完整发送显式清除标志。 */ async () => {
     const user = userEvent.setup()
     let tested: Record<string, unknown> | undefined
     let saved: Record<string, unknown> | undefined
     server.use(
-      http.post('/api/clusters/:id/test', async ({ request }) => {
+      http.post('/api/clusters/:id/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
         tested = await request.json() as Record<string, unknown>
         return HttpResponse.json({ brokerCount: 1, topicCount: 1, elapsedMs: 1 })
       }),
-      http.put('/api/clusters/:id', async ({ request }) => {
+      http.put('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
         saved = await request.json() as Record<string, unknown>
         return HttpResponse.json(clusterFixture)
       }),
@@ -322,9 +323,9 @@ describe('cluster settings', () => {
     expect(saved).not.toHaveProperty('password')
   })
 
-  it('shows safe draft-test field errors without discarding unsaved configuration', async () => {
+  it('shows safe draft-test field errors without discarding unsaved configuration', /* 在本用例执行时验证草稿测试失败保留输入并显示安全字段错误。 */ async () => {
     const user = userEvent.setup()
-    server.use(http.post('/api/clusters/:id/test', () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: '配置无效',
+    server.use(http.post('/api/clusters/:id/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: '配置无效',
       details: { clientKeyPassphrase: '私钥口令配置无效' }, requestId: 'draft-request' }, { status: 422 })))
     renderPage()
     await user.click(await screen.findByRole('button', { name: '编辑' }))
@@ -335,20 +336,21 @@ describe('cluster settings', () => {
     expect(screen.getByLabelText('集群名称')).toHaveValue(clusterFixture.name)
   })
 
-  it('does not connect while hidden and releases configuration sessions on hidden and pagehide', async () => {
+  it('does not connect while hidden and releases configuration sessions on hidden and pagehide', /* 在本用例执行时验证隐藏页面不建连，隐藏与离开都会释放配置会话。 */ async () => {
     const user = userEvent.setup()
     const fetch = vi.spyOn(globalThis, 'fetch')
     let created = 0, collected = 0, closed = 0
     server.use(
-      http.post('/api/clusters/:id/sessions', () => HttpResponse.json({ sessionId: `visibility-${++created}`, leaseSeconds: 30 }, { status: 201 })),
-      http.get('/api/sessions/:id/snapshot', () => { collected++; return HttpResponse.json(snapshotFixture) }),
-      http.delete('/api/sessions/:id', () => { closed++; return new HttpResponse(null, { status: 204 }) }),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: `visibility-${++created}`, leaseSeconds: 30 }, { status: 201 })),
+      http.get('/api/sessions/:id/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { collected++; return HttpResponse.json(snapshotFixture) }),
+      http.delete('/api/sessions/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
     )
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
     renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
     await screen.findByRole('button', { name: '新增规则' })
     expect(created).toBe(0)
+    // 在页面生命周期回归中模拟可见性变化，检验隐藏暂停与会话清理。
     const visibility = (value: DocumentVisibilityState) => act(() => {
       Object.defineProperty(document, 'visibilityState', { configurable: true, value })
       document.dispatchEvent(new Event('visibilitychange'))
@@ -376,18 +378,18 @@ describe('cluster settings', () => {
     await waitFor(() => expect(closed).toBe(3))
   })
 
-  it('stops every scheduled configuration poll while hidden and keeps rules read-only during reconnection', async () => {
+  it('stops every scheduled configuration poll while hidden and keeps rules read-only during reconnection', /* 在本用例执行时验证隐藏后停止所有定时采样，重连时旧规则只读。 */ async () => {
     const user = userEvent.setup()
     let collections = 0
     let finishReconnect!: () => void
     const reconnecting = new Promise<void>(resolve => { finishReconnect = resolve })
     server.use(
-      http.post('/api/clusters/:id/sessions', () => HttpResponse.json({ sessionId: 'settings-timer', leaseSeconds: 30 }, { status: 201 })),
-      http.get('/api/sessions/settings-timer/snapshot', async () => {
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: 'settings-timer', leaseSeconds: 30 }, { status: 201 })),
+      http.get('/api/sessions/settings-timer/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => {
         if (++collections === 2) await reconnecting
         return HttpResponse.json(snapshotFixture)
       }),
-      http.delete('/api/sessions/settings-timer', () => new HttpResponse(null, { status: 204 })),
+      http.delete('/api/sessions/settings-timer', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => new HttpResponse(null, { status: 204 })),
     )
     renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
@@ -411,24 +413,24 @@ describe('cluster settings', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '新增规则' })).toBeEnabled())
   })
 
-  it('adds, edits with blank secrets preserved, tests connection, and deletes a cluster', async () => {
+  it('adds, edits with blank secrets preserved, tests connection, and deletes a cluster', /* 在本用例执行时验证新增、留空保留凭据、测试与删除集群完整流程。 */ async () => {
     const user = userEvent.setup()
     let clusters = [clusterFixture]
     let saved: Record<string, unknown> | undefined
     server.use(
-      http.get('/api/clusters', () => HttpResponse.json(clusters)),
-      http.post('/api/clusters', async ({ request }) => {
+      http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(clusters)),
+      http.post('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
         saved = await request.json() as Record<string, unknown>
         clusters = [...clusters, { ...clusterFixture, ...saved, id: 'new' } as typeof clusterFixture]
         return HttpResponse.json(clusters[1], { status: 201 })
       }),
-      http.put('/api/clusters/:id', async ({ request }) => {
+      http.put('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
         saved = await request.json() as Record<string, unknown>
         clusters = clusters.map(cluster => cluster.id === 'new' ? { ...cluster, ...saved } as typeof clusterFixture : cluster)
         return HttpResponse.json(clusters[1])
       }),
-      http.post('/api/clusters/:id/test', () => HttpResponse.json({ brokerCount: 3, topicCount: 12, elapsedMs: 20 })),
-      http.delete('/api/clusters/:id', ({ params }) => {
+      http.post('/api/clusters/:id/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ brokerCount: 3, topicCount: 12, elapsedMs: 20 })),
+      http.delete('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ ({ params }) => {
         clusters = clusters.filter(cluster => cluster.id !== params.id)
         return new HttpResponse(null, { status: 204 })
       }),
@@ -456,9 +458,9 @@ describe('cluster settings', () => {
     await waitFor(() => expect(screen.queryByRole('group', { name: '已编辑集群' })).not.toBeInTheDocument())
   })
 
-  it('displays server field errors and request ID without discarding input', async () => {
+  it('displays server field errors and request ID without discarding input', /* 在本用例执行时验证服务端字段错误与请求编号展示时保留输入。 */ async () => {
     const user = userEvent.setup()
-    server.use(http.post('/api/clusters', () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: 'The request contains invalid fields',
+    server.use(http.post('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: 'The request contains invalid fields',
       details: { bootstrapServers: '地址无效' }, requestId: 'req-ui' }, { status: 422 })))
     renderPage()
     await user.click(screen.getByRole('button', { name: '新增集群' }))
@@ -471,10 +473,10 @@ describe('cluster settings', () => {
     expect(screen.getByLabelText('集群名称')).toHaveValue('保留输入')
   })
 
-  it('reuses an active snapshot and atomically saves defaults and group/topic rules', async () => {
+  it('reuses an active snapshot and atomically saves defaults and group/topic rules', /* 在本用例执行时验证复用有效快照一次保存默认和覆盖规则。 */ async () => {
     const user = userEvent.setup()
     let saved: unknown
-    server.use(http.put('/api/clusters/:id/lag-rules', async ({ request }) => {
+    server.use(http.put('/api/clusters/:id/lag-rules', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
       const body = await request.json() as Record<string, unknown>
       saved = body
       return HttpResponse.json(body)
@@ -490,9 +492,9 @@ describe('cluster settings', () => {
       overrides: [{ groupId: 'flink-order-enrich', topic: 'raw-orders', normalMax: 999, highMin: 5000, overLimitSeconds: 30 }] })
   })
 
-  it('associates rule API field errors with the numeric input and topic selector', async () => {
+  it('associates rule API field errors with the numeric input and topic selector', /* 在本用例执行时验证规则 API 字段错误准确关联数值和 Topic 控件。 */ async () => {
     const user = userEvent.setup()
-    server.use(http.put('/api/clusters/:id/lag-rules', () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: 'Invalid rule fields',
+    server.use(http.put('/api/clusters/:id/lag-rules', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ code: 'VALIDATION_ERROR', message: 'Invalid rule fields',
       details: { 'defaults.normalMax': '正常上限无效', 'overrides.0.topic': 'Topic 目前不可选' }, requestId: 'req-rules' }, { status: 422 })))
     renderPage()
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
@@ -506,13 +508,13 @@ describe('cluster settings', () => {
     expect(screen.getByLabelText('Topic')).toHaveAttribute('aria-invalid', 'true')
   })
 
-  it('opens and releases a temporary configuration session when no active snapshot exists', async () => {
+  it('opens and releases a temporary configuration session when no active snapshot exists', /* 在本用例执行时验证缺少共享快照时按需创建并释放临时配置会话。 */ async () => {
     const user = userEvent.setup()
     let closed = false
     server.use(
-      http.post('/api/clusters/:id/sessions', () => HttpResponse.json({ sessionId: 'settings-session', leaseSeconds: 30 }, { status: 201 })),
-      http.get('/api/sessions/settings-session/snapshot', () => HttpResponse.json(snapshotFixture)),
-      http.delete('/api/sessions/settings-session', () => { closed = true; return new HttpResponse(null, { status: 204 }) }),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: 'settings-session', leaseSeconds: 30 }, { status: 201 })),
+      http.get('/api/sessions/settings-session/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(snapshotFixture)),
+      http.delete('/api/sessions/settings-session', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { closed = true; return new HttpResponse(null, { status: 204 }) }),
     )
     renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
@@ -521,15 +523,15 @@ describe('cluster settings', () => {
     await waitFor(() => expect(closed).toBe(true))
   })
 
-  it('retains old rules read-only after a connection failure and supports reconnecting', async () => {
+  it('retains old rules read-only after a connection failure and supports reconnecting', /* 在本用例执行时验证连接失败保留旧规则只读并允许重连。 */ async () => {
     const user = userEvent.setup()
     let reachable = false
     server.use(
-      http.post('/api/clusters/:id/sessions', () => reachable
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => reachable
         ? HttpResponse.json({ sessionId: 'reconnected', leaseSeconds: 30 }, { status: 201 })
         : HttpResponse.json({ code: 'KAFKA_TIMEOUT', message: '连接超时', requestId: 'req-connect' }, { status: 502 })),
-      http.get('/api/sessions/reconnected/snapshot', () => HttpResponse.json(snapshotFixture)),
-      http.delete('/api/sessions/reconnected', () => new HttpResponse(null, { status: 204 })),
+      http.get('/api/sessions/reconnected/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(snapshotFixture)),
+      http.delete('/api/sessions/reconnected', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => new HttpResponse(null, { status: 204 })),
     )
     renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
@@ -540,18 +542,18 @@ describe('cluster settings', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '新增规则' })).toBeEnabled())
   })
 
-  it('offers reconnect for a total-failure HTTP 200 snapshot and releases that session', async () => {
+  it('offers reconnect for a total-failure HTTP 200 snapshot and releases that session', /* 在本用例执行时验证发现全失败的 HTTP 成功响应仍须关闭会话并提供重连。 */ async () => {
     const user = userEvent.setup()
     let collections = 0
     let closed = 0
     server.use(
-      http.post('/api/clusters/:id/sessions', () => HttpResponse.json({ sessionId: 'full-failure', leaseSeconds: 30 }, { status: 201 })),
-      http.get('/api/sessions/full-failure/snapshot', () => HttpResponse.json(++collections === 1
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: 'full-failure', leaseSeconds: 30 }, { status: 201 })),
+      http.get('/api/sessions/full-failure/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(++collections === 1
         ? { ...snapshotFixture, consumerGroupIds: [], consumerGroups: [], partialFailures: [
           { scope: 'topics', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'All topics failed' },
           { scope: 'groups', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'All groups failed' },
         ] } : snapshotFixture)),
-      http.delete('/api/sessions/full-failure', () => { closed++; return new HttpResponse(null, { status: 204 }) }),
+      http.delete('/api/sessions/full-failure', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => { closed++; return new HttpResponse(null, { status: 204 }) }),
     )
     renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
@@ -564,12 +566,12 @@ describe('cluster settings', () => {
     await waitFor(() => expect(closed).toBe(2))
   })
 
-  it('offers reconnect when the reused monitoring snapshot has failed all discovery', async () => {
+  it('offers reconnect when the reused monitoring snapshot has failed all discovery', /* 在本用例执行时验证共享监控快照发现全失败时仍提供重连。 */ async () => {
     const user = userEvent.setup()
     server.use(
-      http.post('/api/clusters/:id/sessions', () => HttpResponse.json({ sessionId: 'shared-retry', leaseSeconds: 30 }, { status: 201 })),
-      http.get('/api/sessions/shared-retry/snapshot', () => HttpResponse.json(snapshotFixture)),
-      http.delete('/api/sessions/shared-retry', () => new HttpResponse(null, { status: 204 })),
+      http.post('/api/clusters/:id/sessions', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ sessionId: 'shared-retry', leaseSeconds: 30 }, { status: 201 })),
+      http.get('/api/sessions/shared-retry/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(snapshotFixture)),
+      http.delete('/api/sessions/shared-retry', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => new HttpResponse(null, { status: 204 })),
     )
     renderPage({ ...snapshotFixture, consumerGroupIds: [], consumerGroups: [], partialFailures: [
       { scope: 'topics', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'All topics failed' },
@@ -582,19 +584,19 @@ describe('cluster settings', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '新增规则' })).toBeEnabled())
   })
 
-  it('keeps cluster and Lag editors exclusive and preserves latest defaults in both directions', async () => {
+  it('keeps cluster and Lag editors exclusive and preserves latest defaults in both directions', /* 在本用例执行时验证集群和规则编辑器互斥且双向保留最新默认阈值。 */ async () => {
     const user = userEvent.setup()
     let cluster: ClusterDto = { ...clusterFixture }
     let rules: LagRuleSet = { defaults: { normalMax: 999, highMin: 5000, overLimitSeconds: 30 }, overrides: [] }
     server.use(
-      http.get('/api/clusters', () => HttpResponse.json([cluster])),
-      http.get('/api/clusters/:id/lag-rules', () => HttpResponse.json(rules)),
-      http.put('/api/clusters/:id', async ({ request }) => {
+      http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json([cluster])),
+      http.get('/api/clusters/:id/lag-rules', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json(rules)),
+      http.put('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
         cluster = { ...cluster, ...await request.json() as ClusterDto }
         rules = { ...rules, defaults: { normalMax: cluster.defaultNormalLagMax, highMin: cluster.defaultHighLagMin, overLimitSeconds: cluster.defaultOverLimitSeconds } }
         return HttpResponse.json(cluster)
       }),
-      http.put('/api/clusters/:id/lag-rules', async ({ request }) => {
+      http.put('/api/clusters/:id/lag-rules', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
         rules = await request.json() as LagRuleSet
         cluster = { ...cluster, defaultNormalLagMax: rules.defaults.normalMax, defaultHighLagMin: rules.defaults.highMin, defaultOverLimitSeconds: rules.defaults.overLimitSeconds }
         return HttpResponse.json(rules)
@@ -625,13 +627,13 @@ describe('cluster settings', () => {
     expect(cluster.defaultOverLimitSeconds).toBe(45)
   })
 
-  it('blocks editor target changes while a cluster save is pending', async () => {
+  it('blocks editor target changes while a cluster save is pending', /* 在本用例执行时验证保存进行中阻止切换编辑目标。 */ async () => {
     const user = userEvent.setup()
     let finish!: () => void
     const pending = new Promise<void>(resolve => { finish = resolve })
     server.use(
-      http.get('/api/clusters', () => HttpResponse.json([clusterFixture, { ...clusterFixture, id: 'cluster-b', name: '集群 B' }])),
-      http.put('/api/clusters/:id', async () => { await pending; return HttpResponse.json(clusterFixture) }),
+      http.get('/api/clusters', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json([clusterFixture, { ...clusterFixture, id: 'cluster-b', name: '集群 B' }])),
+      http.put('/api/clusters/:id', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => { await pending; return HttpResponse.json(clusterFixture) }),
     )
     renderPage()
     await user.click((await screen.findAllByRole('button', { name: '编辑' }))[0])

@@ -10,9 +10,9 @@ import type { DashboardContext } from '../dashboard/useDashboard'
 import { TopicsPage } from './TopicsPage'
 import { readFileSync } from 'node:fs'
 const appStyles = readFileSync('src/index.css', 'utf8')
-beforeAll(() => server.listen())
-afterEach(() => { vi.useRealTimers(); server.resetHandlers(); vi.restoreAllMocks() })
-afterAll(() => server.close())
+beforeAll(/* 在测试组开始时启动请求拦截，避免单元测试访问真实服务。 */ () => server.listen())
+afterEach(/* 在每个用例结束时恢复本用例修改的测试环境，避免拦截或模拟状态影响后续断言。 */ () => { vi.useRealTimers(); server.resetHandlers(); vi.restoreAllMocks() })
+afterAll(/* 在测试组结束时关闭拦截并恢复全局配置。 */ () => server.close())
 
 const snapshot: ClusterSnapshot = { ...snapshotFixture, topics: [
   { topic: 'order-events', low: 10, latestMessageOffset: 105101, retainedOffsetSpan: 105097, incomplete: false,
@@ -25,22 +25,24 @@ const snapshot: ClusterSnapshot = { ...snapshotFixture, topics: [
     partitions: [{ partition: 0, low: 0, high: 0, latestMessageOffset: null, retainedOffsetSpan: 0 }] },
 ] }
 
+// 在页面交互测试准备时挂载仪表盘上下文，提供后续快照和会话状态更新入口。
 function show(value: ClusterSnapshot | null = snapshot, overrides: Partial<DashboardContext['monitor']> = {}) {
   const context: DashboardContext = { cluster: clusterFixture, monitor: {
     snapshot: value, history: [], status: 'connected', error: null, isFetching: false,
-    sessionId: 'session-a', continuityKey: 'test', refresh: async () => {}, reconnect: () => {}, ...overrides,
+    sessionId: 'session-a', continuityKey: 'test', refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => {}, reconnect: /* 在页面测试提供重连入口替身，隔离真实 Kafka 会话创建。 */ () => {}, ...overrides,
   } }
+  // 在测试挂载和重渲染时组合仪表盘上下文与路由，保留页面状态。
   const content = () => <MemoryRouter><Routes><Route element={<Outlet context={context} />}>
     <Route index element={<TopicsPage />} />
   </Route></Routes></MemoryRouter>
   const view = render(content())
-  return { update: (monitor: Partial<DashboardContext['monitor']>) => {
+  return { update: /* 在测试模拟采样或连接变化时修改上下文并重渲染，以验证连续性及 UI 更新。 */ (monitor: Partial<DashboardContext['monitor']>) => {
     Object.assign(context.monitor, monitor)
     view.rerender(content())
   } }
 }
 
-it('marks the whole Topics page stale after two refresh intervals', () => {
+it('marks the whole Topics page stale after two refresh intervals', /* 在本用例执行时验证两个刷新间隔后整页标为陈旧。 */ () => {
   vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
   vi.setSystemTime(new Date(snapshot.collectedAt))
   show()
@@ -50,7 +52,7 @@ it('marks the whole Topics page stale after two refresh intervals', () => {
 })
 
 // Catches incorrect aggregation across partition offset spaces and lost search filtering.
-it('shows topic overview calculations and filters by topic name', async () => {
+it('shows topic overview calculations and filters by topic name', /* 在本用例执行时验证Topic 汇总计算与按名称搜索。 */ async () => {
   const user = userEvent.setup()
   show()
   const row = screen.getByRole('row', { name: /order-events/ })
@@ -67,7 +69,7 @@ it('shows topic overview calculations and filters by topic name', async () => {
 })
 
 // Catches high mistaken for latest offset, empty partitions shown as high - 1, and inaccessible expansion.
-it('expands authoritative partition offsets and preserves empty partitions', async () => {
+it('expands authoritative partition offsets and preserves empty partitions', /* 在本用例执行时验证展开权威分区 Offset 并保留空分区。 */ async () => {
   const user = userEvent.setup()
   show()
   await user.click(screen.getByRole('button', { name: '展开 order-events' }))
@@ -81,7 +83,7 @@ it('expands authoritative partition offsets and preserves empty partitions', asy
 })
 
 // Catches incomplete totals silently presented as full totals and failed watermarks coerced to zero.
-it('marks partial data and shows unavailable offsets as dashes', async () => {
+it('marks partial data and shows unavailable offsets as dashes', /* 在本用例执行时验证部分数据标记不完整且未知 Offset 显示破折号。 */ async () => {
   const user = userEvent.setup()
   show({ ...snapshot, partialFailures: [{ scope: 'watermark', resource: 'order-events:1', code: 'TIMEOUT', message: 'timeout' }],
     topics: [{ ...snapshot.topics[0], incomplete: true, partitions: [snapshot.topics[0].partitions[0],
@@ -96,7 +98,7 @@ it('marks partial data and shows unavailable offsets as dashes', async () => {
 })
 
 // Catches keyboard/screen reader regressions and missing definitions or formula boundaries.
-it('explains fields on keyboard focus and supports hover, click and Escape', async () => {
+it('explains fields on keyboard focus and supports hover, click and Escape', /* 在本用例执行时验证指标说明支持键盘、悬停、点击与退出键。 */ async () => {
   const user = userEvent.setup()
   show()
   await user.tab()
@@ -126,14 +128,14 @@ it('explains fields on keyboard focus and supports hover, click and Escape', asy
   expect(screen.getByRole('tooltip')).toHaveTextContent(/压缩|删除/)
 })
 
-it('distinguishes snapshots not yet collected from an empty topic list', () => {
+it('distinguishes snapshots not yet collected from an empty topic list', /* 在本用例执行时验证缺少首个快照与空 Topic 列表区别显示。 */ () => {
   show(null)
   expect(screen.getByText('尚未采集 Topic 数据。')).toBeInTheDocument()
   expect(screen.queryByText('暂无 Topic。')).not.toBeInTheDocument()
 })
 
 // Catches Escape handlers attached only to the help button while hover leaves focus elsewhere.
-it('dismisses hover help with Escape while search keeps keyboard focus', async () => {
+it('dismisses hover help with Escape while search keeps keyboard focus', /* 在本用例执行时验证退出键关闭悬停帮助且保留搜索框焦点。 */ async () => {
   const user = userEvent.setup()
   show()
   const search = screen.getByRole('searchbox', { name: '搜索 Topic' })
@@ -161,7 +163,7 @@ it('dismisses hover help with Escape while search keeps keyboard focus', async (
 })
 
 // Catches missing management entry points and accidentally exposing internal Topic deletion.
-it('opens the real management dialogs and protects internal Topics from deletion', async () => {
+it('opens the real management dialogs and protects internal Topics from deletion', /* 在本用例执行时验证真实管理弹窗可打开且内部 Topic 无删除入口。 */ async () => {
   const user = userEvent.setup()
   show({ ...snapshot, topics: [...snapshot.topics, { ...snapshot.topics[1], topic: '__consumer_offsets' }] })
   const create = screen.getByRole('button', { name: '新建 Topic' })
@@ -182,7 +184,7 @@ it('opens the real management dialogs and protects internal Topics from deletion
 })
 
 // Catches a retained display snapshot being mistaken for an authorized live session.
-it.each(['connecting', 'paused', 'error'] as const)('disables management without a valid session while %s', status => {
+it.each(['connecting', 'paused', 'error'] as const)('disables management without a valid session while %s', /* 在本用例执行时验证没有有效会话时禁止管理操作。 */ status => {
   show(snapshot, { sessionId: undefined, status })
   expect(screen.getByRole('button', { name: '新建 Topic' })).toBeDisabled()
   expect(screen.getByRole('button', { name: '配置 order-events' })).toBeDisabled()
@@ -191,7 +193,7 @@ it.each(['connecting', 'paused', 'error'] as const)('disables management without
 })
 
 // Catches routing successful writes around the shared refresh, or closing before it settles.
-it('awaits a fresh snapshot before closing successful creation', async () => {
+it('awaits a fresh snapshot before closing successful creation', /* 在本用例执行时验证创建成功等待新快照后关闭。 */ async () => {
   const user = userEvent.setup()
   let release!: () => void
   const refresh = vi.fn(() => new Promise<void>(resolve => { release = resolve }))
@@ -208,9 +210,9 @@ it('awaits a fresh snapshot before closing successful creation', async () => {
 })
 
 // Catches falsely claiming a 202 is a confirmed save, especially when the list refresh rejects.
-it.each([false, true])('preserves the fixed unconfirmed notice after config 202 (refresh failure: %s)', async failRefresh => {
+it.each([false, true])('preserves the fixed unconfirmed notice after config 202 (refresh failure: %s)', /* 在本用例执行时验证配置 202 后保留固定未确认提示，不受刷新失败影响。 */ async failRefresh => {
   const user = userEvent.setup()
-  server.use(http.put('/api/sessions/:id/topics/:topic/configs', () =>
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () =>
     HttpResponse.json({ status: 'appliedButUnconfirmed' }, { status: 202 })))
   const refresh = vi.fn(async () => { if (failRefresh) throw new Error('synthetic refresh failure') })
   show(snapshot, { refresh })
@@ -225,14 +227,14 @@ it.each([false, true])('preserves the fixed unconfirmed notice after config 202 
 })
 
 // Catches a failed list refresh re-enabling an already committed create request.
-it('keeps a created Topic locked after refresh failure and retains its page notice', async () => {
+it('keeps a created Topic locked after refresh failure and retains its page notice', /* 在本用例执行时验证创建成功但刷新失败时锁定重复写入并保留页面提示。 */ async () => {
   const user = userEvent.setup()
   let creates = 0
-  server.use(http.post('/api/sessions/:id/topics', () => {
+  server.use(http.post('/api/sessions/:id/topics', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => {
     creates++
     return HttpResponse.json({ status: 'created' }, { status: 201 })
   }))
-  show(snapshot, { refresh: async () => { throw new Error('synthetic refresh failure') } })
+  show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => { throw new Error('synthetic refresh failure') } })
   await user.click(screen.getByRole('button', { name: '新建 Topic' }))
   await user.type(screen.getByLabelText('Topic 名称'), 'created-orders')
   await user.click(screen.getByRole('button', { name: '创建 Topic' }))
@@ -244,10 +246,10 @@ it('keeps a created Topic locked after refresh failure and retains its page noti
 })
 
 // Catches deleting without the typed confirmation, missing refresh and misleading metadata propagation results.
-it('refreshes after deletion and reports metadata propagation until the Topic disappears', async () => {
+it('refreshes after deletion and reports metadata propagation until the Topic disappears', /* 在本用例执行时验证删除后刷新，在元数据收敛前提示传播延迟。 */ async () => {
   const user = userEvent.setup()
   let received: unknown
-  server.use(http.delete('/api/sessions/session-a/topics/order-events', async ({ request }) => {
+  server.use(http.delete('/api/sessions/session-a/topics/order-events', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async ({ request }) => {
     received = await request.json()
     return new HttpResponse(null, { status: 204 })
   }))
@@ -265,9 +267,9 @@ it('refreshes after deletion and reports metadata propagation until the Topic di
 })
 
 // Catches failed configuration writes being treated as successful page actions.
-it('retains the configuration dialog on failure without refreshing or reporting success', async () => {
+it('retains the configuration dialog on failure without refreshing or reporting success', /* 在本用例执行时验证配置失败保留弹窗且不刷新或误报成功。 */ async () => {
   const user = userEvent.setup()
-  server.use(http.put('/api/sessions/:id/topics/:topic/configs', () => HttpResponse.json({
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({
     code: 'TOPIC_AUTHORIZATION_FAILED', message: 'Forbidden',
   }, { status: 403 })))
   const refresh = vi.fn()
@@ -283,7 +285,7 @@ it('retains the configuration dialog on failure without refreshing or reporting 
 })
 
 // Catches restoring a stale editor after the session is hidden, replaced or expired.
-it('discards an open management target when the live session disappears', async () => {
+it('discards an open management target when the live session disappears', /* 在本用例执行时验证有效会话消失立即丢弃管理目标。 */ async () => {
   const user = userEvent.setup()
   const view = show()
   await user.click(screen.getByRole('button', { name: '配置 order-events' }))
@@ -295,9 +297,9 @@ it('discards an open management target when the live session disappears', async 
 })
 
 // Catches successful configuration writes not refreshing the shared monitor.
-it('refreshes the list after confirmed configuration changes', async () => {
+it('refreshes the list after confirmed configuration changes', /* 在本用例执行时验证配置确认成功后刷新列表。 */ async () => {
   const user = userEvent.setup()
-  server.use(http.put('/api/sessions/:id/topics/:topic/configs', () => HttpResponse.json({ configs: [] })))
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => HttpResponse.json({ configs: [] })))
   const refresh = vi.fn(async () => {})
   show(snapshot, { refresh })
   await user.click(screen.getByRole('button', { name: '配置 order-events' }))
@@ -309,10 +311,10 @@ it('refreshes the list after confirmed configuration changes', async () => {
 })
 
 // Catches losing keyboard focus when a successful refresh removes the dialog's original trigger.
-it('restores focus to the toolbar when the deleted Topic row disappears during refresh', async () => {
+it('restores focus to the toolbar when the deleted Topic row disappears during refresh', /* 在本用例执行时验证删除行刷新消失后焦点回到工具栏。 */ async () => {
   const user = userEvent.setup()
-  server.use(http.delete('/api/sessions/:id/topics/:topic', () => new HttpResponse(null, { status: 204 })))
-  const view = show(snapshot, { refresh: async () => { view.update({ snapshot: { ...snapshot, topics: [snapshot.topics[1]] } }) } })
+  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => new HttpResponse(null, { status: 204 })))
+  const view = show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => { view.update({ snapshot: { ...snapshot, topics: [snapshot.topics[1]] } }) } })
   await user.click(screen.getByRole('button', { name: '删除 order-events' }))
   await user.type(screen.getByLabelText('确认 Topic 名称'), 'order-events')
   await user.click(screen.getByRole('button', { name: '确认删除' }))
@@ -321,10 +323,10 @@ it('restores focus to the toolbar when the deleted Topic row disappears during r
 })
 
 // Catches later metadata propagation removing the restored trigger, and focus recovery stealing a user's new focus.
-it.each(['trigger', 'search', 'background'] as const)('recovers delayed deletion focus only while it remains on the trigger (%s)', async focus => {
+it.each(['trigger', 'search', 'background'] as const)('recovers delayed deletion focus only while it remains on the trigger (%s)', /* 在本用例执行时验证延迟删除焦点只在仍停留触发器时恢复。 */ async focus => {
   const user = userEvent.setup()
-  server.use(http.delete('/api/sessions/:id/topics/:topic', () => new HttpResponse(null, { status: 204 })))
-  const view = show(snapshot, { refresh: async () => {} })
+  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () => new HttpResponse(null, { status: 204 })))
+  const view = show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => {} })
   const trigger = screen.getByRole('button', { name: '删除 order-events' })
   await user.click(trigger)
   await user.type(screen.getByLabelText('确认 Topic 名称'), 'order-events')
@@ -341,11 +343,11 @@ it.each(['trigger', 'search', 'background'] as const)('recovers delayed deletion
 })
 
 // Catches indefinitely promising that metadata propagation is still in progress.
-it('bounds the deletion propagation notice without reporting that a successful DELETE failed', async () => {
+it('bounds the deletion propagation notice without reporting that a successful DELETE failed', /* 在本用例执行时验证删除传播提示有界，不能把已成功删除误报为失败。 */ async () => {
   const user = userEvent.setup()
   let release!: () => void
   const pending = new Promise<void>(resolve => { release = resolve })
-  server.use(http.delete('/api/sessions/:id/topics/:topic', async () => {
+  server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async () => {
     await pending
     return new HttpResponse(null, { status: 204 })
   }))
@@ -362,7 +364,7 @@ it('bounds the deletion propagation notice without reporting that a successful D
 })
 
 // Catches later generic action styles overriding danger color.
-it('keeps destructive actions visually distinct', () => {
+it('keeps destructive actions visually distinct', /* 在本用例执行时验证破坏性操作有明确视觉区别。 */ () => {
   show()
   render(<style>{appStyles}</style>)
   const remove = screen.getByRole('button', { name: '删除 order-events' })
@@ -371,7 +373,7 @@ it('keeps destructive actions visually distinct', () => {
 })
 
 // Catches the expand button wrapping onto a separate line at narrow table widths.
-it('keeps Topic names and their expansion on one table line', () => {
+it('keeps Topic names and their expansion on one table line', /* 在本用例执行时验证Topic 名称与展开按钮保持同一表格行。 */ () => {
   show()
   render(<style>{appStyles}</style>)
   const cell = within(screen.getByRole('row', { name: /order-events/ })).getAllByRole('cell')[0]
@@ -379,11 +381,11 @@ it('keeps Topic names and their expansion on one table line', () => {
 })
 
 // Catches a refresh failure invalidating the live session and erasing an already successful 202 notice.
-it('retains the submitted outcome when refreshing disconnects the monitor session', async () => {
+it('retains the submitted outcome when refreshing disconnects the monitor session', /* 在本用例执行时验证刷新断开监控会话后仍保留已提交结果。 */ async () => {
   const user = userEvent.setup()
-  server.use(http.put('/api/sessions/:id/topics/:topic/configs', () =>
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ () =>
     HttpResponse.json({ status: 'appliedButUnconfirmed' }, { status: 202 })))
-  const view = show(snapshot, { refresh: async () => {
+  const view = show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => {
     view.update({ sessionId: undefined, status: 'error' })
     throw new Error('synthetic refresh failure')
   } })

@@ -9,10 +9,11 @@ import type { DashboardContext } from '../dashboard/useDashboard'
 import { ConsumerGroupsPage } from './ConsumerGroupsPage'
 import { ConsumerGroupLagProvider } from './ConsumerGroupLagProvider'
 
-const chart = vi.hoisted(() => ({ setOption: vi.fn(), resize() {}, dispose() {} }))
-vi.mock('echarts/core', () => ({ init: () => chart, use() {} }))
-afterEach(() => { vi.useRealTimers(); vi.clearAllMocks() })
+const chart = vi.hoisted(/* 在测试模块准备阶段建立图表边界替身，记录生命周期调用而不依赖真实画布。 */ () => ({ setOption: vi.fn(), /* 在图表测试中模拟尺寸通知，验证实例响应布局变化。 */ resize() {}, /* 在图表替身卸载阶段提供释放接口，避免依赖真实绘制环境。 */ dispose() {} }))
+vi.mock('echarts/core', /* 在测试模块准备阶段建立图表边界替身，记录生命周期调用而不依赖真实画布。 */ () => ({ init: /* 在页面测试挂载图表时返回最小图表替身，将断言聚焦页面数据与交互。 */ () => chart, /* 在页面测试加载图表模块时替代扩展注册，隔离真实图表运行环境。 */ use() {} }))
+afterEach(/* 在每个用例结束时恢复本用例修改的测试环境，避免拦截或模拟状态影响后续断言。 */ () => { vi.useRealTimers(); vi.clearAllMocks() })
 
+// 在页面测试准备时创建具有指定 Lag 的消费组行，保留分区及未知状态可控。
 const row = (groupId: string, topic: string, lag: number): ConsumerGroupTopicSnapshot => ({ groupId, topic, lag,
   incomplete: false, unknownPartitionCount: 0, partitions: [{ partition: 0, high: 50000, committedOffset: 50000 - lag, lag }] })
 const snapshot: ClusterSnapshot = { ...snapshotFixture, consumerGroups: [row('low-worker', 'audit', 3),
@@ -23,23 +24,25 @@ const snapshot: ClusterSnapshot = { ...snapshotFixture, consumerGroups: [row('lo
 const rules: LagRuleSet = { defaults: { normalMax: 999, highMin: 5000, overLimitSeconds: 0 },
   overrides: [{ groupId: 'flink-orders', topic: 'orders', normalMax: 12000, highMin: 30000, overLimitSeconds: 120 }] }
 
+// 在页面交互测试准备时挂载仪表盘上下文，提供后续快照和会话状态更新入口。
 function show(value: ClusterSnapshot | null = snapshot, ruleSet = rules, entry = '/') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
   client.setQueryData(['lag-rules', clusterFixture.id], ruleSet)
   const context: DashboardContext = { cluster: clusterFixture, monitor: { snapshot: value, history: [], status: 'connected',
-    error: null, isFetching: false, continuityKey: 'a', refresh: async () => {}, reconnect: () => {} } }
+    error: null, isFetching: false, continuityKey: 'a', refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => {}, reconnect: /* 在页面测试提供重连入口替身，隔离真实 Kafka 会话创建。 */ () => {} } }
+  // 在测试挂载或重渲染时建立共享查询与路由树，保留同一组件实例状态。
   const tree = () => <QueryClientProvider client={client}><MemoryRouter initialEntries={[entry]}><Routes><Route element={
     <ConsumerGroupLagProvider clusterId={context.cluster!.id} monitor={context.monitor}><Outlet context={{ ...context }} /></ConsumerGroupLagProvider>}>
     <Route index element={<ConsumerGroupsPage />} />
   </Route></Routes></MemoryRouter></QueryClientProvider>
   const view = render(tree())
-  return { update: (patch: Partial<DashboardContext['monitor']>, refreshSeconds = context.refreshSeconds) => {
+  return { update: /* 在测试模拟采样或连接变化时修改上下文并重渲染，以验证连续性及 UI 更新。 */ (patch: Partial<DashboardContext['monitor']>, refreshSeconds = context.refreshSeconds) => {
     context.monitor = { ...context.monitor, ...patch }; context.refreshSeconds = refreshSeconds; view.rerender(tree())
   }, client }
 }
 
 // Catches sorting lexicographically, filtering on only one field, and status filtering before evaluation.
-it('sorts by numeric lag descending and filters by group, topic and evaluated status', async () => {
+it('sorts by numeric lag descending and filters by group, topic and evaluated status', /* 在本用例执行时验证按数值 Lag 降序并支持资源与状态筛选。 */ async () => {
   const user = userEvent.setup()
   show()
   const table = screen.getByRole('table', { name: 'Consumer Groups 汇总' })
@@ -55,7 +58,7 @@ it('sorts by numeric lag descending and filters by group, topic and evaluated st
   expect(within(table).getByText('new-worker')).toBeInTheDocument()
 })
 
-it('selects multiple topic and partition raw histories with null gaps and retains them when cadence changes', async () => {
+it('selects multiple topic and partition raw histories with null gaps and retains them when cadence changes', /* 在本用例执行时验证多选 Topic 和分区历史保留未知断点，频率变化不丢历史。 */ async () => {
   const user = userEvent.setup()
   const first = { ...snapshot, consumerGroups: [row('worker', 'orders', 12), row('worker', 'events', 6)] }
   const second = { ...first, collectedAt: '2026-10-15T00:00:05Z', consumerGroups: [
@@ -85,7 +88,7 @@ it('selects multiple topic and partition raw histories with null gaps and retain
   expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({ series: [expect.objectContaining({ name: 'events / Partition 0' })] }), true)
 })
 
-it('gaps only the affected partition on local failure and every selected partition on group discovery failure', async () => {
+it('gaps only the affected partition on local failure and every selected partition on group discovery failure', /* 在本用例执行时验证局部失败仅中断受影响分区，组发现失败中断全部选中曲线。 */ async () => {
   const user = userEvent.setup()
   const first = { ...snapshot, consumerGroups: [{ ...row('worker', 'orders', 11), partitions: [
     { partition: 0, high: 10, committedOffset: 5, lag: 5 }, { partition: 1, high: 10, committedOffset: 4, lag: 6 },
@@ -103,7 +106,7 @@ it('gaps only the affected partition on local failure and every selected partiti
   ] }), true)
 })
 
-it('gaps metadata-failed partition history while keeping its healthy adjacent partition numeric', async () => {
+it('gaps metadata-failed partition history while keeping its healthy adjacent partition numeric', /* 在本用例执行时验证元数据失败分区断线而相邻健康分区继续保留数值。 */ async () => {
   const user = userEvent.setup()
   const first: ClusterSnapshot = { ...snapshot, consumerGroupIds: ['worker'],
     topics: [{ topic: 'orders', low: 0, latestMessageOffset: 9, retainedOffsetSpan: 20, incomplete: false,
@@ -132,7 +135,7 @@ it('gaps metadata-failed partition history while keeping its healthy adjacent pa
   ] }), true)
 })
 
-it('shows nonempty maximum offsets and dashes for empty or unknown watermarks', () => {
+it('shows nonempty maximum offsets and dashes for empty or unknown watermarks', /* 在本用例执行时验证非空分区显示最大消息 Offset，空和未知水位显示破折号。 */ () => {
   const value: ClusterSnapshot = { ...snapshot, topics: [{ topic: 'orders', low: 0, latestMessageOffset: 9, retainedOffsetSpan: 10, incomplete: true,
     partitions: [{ partition: 0, low: 0, high: 10, latestMessageOffset: 9, retainedOffsetSpan: 10 },
       { partition: 1, low: 20, high: 20, latestMessageOffset: null, retainedOffsetSpan: 0 },
@@ -147,7 +150,7 @@ it('shows nonempty maximum offsets and dashes for empty or unknown watermarks', 
   expect(within(table).getAllByRole('row').slice(1).map(item => within(item).getAllByRole('cell')[2].textContent)).toEqual(['9', '—', '—'])
 })
 
-it('marks the whole group page time-stale and updates the threshold with refresh frequency', () => {
+it('marks the whole group page time-stale and updates the threshold with refresh frequency', /* 在本用例执行时验证整页陈旧阈值随刷新频率调整。 */ () => {
   vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
   vi.setSystemTime(new Date(snapshot.collectedAt))
   const { update } = show(snapshot)
@@ -158,19 +161,19 @@ it('marks the whole group page time-stale and updates the threshold with refresh
   expect(screen.queryByLabelText('Consumer Groups 数据已陈旧')).not.toBeInTheDocument()
 })
 
-it('opens the exact group and topic partition details from an overview link', () => {
+it('opens the exact group and topic partition details from an overview link', /* 在本用例执行时验证概览链接精确打开 Group 与 Topic 明细。 */ () => {
   show(snapshot, rules, '/?groupId=new-worker&topic=new')
   expect(screen.getByRole('table', { name: 'new-worker / new Partitions' })).toBeInTheDocument()
   expect(screen.getByRole('button', { name: '收起 new-worker / new' })).toHaveAttribute('aria-expanded', 'true')
 })
 
-it('keeps the linked detail open when its first snapshot arrives after the route', () => {
+it('keeps the linked detail open when its first snapshot arrives after the route', /* 在本用例执行时验证路由先到而快照晚到时仍保留链接展开目标。 */ () => {
   const { update } = show(null, rules, '/?groupId=new-worker&topic=new')
   update({ snapshot })
   expect(screen.getByRole('table', { name: 'new-worker / new Partitions' })).toBeInTheDocument()
 })
 
-it('shows known lag plus unknown partitions and expands committed offsets without coercing null', async () => {
+it('shows known lag plus unknown partitions and expands committed offsets without coercing null', /* 在本用例执行时验证展示已知 Lag 加未知分区，提交位置不强制转为零。 */ async () => {
   const user = userEvent.setup()
   show()
   const summary = screen.getByRole('row', { name: /new-worker/ })
@@ -183,7 +186,7 @@ it('shows known lag plus unknown partitions and expands committed offsets withou
   expect(screen.getByRole('button', { name: '收起 new-worker / new' })).toHaveAttribute('aria-expanded', 'true')
 })
 
-it('exposes the actual override thresholds on focus and explains all status metrics', async () => {
+it('exposes the actual override thresholds on focus and explains all status metrics', /* 在本用例执行时验证聚焦自定义规则时展示真实阈值并解释状态指标。 */ async () => {
   const user = userEvent.setup()
   show()
   expect(screen.getAllByText('自定义规则')).toHaveLength(1)
@@ -205,10 +208,12 @@ it('exposes the actual override thresholds on focus and explains all status metr
 })
 
 // Catches timers running on rerender, stale cached snapshots, hidden intervals, or trend direction.
-it('uses distinct connected samples for duration and trend, resetting on continuity changes', () => {
+it('uses distinct connected samples for duration and trend, resetting on continuity changes', /* 在本用例执行时验证仅不同的连接样本推进超限与趋势，连续性变化后重置。 */ () => {
   const initial = { ...snapshot, consumerGroups: [row('flink-orders', 'orders', 13000)] }
   const { update } = show(initial)
+  // 在超限与趋势回归中生成下一次采样，避免用重复时间推进计时。
   const next = (seconds: number, lag: number) => ({ ...initial, collectedAt: new Date(Date.parse(initial.collectedAt) + seconds * 1000).toISOString(), consumerGroups: [row('flink-orders', 'orders', lag)] })
+  // 在消费组断言阶段定位目标数据行，检查状态及趋势是否随样本正确变化。
   const dataRow = () => screen.getByRole('row', { name: /flink-orders/ })
   expect(within(dataRow()).getByText('正常')).toBeInTheDocument()
   update({ snapshot: next(60, 31000) })
@@ -227,7 +232,7 @@ it('uses distinct connected samples for duration and trend, resetting on continu
   expect(within(dataRow()).getByText('正常')).toBeInTheDocument()
 })
 
-it('flags partial data as collection errors and does not show incomplete totals as complete', () => {
+it('flags partial data as collection errors and does not show incomplete totals as complete', /* 在本用例执行时验证部分采集失败标为异常且不把不完整总量视为完整。 */ () => {
   show({ ...snapshot, consumerGroups: [{ ...row('missing-worker', 'broken', 0), incomplete: true }],
     partialFailures: [{ scope: 'topics', resource: 'broken', code: 'TIMEOUT', message: 'timeout' }] })
   const dataRow = screen.getByRole('row', { name: /missing-worker/ })
@@ -236,14 +241,14 @@ it('flags partial data as collection errors and does not show incomplete totals 
   expect(screen.getByText(/部分数据采集失败/)).toBeInTheDocument()
 })
 
-it('distinguishes a missing snapshot from an empty group list', () => {
+it('distinguishes a missing snapshot from an empty group list', /* 在本用例执行时验证缺少快照与空消费组列表有不同展示。 */ () => {
   show(null)
   expect(screen.getByText('尚未采集 Consumer Groups 数据。')).toBeInTheDocument()
   expect(screen.queryByText('暂无 Consumer Group / Topic 数据。')).not.toBeInTheDocument()
 })
 
 // Catches an HTTP collection failure retaining a misleading normal badge from the last successful snapshot.
-it('marks retained rows as collection errors immediately when monitoring fails', () => {
+it('marks retained rows as collection errors immediately when monitoring fails', /* 在本用例执行时验证监控失败时保留行立即转为采集异常。 */ () => {
   const { update } = show({ ...snapshot, consumerGroups: [row('healthy-worker', 'healthy', 0)] })
   update({ status: 'error', error: new Error('Collection failed') })
   expect(within(screen.getByRole('row', { name: /healthy-worker/ })).getByText('采集异常')).toBeInTheDocument()

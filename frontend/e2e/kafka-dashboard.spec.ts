@@ -6,7 +6,7 @@ const topic = 'dashboard-e2e-orders'
 const group = 'dashboard-e2e-reader'
 const secret = process.env.E2E_FIXTURE_SECRET ?? 'missing-fixture-secret'
 
-test.beforeEach(() => {
+test.beforeEach(/* 在每个浏览器用例前核对隔离服务、回环 broker 端口及一次性环境许可，防止误写已有集群。 */ () => {
   expect(process.env.E2E_BASE_URL, 'Run through scripts/test-e2e.sh to start isolated services').toBeTruthy()
   expect(process.env.E2E_KAFKA_BROKERS).toMatch(/^127\.0\.0\.1:\d+$/)
   const port = Number(process.env.E2E_KAFKA_BROKERS?.split(':')[1])
@@ -15,6 +15,7 @@ test.beforeEach(() => {
   expect(process.env.E2E_KAFKA_FIXTURE_PERMIT).toBe('disposable-compose')
 })
 
+// 在浏览器验收准备阶段创建独立测试集群配置，等待连接测试和保存响应后返回目标标识。
 async function createCluster(page: Page, name: string) {
   await page.getByRole('button', { name: '新增集群', exact: true }).click()
   await expect(page.getByRole('dialog', { name: 'Kafka 集群配置' })).toBeVisible()
@@ -35,10 +36,10 @@ async function createCluster(page: Page, name: string) {
 
 // Catches credential redisplay, invalid rule saves, cross-cluster drafts and
 // broken narrow-screen controls. Only notification delivery is substituted.
-test('Feishu settings save real rules, hide saved tokens and isolate cluster drafts', async ({ page, request }) => {
+test('Feishu settings save real rules, hide saved tokens and isolate cluster drafts', /* 在本用例执行时验证飞书规则真实保存、Token 掩码与跨集群草稿隔离。 */ async ({ page, request }) => {
   const token = secret
   let notificationFails = false
-  await page.route('**/api/clusters/*/feishu-alert/test', async route => {
+  await page.route('**/api/clusters/*/feishu-alert/test', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async route => {
     if (route.request().method() !== 'POST') return route.continue()
     await route.fulfill({ status: notificationFails ? 502 : 200, contentType: 'application/json',
       body: JSON.stringify(notificationFails ? { code: 'NOTIFICATION_FAILED', message: 'Notification unavailable', requestId: 'e2e-safe' } : { ok: true }) })
@@ -54,6 +55,7 @@ test('Feishu settings save real rules, hide saved tokens and isolate cluster dra
     const tokenInput = dialog.getByLabel('更新 Token', { exact: true })
     await expectTokenVisibility(tokenInput, false)
     await expect(dialog.getByRole('button', { name: '显示 Token', exact: true })).toBeDisabled()
+    // 凭据操作统一通过安全 helper，只记录布尔检查结果，避免步骤标题和错误上下文回显输入。
     await fillToken(tokenInput, token)
     await dialog.getByRole('button', { name: '显示 Token', exact: true }).click()
     await expectTokenVisibility(tokenInput, true)
@@ -128,6 +130,7 @@ test('Feishu settings save real rules, hide saved tokens and isolate cluster dra
     expect(cleared.maskedAccessToken).toBeNull()
     expect(cleared.rules[0].enabled).toBe(false)
   } finally {
+    // 在 runner 收集失败上下文前离开表单丢弃凭据草稿，再清理本用例创建的集群配置。
     // Discard credential drafts before Playwright can create failure context.
     await page.goto('/settings')
     expect((await request.delete(`/api/clusters/${first}`)).status()).toBe(204)
@@ -136,7 +139,7 @@ test('Feishu settings save real rules, hide saved tokens and isolate cluster dra
 })
 
 // Breaks if UI saves, real Kafka collection, rules, or lease release stop working.
-test('cluster CRUD, connection, partitions, lag rules and session lifecycle', async ({ page, request }) => {
+test('cluster CRUD, connection, partitions, lag rules and session lifecycle', /* 在本用例执行时验证集群增删改查、连接、分区、规则与会话释放完整流程。 */ async ({ page, request }) => {
   await page.goto('/settings')
   const first = await createCluster(page, 'E2E primary')
   const second = await createCluster(page, 'E2E secondary')
@@ -217,7 +220,7 @@ test('cluster CRUD, connection, partitions, lag rules and session lifecycle', as
 
 // Breaks on missing real Admin writes, stale config reads, incorrect source mapping
 // or DELETE instead of removing the override. Never manage the seed Topic.
-test('creates a unique Topic, rereads retention, restores default and deletes it', async ({ page, request }) => {
+test('creates a unique Topic, rereads retention, restores default and deletes it', /* 在本用例执行时验证随机唯一 Topic 创建、参数重读、恢复默认及删除清理。 */ async ({ page, request }) => {
   const managed = `dashboard-e2e-managed-browser-${randomUUID()}`
   let created = false
   let deleted = false
@@ -278,6 +281,7 @@ test('creates a unique Topic, rereads retention, restores default and deletes it
     await expect(row).toHaveCount(0)
     await expect(page.getByRole('button', { name: `展开 ${topic}`, exact: true })).toBeVisible()
   } finally {
+    // 只清理本用例已确认创建的随机 Topic，失败后另开短会话，绝不触及 seed 或已有资源。
     // Only this test's acknowledged creation can be deleted by cleanup. A new
     // short-lived session avoids reusing an expired browser lease after failure.
     if (created && !deleted) {
@@ -296,7 +300,7 @@ test('creates a unique Topic, rereads retention, restores default and deletes it
 })
 
 // Uses real HTTP validation/storage paths; never sends these credentials to Kafka.
-test('API hides fixture secrets and rejects oversized bodies', async ({ request }) => {
+test('API hides fixture secrets and rejects oversized bodies', /* 在本用例执行时验证 API 不回显 fixture 凭据并拒绝超限请求体。 */ async ({ request }) => {
   const response = await request.post('/api/clusters', { data: { name: 'E2E secret', bootstrapServers: process.env.E2E_KAFKA_BROKERS,
     securityProtocol: 'SASL_PLAINTEXT', saslMechanism: 'PLAIN', username: 'fixture', password: secret } })
   expect(response.status()).toBe(201)
@@ -314,12 +318,12 @@ test('API hides fixture secrets and rejects oversized bodies', async ({ request 
 })
 
 // Only collection timestamps are accelerated; all sampled metrics come from real Kafka.
-test('browser drops samples older than one hour and pauses hidden-page requests', async ({ page, request }) => {
+test('browser drops samples older than one hour and pauses hidden-page requests', /* 在本用例执行时验证一小时历史淘汰与页面隐藏后停止请求。 */ async ({ page, request }) => {
   await page.goto('/settings')
   const id = await createCluster(page, 'E2E history')
   let sample = 0
   const start = Date.parse('2026-01-01T00:00:00Z')
-  await page.route('**/api/sessions/*/snapshot', async route => {
+  await page.route('**/api/sessions/*/snapshot', /* 在本用例请求拦截阶段提供受控响应或记录请求，隔离真实外部发送并验证精确请求边界。 */ async route => {
     const response = await route.fetch()
     if (!response.ok()) { await route.fulfill({ response }); return }
     const json = await response.json()
@@ -369,7 +373,7 @@ test('browser drops samples older than one hour and pauses hidden-page requests'
 })
 
 // The runner sends SIGTERM immediately after Playwright; leave real Kafka clients live.
-test('graceful shutdown fixture has an active Kafka session', async ({ request }) => {
+test('graceful shutdown fixture has an active Kafka session', /* 在本用例执行时验证退出 fixture 保持活动 Kafka 会话以覆盖优雅关闭。 */ async ({ request }) => {
   const created = await request.post('/api/clusters', { data: {
     name: 'E2E shutdown', bootstrapServers: process.env.E2E_KAFKA_BROKERS, securityProtocol: 'PLAINTEXT',
   } })

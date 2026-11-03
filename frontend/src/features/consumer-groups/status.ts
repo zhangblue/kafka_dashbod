@@ -5,8 +5,10 @@ export const statusLabels: Record<LagStatus, string> = {
   normal: '正常', backlog: '积压', high: '高 Lag', uncommitted: '未提交', error: '采集异常',
 }
 export interface LagState { status: LagStatus; overLimitMs: number; overLimit: boolean }
+// 在首次采样、恢复正常或连续性重置时创建无累计时间的正常状态。
 export const initialLagState = (): LagState => ({ status: 'normal', overLimitMs: 0, overLimit: false })
 
+// 在有效采样推进时按采集错误、未提交及持续超限顺序判定状态，恢复正常立即清零。
 export function evaluateLag(input: { lag: number; elapsedVisibleMs: number; rule: LagThresholds;
   collectionError?: boolean; uncommitted?: boolean }, previous: LagState) {
   const { lag, rule, collectionError, uncommitted } = input
@@ -17,13 +19,16 @@ export function evaluateLag(input: { lag: number; elapsedVisibleMs: number; rule
   return { state: { status, overLimitMs, overLimit: true } }
 }
 
+// 在逐行评估 Lag 前优先匹配完整 Group 与 Topic 规则，否则采用集群默认规则。
 export function resolveLagRule(rules: LagRuleSet, groupId: string, topic: string) {
   const override = rules.overrides.find(rule => rule.groupId === groupId && rule.topic === topic)
   return { rule: override ?? rules.defaults, custom: Boolean(override) }
 }
 
+// 在状态跟踪和表格展开时编码集群、消费组与 Topic，避免不同资源共享计时键。
 export const lagRowKey = (clusterId: string, groupId: string, topic: string) => JSON.stringify([clusterId, groupId, topic])
 
+// 在计算行健康状况时将局部失败范围匹配到当前 Group、Topic 或分区。
 export function hasCollectionFailure(row: ConsumerGroupTopicSnapshot, snapshot: ClusterSnapshot) {
   return snapshot.partialFailures.some(failure => {
     const resource = failure.resource
@@ -37,6 +42,7 @@ export function hasCollectionFailure(row: ConsumerGroupTopicSnapshot, snapshot: 
   })
 }
 
+// 在快照转为视图状态前区分真实未提交、未知分区和采集错误，避免将缺失数据当作零。
 export function rowHealth(row: ConsumerGroupTopicSnapshot, snapshot: ClusterSnapshot) {
   const uncommittedCount = row.partitions.filter(p => p.committedOffset === null || p.committedOffset < 0).length
   const unknownCount = row.partitions.filter(p => p.lag === null).length
@@ -52,8 +58,10 @@ export function rowHealth(row: ConsumerGroupTopicSnapshot, snapshot: ClusterSnap
 export interface TrackedLag { state: LagState; lag: number; trend: 'up' | 'down' | 'flat' | null }
 export interface LagStates { continuityKey: string | null; clusterId: string | null; at: number | null;
   seenAt: number | null; rulesKey: string | null; rows: Record<string, TrackedLag> }
+// 在无快照或采样连续性中断时创建空跟踪簿，停止旧会话的超限累计。
 export const resetAllLagStates = (): LagStates => ({ continuityKey: null, clusterId: null, at: null, seenAt: null, rulesKey: null, rows: {} })
 
+// 在采样输入变化时仅推进新鲜且连续的已连接样本，规则或会话变化时重置计时与趋势。
 export function advanceLagStates(input: { snapshot: ClusterSnapshot | null; status: string; continuityKey: string;
   rules: LagRuleSet }, previous: LagStates): LagStates {
   const { snapshot, status, continuityKey, rules } = input

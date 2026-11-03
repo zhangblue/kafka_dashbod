@@ -7,11 +7,12 @@ import { ConsumerGroupLagContext } from './useConsumerGroupLag'
 import { groupDisplayKey } from '../dashboard/displaySnapshot'
 
 // Lives beside the monitor, above route outlets, so navigation does not break sampling continuity.
+// 在仪表盘路由上层维护共享规则与连续采样状态，避免页面导航重复累计超限时间。
 export function ConsumerGroupLagProvider({ clusterId, monitor, children }: {
   clusterId: string | null; monitor: MonitorSession; children: ReactNode
 }) {
   const query = useQuery({ queryKey: ['lag-rules', clusterId], enabled: Boolean(clusterId),
-    queryFn: ({ signal }) => lagRulesApi.get(clusterId!, signal) })
+    queryFn: /* 在当前资源查询启动时传递取消信号读取绑定集群的数据，使查询取消能传递到 HTTP 请求。 */ ({ signal }) => lagRulesApi.get(clusterId!, signal) })
   const rules = query.data
   const { snapshot, status, continuityKey } = monitor
   const [tracking, setTracking] = useState(() => ({ snapshot, status, continuityKey, rules,

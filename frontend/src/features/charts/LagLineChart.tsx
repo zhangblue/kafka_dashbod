@@ -9,19 +9,20 @@ registerCharts([LineChart, GridComponent, TooltipComponent, LegendComponent, Can
 export interface LagSample { at: number; lag: number | null }
 export interface LagSeries { name: string; samples: LagSample[] }
 
+// 在概览或消费组历史区域渲染时，把内存样本转换为保留未知断点的一小时折线图并管理图表生命周期。
 export function LagLineChart({ samples, series, stale, label }: { samples?: LagSample[]; series?: LagSeries[]; stale: boolean; label?: string }) {
   const lines = useMemo(() => series ?? [{ name: '总 Lag', samples: samples ?? [] }], [series, samples])
   const times = useMemo(() => [...new Set(lines.flatMap(line => line.samples.map(sample => sample.at)))].sort((a, b) => a - b), [lines])
   const container = useRef<HTMLDivElement>(null)
   const instance = useRef<EChartsType | null>(null)
-  useEffect(() => {
+  useEffect(/* 在图表首次挂载时创建实例并观察尺寸，卸载时先断开观察再销毁实例。 */ () => {
     const chart = init(container.current!)
     instance.current = chart
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => chart.resize()) : null
     observer?.observe(container.current!)
     return () => { observer?.disconnect(); chart.dispose(); instance.current = null }
   }, [])
-  useEffect(() => {
+  useEffect(/* 在线条或时间轴变化时更新图表配置，未知样本保留断线并固定最近一小时范围。 */ () => {
     const newest = times.at(-1)
     instance.current?.setOption({
       animation: false,

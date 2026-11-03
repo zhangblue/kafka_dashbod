@@ -9,10 +9,12 @@ export interface CreateTopicModalProps {
   sessionId: string; onClose: () => void; onApplied: (result?: TopicMutationResult) => void | Promise<void>
 }
 
+// 在打开创建弹窗或切换会话时重建表单，确保草稿绑定当前有效会话。
 export function CreateTopicModal(props: CreateTopicModalProps) {
   return <CreateTopicForm key={props.sessionId} {...props} />
 }
 
+// 在 Topic 创建阶段校验名称、数量和白名单配置，防止重复提交并等待列表刷新。
 function CreateTopicForm({ sessionId, onClose, onApplied }: CreateTopicModalProps) {
   const id = useId()
   const [name, setName] = useState('')
@@ -26,19 +28,24 @@ function CreateTopicForm({ sessionId, onClose, onApplied }: CreateTopicModalProp
   const [refreshFailed, setRefreshFailed] = useState(false)
   const submitting = useRef(false)
   const active = useRef(true)
-  useEffect(() => {
+  useEffect(/* 在创建表单挂载时允许处理响应，卸载后忽略晚到结果避免操作旧页面。 */ () => {
     active.current = true
     return () => { active.current = false }
   }, [])
   const dirty = name !== '' || partitions !== '1' || replicationFactor !== '' || Object.values(configs).some(Boolean)
+  // 在退出创建弹窗时阻止提交中关闭，并在有未保存草稿时确认放弃。
   const close = () => {
     if (!saving && (created || !dirty || window.confirm('有未保存的 Topic 创建内容，确定放弃吗？'))) onClose()
   }
+  // 在创建字段重新编辑时清除旧校验与请求错误。
   const clearErrors = () => { setFieldErrors({}); setError(null) }
+  // 在创建字段渲染时合并本地与服务端对应参数错误。
   const fieldError = (key: string) => fieldErrors[key] ?? (error instanceof ApiError
     ? error.fields[key] ?? error.fields[`configs.${key}`] : undefined)
+  // 在创建表单渲染时生成字段错误的可访问关联。
   const attributes = (key: string) => ({ 'aria-invalid': !!fieldError(key),
     'aria-describedby': fieldError(key) ? `${id}-${key}-error` : undefined })
+  // 在创建表单提交时校验并锁定请求，成功后先刷新列表再关闭弹窗。
   const submit = async () => {
     if (submitting.current || created) return
     const errors: Record<string, string> = {}
@@ -67,7 +74,7 @@ function CreateTopicForm({ sessionId, onClose, onApplied }: CreateTopicModalProp
     } finally { submitting.current = false; if (active.current) setSaving(false) }
   }
   return <Modal title="新建 Topic" description="创建会直接修改 Kafka 集群；未设置的可选配置使用集群默认值。" onClose={close} busy={saving} wide>
-    <form className="topic-admin-form" noValidate onSubmit={event => { event.preventDefault(); void submit() }}>
+    <form className="topic-admin-form" noValidate onSubmit={/* 在表单提交时，阻止默认提交并交给当前表单校验及请求锁，避免重复写入。 */ event => { event.preventDefault(); void submit() }}>
       <fieldset className="form-grid topic-basic-fields" disabled={saving || created}><legend>基础信息</legend>
         {([
           ['name', 'Topic 名称', name, setName, 'text'],
@@ -76,14 +83,14 @@ function CreateTopicForm({ sessionId, onClose, onApplied }: CreateTopicModalProp
         ] as const).map(([key, label, value, update, type]) => <div key={key} className={key === 'name' ? 'full' : undefined}>
           <label htmlFor={`${id}-${key}`}>{label}<input id={`${id}-${key}`} type={type} step={type === 'number' ? '1' : undefined}
             value={value} placeholder={key === 'replicationFactor' ? '使用集群默认值' : undefined}
-            {...attributes(key)} onChange={event => { clearErrors(); update(event.target.value) }} /></label>
+            {...attributes(key)} onChange={/* 在创建字段变更时更新草稿并撤销过时的字段或请求错误。 */ event => { clearErrors(); update(event.target.value) }} /></label>
           {fieldError(key) && <p className="topic-field-error" role="alert" id={`${id}-${key}-error`}>{fieldError(key)}</p>}
         </div>)}
       </fieldset>
       <h3 className="topic-optional-title">可选配置</h3><p className="form-note">以下参数均可选；留空表示使用 Kafka 集群默认值。</p>
       <div className="topic-config-grid">{topicConfigDefinitions.map(definition => <TopicConfigField key={definition.key}
         definition={definition} value={configs[definition.key] ?? ''} disabled={saving || created} error={fieldError(definition.key)}
-        onChange={value => { clearErrors(); setConfigs(previous => ({ ...previous, [definition.key]: value })) }} />)}</div>
+        onChange={/* 在创建字段变更时更新草稿并撤销过时的字段或请求错误。 */ value => { clearErrors(); setConfigs(previous => ({ ...previous, [definition.key]: value })) }} />)}</div>
       <TopicAdminErrorNotice error={error} />
       {refreshFailed && <p role="status">Topic 已创建，但列表刷新失败。请关闭弹窗后手动刷新。</p>}
       <div className="modal-actions topic-admin-actions"><small>创建前请确认分区数、副本因子与集群策略。</small><div>

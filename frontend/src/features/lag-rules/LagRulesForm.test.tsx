@@ -6,13 +6,14 @@ import { LagRulesForm } from './LagRulesForm'
 import type { ClusterSnapshot, LagRuleSet } from '../../api/types'
 import { rulesFixture, snapshotFixture } from '../../test/handlers'
 
+// 在规则表单测试挂载时保存受控草稿，让用户操作触发表单重渲染。
 function Harness({ initial = rulesFixture, snapshot = snapshotFixture }: { initial?: LagRuleSet; snapshot?: ClusterSnapshot | null }) {
   const [value, onChange] = useState<LagRuleSet>(initial)
-  return <LagRulesForm snapshot={snapshot} value={value} onChange={onChange} onSave={() => {}} />
+  return <LagRulesForm snapshot={snapshot} value={value} onChange={onChange} onSave={/* 在请求保存时，提供无副作用的受控回调替身，让测试聚焦当前表单行为。 */ () => {}} />
 }
 
-describe('Lag rule configuration', () => {
-  it('limits topics to committed offsets in the selected group and resets topic on group change', async () => {
+describe('Lag rule configuration', /* 在测试组注册阶段组织当前功能的交互与边界回归。 */ () => {
+  it('limits topics to committed offsets in the selected group and resets topic on group change', /* 在本用例执行时验证Topic 仅来自选中 Group 的有效提交，换组清空 Topic。 */ async () => {
     const user = userEvent.setup()
     render(<Harness />)
     await user.click(screen.getByRole('button', { name: '新增规则' }))
@@ -28,7 +29,7 @@ describe('Lag rule configuration', () => {
     expect(screen.getByRole('option', { name: 'audit-log' })).toBeInTheDocument()
   })
 
-  it('disables saving duplicate pairs, invalid thresholds and empty numeric inputs', async () => {
+  it('disables saving duplicate pairs, invalid thresholds and empty numeric inputs', /* 在本用例执行时验证重复组合、非法阈值和空数值禁止保存。 */ async () => {
     const user = userEvent.setup()
     const rule = { groupId: 'flink-order-enrich', topic: 'raw-orders', ...rulesFixture.defaults }
     render(<Harness initial={{ ...rulesFixture, overrides: [rule, rule] }} />)
@@ -46,7 +47,7 @@ describe('Lag rule configuration', () => {
     expect(screen.getByRole('button', { name: '保存规则' })).toBeDisabled()
   })
 
-  it('marks unavailable saved values read-only and permits deleting them', async () => {
+  it('marks unavailable saved values read-only and permits deleting them', /* 在本用例执行时验证不可用旧值只读但仍允许删除规则。 */ async () => {
     const user = userEvent.setup()
     render(<Harness initial={{ ...rulesFixture, overrides: [{ id: 'saved', groupId: 'gone', topic: 'gone-topic', ...rulesFixture.defaults }] }} />)
     expect(screen.getByRole('option', { name: 'gone（当前不可用）' })).toBeInTheDocument()
@@ -58,7 +59,7 @@ describe('Lag rule configuration', () => {
     expect(screen.queryByLabelText('Consumer Group')).not.toBeInTheDocument()
   })
 
-  it('keeps all old rules read-only and blocks additions while cluster is unreachable', () => {
+  it('keeps all old rules read-only and blocks additions while cluster is unreachable', /* 在本用例执行时验证集群不可达时旧规则只读并禁止新增。 */ () => {
     render(<Harness snapshot={null} initial={{ ...rulesFixture, overrides: [{ id: 'saved', groupId: 'flink-order-enrich', topic: 'raw-orders', ...rulesFixture.defaults }] }} />)
     expect(screen.getByRole('button', { name: '新增规则' })).toBeDisabled()
     expect(screen.getByLabelText('Consumer Group')).toBeDisabled()
@@ -68,12 +69,12 @@ describe('Lag rule configuration', () => {
     expect(screen.getByText(/重新连接/)).toBeInTheDocument()
   })
 
-  it('rejects a snapshot from another cluster for dropdown choices', () => {
-    render(<LagRulesForm clusterId="cluster-b" snapshot={snapshotFixture} value={rulesFixture} onChange={() => {}} />)
+  it('rejects a snapshot from another cluster for dropdown choices', /* 在本用例执行时验证其他集群快照不能作为下拉选项来源。 */ () => {
+    render(<LagRulesForm clusterId="cluster-b" snapshot={snapshotFixture} value={rulesFixture} onChange={/* 在字段变更时，提供无副作用的受控回调替身，让测试聚焦当前表单行为。 */ () => {}} />)
     expect(screen.getByRole('button', { name: '新增规则' })).toBeDisabled()
   })
 
-  it('treats a successful HTTP snapshot with total discovery failures as unreachable', () => {
+  it('treats a successful HTTP snapshot with total discovery failures as unreachable', /* 在本用例执行时验证发现全部失败时即使 HTTP 成功也视为不可达。 */ () => {
     render(<Harness snapshot={{ ...snapshotFixture, consumerGroupIds: [], consumerGroups: [], partialFailures: [
       { scope: 'topics', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'Topic metadata failed' },
       { scope: 'groups', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'Group discovery failed' },
@@ -85,7 +86,7 @@ describe('Lag rule configuration', () => {
     expect(screen.getByText(/Group discovery failed/)).toBeInTheDocument()
   })
 
-  it('allows known group/topic choices while explaining partial collection failures', async () => {
+  it('allows known group/topic choices while explaining partial collection failures', /* 在本用例执行时验证部分采集失败时保留已知选项并说明失败原因。 */ async () => {
     const user = userEvent.setup()
     render(<Harness snapshot={{ ...snapshotFixture, partialFailures: [
       { scope: 'watermark', resource: 'other:0', code: 'KAFKA_TIMEOUT', message: 'Partition query failed' },

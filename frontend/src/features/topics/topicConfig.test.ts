@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { topicConfigDefinitions, validateTopicConfigValue } from './topicConfig'
 
-describe('topic configuration form contract', () => {
-  it('defines the eight supported settings in display order with Chinese guidance and suitable controls', () => {
+describe('topic configuration form contract', /* 在测试组注册阶段组织当前功能的交互与边界回归。 */ () => {
+  it('defines the eight supported settings in display order with Chinese guidance and suitable controls', /* 在本用例执行时验证八项白名单顺序、中文指导和控件类型符合约定。 */ () => {
     expect(topicConfigDefinitions.map(item => [item.key, item.label, item.unit, item.inputType])).toEqual([
       ['retention.ms', '消息保留时间', '毫秒', 'number'],
       ['retention.bytes', '分区保留空间', '字节 / Partition', 'number'],
@@ -31,7 +31,7 @@ describe('topic configuration form contract', () => {
     ['cleanup.policy', 'delete'], ['cleanup.policy', 'compact'], ['cleanup.policy', 'delete,compact'],
     ['compression.type', 'producer'], ['compression.type', 'gzip'], ['compression.type', 'snappy'],
     ['compression.type', 'lz4'], ['compression.type', 'zstd'], ['compression.type', 'uncompressed'],
-  ])('accepts the backend-supported value %s=%s', (key, value) => {
+  ])('accepts the backend-supported value %s=%s', /* 在本用例执行时验证后端支持的参数值均通过前端校验。 */ (key, value) => {
     expect(validateTopicConfigValue(key, value)).toBeUndefined()
   })
 
@@ -42,7 +42,7 @@ describe('topic configuration form contract', () => {
     ['retention.ms', '9223372036854775808'], ['segment.bytes', '9223372036854775808'],
     ['cleanup.policy', 'compact,delete'], ['cleanup.policy', 'delete, compact'], ['compression.type', 'brotli'],
     ['unclean.leader.election.enable', 'true'], ['toString', '1'],
-  ])('rejects invalid configuration %s without reflecting its value', (key, value) => {
+  ])('rejects invalid configuration %s without reflecting its value', /* 在本用例执行时验证非法参数返回固定错误而不回显输入。 */ (key, value) => {
     const error = validateTopicConfigValue(key, value)
     expect(error).toMatch(/[\u4e00-\u9fff]/)
     if (value) expect(error).not.toContain(value)

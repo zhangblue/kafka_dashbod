@@ -13,8 +13,10 @@ import { useConsumerGroupLag, type ConsumerGroupLagRow } from './useConsumerGrou
 import { useSnapshotStale } from '../dashboard/useSnapshotStale'
 import { ConsumerGroupHistory } from './ConsumerGroupHistory'
 
+// 在消费进度表渲染时格式化已知整数，保留未知值标记。
 const format = (value: number | null) => value === null ? '—' : value.toLocaleString('en-US')
 
+// 在展开 Group 与 Topic 明细时关联分区水位、提交位置和局部陈旧状态。
 function PartitionTable({ row, snapshot, staleResources }: { row: ConsumerGroupTopicSnapshot; snapshot: ClusterSnapshot; staleResources: Record<string, string> | undefined }) {
   return <table aria-label={`${row.groupId} / ${row.topic} Partitions`}><thead><tr>
     <th scope="col">Partition</th>
@@ -31,6 +33,7 @@ function PartitionTable({ row, snapshot, staleResources }: { row: ConsumerGroupT
   </tr>})}</tbody></table>
 }
 
+// 在规则加载完成后展示和筛选消费组状态，按链接展开精确的 Group 与 Topic 分区。
 function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId: string; monitor: MonitorSession; evaluatedRows: ConsumerGroupLagRow[] }) {
   const [params] = useSearchParams()
   const [search, setSearch] = useState('')
@@ -47,11 +50,11 @@ function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId:
     .sort((a, b) => (b.displayRow ?? b.row).lag - (a.displayRow ?? a.row).lag || a.key.localeCompare(b.key))
   return <>
     <div className="page-head"><div><h2>Consumer Groups</h2><p>按 Lag 排序，查看消费进度和分区明细</p></div>
-    <div className="toolbar"><label className="search-label"><span className="sr-only">搜索 Consumer Group 或 Topic</span><input type="search" placeholder="搜索消费组或 Topic…" value={search} onChange={event => setSearch(event.target.value)} /></label>
-    <div className="filter-tabs" aria-label="快捷状态筛选">{([['all', '全部'], ['abnormal', '异常'], ['uncommitted', '未提交']] as const).map(([value, label]) => <button type="button" key={value} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}</button>)}</div>
+    <div className="toolbar"><label className="search-label"><span className="sr-only">搜索 Consumer Group 或 Topic</span><input type="search" placeholder="搜索消费组或 Topic…" value={search} onChange={/* 在搜索内容变化时更新当前过滤词，仅筛选已取得的快照。 */ event => setSearch(event.target.value)} /></label>
+    <div className="filter-tabs" aria-label="快捷状态筛选">{([['all', '全部'], ['abnormal', '异常'], ['uncommitted', '未提交']] as const).map(([value, label]) => <button type="button" key={value} aria-pressed={filter === value} onClick={/* 在状态筛选变化时更新筛选条件，保留共享的 Lag 判定与采样连续性。 */ () => setFilter(value)}>{label}</button>)}</div>
     </div></div>
     <div className="offset-note rules-note"><span>默认区间：正常 ≤ {cluster?.defaultNormalLagMax.toLocaleString('en-US')} · 高 Lag ≥ {cluster?.defaultHighLagMin.toLocaleString('en-US')} · 连续超限 {cluster?.defaultOverLimitSeconds} 秒后变色；自定义规则另有标记。</span>
-    <label><span className="sr-only">状态筛选</span><select value={filter} onChange={event => setFilter(event.target.value as typeof filter)}>
+    <label><span className="sr-only">状态筛选</span><select value={filter} onChange={/* 在状态筛选变化时更新筛选条件，保留共享的 Lag 判定与采样连续性。 */ event => setFilter(event.target.value as typeof filter)}>
       <option value="all">全部状态</option><option value="abnormal">全部异常</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
     </select></label></div>
     {status !== 'connected' && <p role="status">当前未持续采样，暂停计时；显示最后一次快照，恢复后重新累计。</p>}
@@ -69,7 +72,7 @@ function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId:
         const detailsId = `${id}-partitions-${index}`
         return <Fragment key={key}><tr>
           <td><button className="expand-button" type="button" aria-label={`${open ? '收起' : '展开'} ${row.groupId} / ${row.topic}`} aria-expanded={open} aria-controls={open ? detailsId : undefined}
-            onClick={() => setExpanded(previous => { const next = new Set(previous); if (open) next.delete(key); else next.add(key); return next })}>{open ? '⌄' : '›'}</button> <span className="name">{row.groupId}</span></td>
+            onClick={/* 在展开按钮点击时切换当前资源明细，不改变后台采样会话。 */ () => setExpanded(previous => { const next = new Set(previous); if (open) next.delete(key); else next.add(key); return next })}>{open ? '⌄' : '›'}</button> <span className="name">{row.groupId}</span></td>
           <td>{row.topic}</td><td><StatusBadge status={state.status} />{staleAt && <StaleNotice at={staleAt} />}{resolved.custom && <span> <MetricHelp trigger="自定义规则" label={`自定义规则 ${row.groupId} / ${row.topic}`}>
             正常上限：{format(resolved.rule.normalMax)}；高 Lag 起始值：{format(resolved.rule.highMin)}；持续超限时间：{resolved.rule.overLimitSeconds} 秒。
           </MetricHelp></span>}</td>
@@ -83,6 +86,7 @@ function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId:
   </>
 }
 
+// 在 Consumer Groups 路由渲染时组合规则状态、分区明细和页面内历史趋势。
 export function ConsumerGroupsPage() {
   const { cluster, monitor, refreshSeconds } = useDashboard()
   const stale = useSnapshotStale(monitor, refreshSeconds)

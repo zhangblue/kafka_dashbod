@@ -64,6 +64,7 @@ export const topicConfigDefinitions: TopicConfigDefinition[] = [
   },
 ]
 
+// 在创建或增量保存参数前按白名单校验值，返回固定提示而不回显用户输入。
 export function validateTopicConfigValue(key: string, value: string): string | undefined {
   const definition = topicConfigDefinitions.find(item => item.key === key)
   if (!definition) return '不支持此 Topic 配置。'
