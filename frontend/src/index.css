@@ -285,6 +285,10 @@ summary { cursor: pointer; }
   .cluster-picker > p { display: none; }
   .topbar-actions { gap: 8px; flex: 0 0 auto; }
   .cluster-picker { flex: 1; }
+  /* 窄屏断连时让集群独占首行，操作区在第二行容纳重连，避免额外按钮压缩集群并覆盖刷新标签。 */
+  .topbar:has([data-connection="error"]) { height: auto; min-height: 64px; flex-wrap: wrap; padding-top: 10px; padding-bottom: 10px; }
+  .topbar:has([data-connection="error"]) .cluster-picker { flex-basis: 100%; }
+  .topbar:has([data-connection="error"]) .topbar-actions { flex: 1; justify-content: flex-end; }
   .language-switch .language-option { padding: 5px; }
   .language-label-full { display: none; }
   .language-label-short { display: inline; }
