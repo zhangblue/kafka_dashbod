@@ -14,6 +14,7 @@ export function ConsumerGroupLagProvider({ clusterId, monitor, children }: {
   const query = useQuery({ queryKey: ['lag-rules', clusterId], enabled: Boolean(clusterId),
     queryFn: /* 在当前资源查询启动时传递取消信号读取绑定集群的数据，使查询取消能传递到 HTTP 请求。 */ ({ signal }) => lagRulesApi.get(clusterId!, signal) })
   const rules = query.data
+  // 跟踪输入仅含采样、连接和规则数据，不订阅界面语言；翻译由消费组件完成，切换语言不重置连续计时。
   const { snapshot, status, continuityKey } = monitor
   // 首次挂载时从空跟踪簿处理已有采样；规则尚未就绪时保持空状态，避免提前累计超限时间。
   const [tracking, setTracking] = useState(() => ({ snapshot, status, continuityKey, rules,

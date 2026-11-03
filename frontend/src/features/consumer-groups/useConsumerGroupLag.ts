@@ -8,6 +8,7 @@ export interface ConsumerGroupLagRow {
   health: ReturnType<typeof rowHealth>
   resolved: ReturnType<typeof resolveLagRule>
   state: LagState
+  // 趋势保留 up/down/flat/null 原始值，由展示组件翻译，不把语言写入共享判定状态。
   trend: TrackedLag['trend'] | undefined
   displayRow?: ConsumerGroupTopicSnapshot
   staleAt?: string

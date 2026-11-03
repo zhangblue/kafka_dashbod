@@ -1,3 +1,4 @@
+import i18n from '../../i18n'
 import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -253,4 +254,78 @@ it('marks retained rows as collection errors immediately when monitoring fails',
   update({ status: 'error', error: new Error('Collection failed') })
   expect(within(screen.getByRole('row', { name: /healthy-worker/ })).getByText('采集异常')).toBeInTheDocument()
   expect(screen.queryByText('正常', { selector: 'span' })).not.toBeInTheDocument()
+})
+
+// 验证英文筛选、辅助说明、未知分区和展开明细，防止漏翻译或改写资源标识。
+it('localizes English filters, metrics, custom rules, details and history', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  show({ ...snapshot, consumerGroups: [...snapshot.consumerGroups,
+    row('backlog-worker', 'backlog-topic', 1500), { ...row('broken-worker', 'broken-topic', 0), incomplete: true }],
+  })
+  const table = screen.getByRole('table', { name: 'Consumer Groups summary' })
+  for (const name of ['Status', 'Valid Partitions', 'Uncommitted Partitions', 'Total Lag', 'Trend']) {
+    expect(within(table).getByRole('columnheader', { name: new RegExp(name) })).toBeInTheDocument()
+  }
+  expect(screen.getByRole('region', { name: 'Last Hour Lag History' })).toBeInTheDocument()
+  expect(screen.getByRole('combobox', { name: 'Trend Consumer Group' })).toHaveValue('low-worker')
+  expect(screen.getByRole('group', { name: 'Select Topic / Partition trends (multiple allowed)' })).toBeInTheDocument()
+  const status = screen.getByRole('combobox', { name: 'Status filter' })
+  for (const [value, label, group] of [
+    ['normal', 'Normal', 'flink-orders'], ['backlog', 'Backlog', 'backlog-worker'],
+    ['high', 'High Lag', 'busy-worker'], ['uncommitted', 'Uncommitted', 'new-worker'],
+    ['error', 'Collection Error', 'broken-worker'],
+  ]) {
+    expect(within(status).getByRole('option', { name: label })).toBeInTheDocument()
+    await user.selectOptions(status, value)
+    expect(within(table).getAllByRole('row')).toHaveLength(value === 'normal' ? 3 : 2)
+    expect(within(table).getByText(group)).toBeInTheDocument()
+  }
+  await user.click(screen.getByRole('button', { name: 'All' }))
+  await user.type(screen.getByRole('searchbox', { name: 'Search Consumer Groups or Topics' }), 'ORDERS')
+  expect(within(table).getAllByRole('row')).toHaveLength(2)
+  expect(within(table).getByText('orders')).toBeInTheDocument()
+  const custom = screen.getByRole('button', { name: 'Custom Rule flink-orders / orders field help' })
+  await user.click(custom)
+  expect(custom).toHaveAccessibleDescription(/12,000.*30,000.*120/)
+  await user.keyboard('{Escape}')
+  await user.clear(screen.getByRole('searchbox'))
+  expect(within(screen.getByRole('row', { name: /new-worker/ })).getByText('50 + 1 unknown')).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Expand new-worker / new' }))
+  const details = screen.getByRole('table', { name: 'new-worker / new Partitions' })
+  expect(within(details).getByRole('columnheader', { name: /Maximum message Offset/ })).toBeInTheDocument()
+  expect(within(within(details).getAllByRole('row')[2]).getAllByRole('cell').map(cell => cell.textContent))
+    .toEqual(['1', '100', '—', '—', '—'])
+})
+
+// 验证语言变化不重置连续超限、趋势、展开状态或已选原始历史序列。
+it('preserves lag continuity, expanded rows and raw history across language changes', async () => {
+  const user = userEvent.setup()
+  const first = { ...snapshot, consumerGroups: [row('flink-orders', 'orders', 13000)] }
+  // 用不同服务器采样时间推进计时，界面重渲染不得替代真实采样。
+  const next = (seconds: number, lag: number) => ({ ...first,
+    collectedAt: new Date(Date.parse(first.collectedAt) + seconds * 1000).toISOString(),
+    consumerGroups: [row('flink-orders', 'orders', lag)],
+  })
+  const second = next(60, 14000)
+  const { update } = show(first)
+  update({ snapshot: second, history: [{ at: 1000, snapshot: first }, { at: 2000, snapshot: second }] })
+  await user.click(screen.getByRole('button', { name: '展开 flink-orders / orders' }))
+  await user.click(screen.getByRole('checkbox', { name: 'orders / 总 Lag' }))
+  await user.click(screen.getByRole('checkbox', { name: 'orders / Partition 0' }))
+  await act(async () => { await i18n.changeLanguage('en') })
+  expect(screen.getByRole('button', { name: 'Collapse flink-orders / orders' })).toHaveAttribute('aria-expanded', 'true')
+  expect(screen.getByRole('checkbox', { name: 'orders / Partition 0' })).toBeChecked()
+  expect(screen.getByRole('checkbox', { name: 'orders / Total Lag' })).not.toBeChecked()
+  expect(screen.getByLabelText('Lag rising')).toBeInTheDocument()
+  expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({ series: [
+    expect.objectContaining({ name: 'orders / Partition 0', data: [[1000, 13000], [2000, 14000]] }),
+  ] }), true)
+  update({ snapshot: next(120, 14000) })
+  expect(within(screen.getByText('flink-orders', { selector: 'span.name' }).closest('tr')!).getByText('Backlog')).toBeInTheDocument()
+  expect(screen.getByLabelText('Lag flat')).toBeInTheDocument()
+  await act(async () => { await i18n.changeLanguage('zh-CN') })
+  expect(within(screen.getByText('flink-orders', { selector: 'span.name' }).closest('tr')!).getByText('积压')).toBeInTheDocument()
+  expect(screen.getByRole('checkbox', { name: 'orders / Partition 0' })).toBeChecked()
+  expect(screen.getByRole('table', { name: 'flink-orders Lag 历史数据' })).toHaveTextContent('14,000')
 })

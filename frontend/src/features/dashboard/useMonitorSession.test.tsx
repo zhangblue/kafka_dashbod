@@ -1,3 +1,6 @@
+import i18n from '../../i18n'
+import { useTranslation } from 'react-i18next'
+import { localizeApiError } from '../../api/errorMessages'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrictMode, useState, type ReactNode } from 'react'
@@ -535,4 +538,32 @@ it('caps busy backoff and preserves the independent single expiry rebuild allowa
   expect(collected).toEqual(['a-1', 'a-1', 'a-1', 'a-1', 'a-1', 'a-2', 'a-2'])
   expect(result.current.status).toBe('connected')
   expect(result.current.history).toHaveLength(1)
+})
+
+// 验证本地全量失败以稳定 code 交给公共翻译，切换语言不触发隐式会话重试。
+it('localizes synthetic collection failures by stable code without retrying on language changes', async () => {
+  vi.mocked(sessionsApi.snapshot).mockResolvedValue({ ...snapshotFixture, topics: [], consumerGroups: [], consumerGroupIds: [],
+    partialFailures: [
+      { scope: 'topics', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'timeout' },
+      { scope: 'groups', resource: 'cluster-a', code: 'KAFKA_TIMEOUT', message: 'timeout' },
+    ],
+  })
+  const { result } = renderHook(() => {
+    const monitor = useMonitorSession('a', 3)
+    const { t } = useTranslation()
+    return { monitor, message: localizeApiError(monitor.error, t).message }
+  }, { wrapper: Wrapper })
+  await flush()
+  expect(result.current.monitor.status).toBe('error')
+  expect(result.current.monitor.error).toBeInstanceOf(ApiError)
+  expect((result.current.monitor.error as ApiError).code).toBe('KAFKA_UNAVAILABLE')
+  expect(result.current.message).toBe('Kafka 不可用，请检查连接后重试。')
+  const continuity = result.current.monitor.continuityKey
+  await act(async () => { await i18n.changeLanguage('en') })
+  expect(result.current.message).toBe('Kafka is unavailable. Check the connection and try again.')
+  expect(result.current.monitor.continuityKey).toBe(continuity)
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+  expect(created).toEqual(['a-1'])
+  expect(closed).toEqual(['a-1'])
+  expect(result.current.monitor.history).toHaveLength(0)
 })

@@ -189,7 +189,8 @@ export function useMonitorSession(clusterId: string | null, refreshSeconds: Refr
         }
         // 接纳快照前再检查取消状态，防止旧请求更新已切换或隐藏的页面。
         if (!usable()) throw aborted()
-        if (snapshotUnavailable(snapshot)) throw new ApiError(503, { code: 'KAFKA_UNAVAILABLE', message: '集群数据采集失败，请重新连接。' })
+        // 全量采集失败仅记录稳定错误码，由公共展示层按当前语言翻译，不把用户文案存入会话状态。
+        if (snapshotUnavailable(snapshot)) throw new ApiError(503, { code: 'KAFKA_UNAVAILABLE' })
         // 原始快照进入历史与判定，展示副本单独保留失败资源；仅复用同一实例的旧状态。
         setData(previous => ({ runtime, sessionId: lease.sessionId, snapshot,
           display: retainDisplaySnapshot(snapshot, previous?.runtime === runtime ? previous.display : undefined), history: appendSample(previous?.runtime === runtime ? previous.history : [],
