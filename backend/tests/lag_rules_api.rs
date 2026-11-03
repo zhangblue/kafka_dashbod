@@ -3,12 +3,14 @@ mod support;
 use serde_json::{Value, json};
 use support::*;
 
+// 在 Lag API 准备阶段构造默认阈值及自定义覆盖规则请求。
 fn rules() -> Value {
     json!({"defaults":{"normalMax":12,"highMin":50,"overLimitSeconds":0},
         "overrides":[{"groupId":"billing","topic":"orders","normalMax":4,"highMin":20,"overLimitSeconds":0}]})
 }
 
 // PUT must update defaults as well as replace, rather than append, the full override list.
+// 验证读取及保存同时更新默认阈值并整批替换覆盖规则。
 #[tokio::test]
 async fn get_and_put_lag_rules_update_defaults_and_replace_all_overrides() {
     let ctx = test_app().await;
@@ -44,6 +46,7 @@ async fn get_and_put_lag_rules_update_defaults_and_replace_all_overrides() {
 }
 
 // Invalid defaults or any invalid/duplicate override must leave both tables untouched.
+// 验证非法边界和重复组合返回字段错误，已有规则不得被部分修改。
 #[tokio::test]
 async fn invalid_rule_boundaries_and_duplicate_pairs_return_field_errors_without_changes() {
     let ctx = test_app().await;
@@ -93,6 +96,7 @@ async fn invalid_rule_boundaries_and_duplicate_pairs_return_field_errors_without
 }
 
 // A SQL failure after defaults and deletion must roll back every write in the PUT.
+// 验证存储故障回滚默认与覆盖规则，并隐藏数据库内部错误。
 #[tokio::test]
 async fn storage_failure_rolls_back_defaults_and_overrides_and_hides_database_details() {
     let ctx = test_app().await;
@@ -100,6 +104,7 @@ async fn storage_failure_rolls_back_defaults_and_overrides_and_hides_database_de
     let uri = format!("/api/clusters/{id}/lag-rules");
     request(&ctx.app, "PUT", &uri, Some(rules())).await;
     let before = response_json(request(&ctx.app, "GET", &uri, None).await).await;
+    // 仅在内存库注入存储失败，再通过 API 保存，验证默认值与覆盖规则同时回滚且诊断脱敏。
     sqlx::query("CREATE TRIGGER reject_rule BEFORE INSERT ON lag_rules WHEN NEW.group_id = 'reject' BEGIN SELECT RAISE(ABORT, 'fixture-private-database-detail'); END").execute(&ctx.pool).await.unwrap();
     let mut input = rules();
     input["defaults"]["normalMax"] = json!(15);
@@ -118,6 +123,7 @@ async fn storage_failure_rolls_back_defaults_and_overrides_and_hides_database_de
     );
 }
 
+// 验证缺失集群的规则请求返回集群不存在错误，避免创建孤立规则。
 #[tokio::test]
 async fn rules_for_missing_cluster_return_cluster_not_found() {
     let ctx = test_app().await;

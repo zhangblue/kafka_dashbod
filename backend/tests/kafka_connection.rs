@@ -8,6 +8,7 @@ use support::*;
 
 // The endpoint must load saved credentials, reject unsupported security before networking,
 // and preserve the shared error envelope without echoing security settings.
+// 验证连接测试在原生连接前拒绝非法安全配置与不存在的集群。
 #[tokio::test]
 async fn connection_endpoint_rejects_invalid_security_and_unknown_clusters() {
     let ctx = test_app().await;
@@ -43,6 +44,7 @@ async fn connection_endpoint_rejects_invalid_security_and_unknown_clusters() {
     assert!(body["requestId"].is_string());
 }
 
+// 验证不可达 broker 在有界时间内返回安全超时，避免请求悬挂。
 #[tokio::test]
 async fn unavailable_broker_returns_bounded_safe_timeout() {
     let mut config = DecryptedClusterConfig::plaintext("127.0.0.1:1");
@@ -53,6 +55,7 @@ async fn unavailable_broker_returns_bounded_safe_timeout() {
     assert!(started.elapsed() < Duration::from_secs(3));
 }
 
+// 验证 DNS 失败保留错误类别，不能错误报告为连接超时。
 #[tokio::test]
 async fn dns_errors_are_not_reported_as_timeouts() {
     // A label longer than the DNS limit fails local getaddrinfo validation.
@@ -63,6 +66,7 @@ async fn dns_errors_are_not_reported_as_timeouts() {
     assert_eq!(error.code(), "KAFKA_DNS_FAILED");
 }
 
+// 验证无效 TLS 材料映射为安全 TLS 错误，不回显证书或原生诊断。
 #[tokio::test]
 async fn malformed_tls_material_has_a_safe_tls_error() {
     let mut config = DecryptedClusterConfig::plaintext("127.0.0.1:1");
@@ -75,6 +79,7 @@ async fn malformed_tls_material_has_a_safe_tls_error() {
 }
 
 // Opt-in because it requires a running broker. CI starts docker-compose.test.yml first.
+// 仅在显式授权 broker 验收中验证明文连接成功并返回采集摘要。
 #[tokio::test]
 #[ignore = "requires TEST_KAFKA_BROKERS and docker-compose.test.yml"]
 async fn plaintext_broker_connection_succeeds() {

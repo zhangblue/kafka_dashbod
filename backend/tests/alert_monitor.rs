@@ -25,6 +25,7 @@ const PERIOD: Duration = Duration::from_secs(5);
 const TEST_ALERT_TOKEN: &str = "test-alert-token";
 const FAILURE_PROBE_TOKEN: &str = "monitor-diagnostic-probe-token";
 
+// 仅在隔离探针子进程中触发发送器断言失败，供诊断脱敏测试检查。
 #[tokio::test]
 async fn monitor_token_assertion_failure_probe() {
     if std::env::var_os("MONITOR_ASSERTION_FAILURE_PROBE").is_none() {
@@ -35,8 +36,10 @@ async fn monitor_token_assertion_failure_probe() {
 }
 
 // Run the real sender assertion in isolation, keeping all failed-test output private.
+// 验证真实失败断言的子进程输出不包含凭据，防止测试诊断泄密。
 #[test]
 fn monitor_sensitive_assertion_diagnostics_never_echo_tokens() {
+    // 把预期失败隔离在子进程并捕获其全部输出，避免探针凭据混入主测试诊断。
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -69,6 +72,7 @@ struct DropGate {
 }
 
 impl DropGate {
+    // 在测试观察完阻塞析构后释放条件变量，也供失败清理阶段解锁。
     fn release(&self) {
         *self.released.lock().unwrap() = true;
         self.changed.notify_all();
@@ -95,8 +99,10 @@ struct FakeClient {
 }
 
 impl Drop for FakeClient {
+    // 在客户端析构阶段按闸门模拟原生阻塞，结束后更新存活计数供停机断言。
     fn drop(&mut self) {
         if let Some(gate) = &self.factory.drop_gate {
+            // 先发布已进入析构状态再等待闸门，让测试可断言停机尚未完成。
             gate.started.store(true, Ordering::SeqCst);
             let mut released = gate.released.lock().unwrap();
             while !*released {
@@ -111,6 +117,7 @@ impl Drop for FakeClient {
 impl SessionClientFactory for FakeFactory {
     type Client = FakeClient;
 
+    // 在后台建连阶段记录配置和并发客户端数，并用可控闸门模拟慢创建。
     async fn create(&self, config: DecryptedClusterConfig) -> Result<FakeClient, SessionError> {
         let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_live.fetch_max(live, Ordering::SeqCst);
@@ -123,6 +130,7 @@ impl SessionClientFactory for FakeFactory {
         })
     }
 
+    // 在采样阶段记录并发数并返回预设序列，可用闸门模拟慢采集或注入错误。
     async fn snapshot(
         &self,
         _client: &mut FakeClient,
@@ -154,6 +162,7 @@ struct MultiFactory(Arc<HashMap<String, FakeFactory>>);
 impl SessionClientFactory for MultiFactory {
     type Client = FakeClient;
 
+    // 在多集群建连阶段按连接地址选择独立 fake，观察集群之间是否相互阻塞。
     async fn create(&self, config: DecryptedClusterConfig) -> Result<FakeClient, SessionError> {
         self.0
             .get(&config.bootstrap_servers)
@@ -162,6 +171,7 @@ impl SessionClientFactory for MultiFactory {
             .await
     }
 
+    // 在多集群采样阶段转交给客户端所属 fake，保留各集群独立的计数和阻塞。
     async fn snapshot(
         &self,
         client: &mut FakeClient,
@@ -175,6 +185,7 @@ impl SessionClientFactory for MultiFactory {
 struct ReleaseDropGates(Vec<Arc<DropGate>>);
 
 impl Drop for ReleaseDropGates {
+    // 在测试退出或断言展开阶段释放全部析构闸门，避免失败路径挂住运行时。
     fn drop(&mut self) {
         for gate in &self.0 {
             gate.release();
@@ -191,8 +202,10 @@ struct FakeSender {
 
 #[async_trait]
 impl AlertSender for FakeSender {
+    // 在告警发送阶段检查凭据但只输出固定诊断，记录消息并注入延迟或网络失败。
     async fn send_text(&self, token: &str, text: &str) -> Result<(), AlertSendError> {
         let expected_token = TEST_ALERT_TOKEN;
+        // 先把敏感比较转换为布尔值再断言，失败消息不得携带任一参与比较的 Token。
         let matches_expected = token == expected_token;
         assert!(
             matches_expected,
@@ -217,6 +230,7 @@ impl AlertSender for FakeSender {
 // Keep SQLite's external worker threads from causing paused Tokio time to auto-advance.
 struct Awake(tokio::task::JoinHandle<()>);
 impl Awake {
+    // 在暂停时间测试准备阶段保持调度器可运行，避免数据库线程等待导致时间自动前进。
     fn new() -> Self {
         Self(tokio::spawn(async {
             loop {
@@ -226,6 +240,7 @@ impl Awake {
     }
 }
 impl Drop for Awake {
+    // 在夹具退出时取消保持唤醒的任务，避免后台循环遗留。
     fn drop(&mut self) {
         self.0.abort();
     }
@@ -242,6 +257,7 @@ struct Fixture {
 }
 
 impl Drop for Fixture {
+    // 在夹具失败清理阶段释放创建、采样、发送及析构闸门，保证任务能够退出。
     fn drop(&mut self) {
         // Failed assertions must not strand a fake native destructor or gate.
         if let Some(gate) = &self.factory.drop_gate {
@@ -261,7 +277,9 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
+    // 在监控测试准备阶段创建内存仓储、有效集群和可控采样与发送 fake。
     async fn new(snapshots: Vec<ClusterSnapshot>) -> Self {
+        // 先保持调度器唤醒再访问 SQLite，避免暂停时钟因外部数据库线程而自动前进。
         let awake = Awake::new();
         let pool = db::connect("sqlite::memory:").await.unwrap();
         let clusters = ClusterRepository::new(pool.clone());
@@ -287,6 +305,7 @@ impl Fixture {
         }
     }
 
+    // 在监控启动或重配置阶段保存启用规则，使测试集群满足后台监控资格。
     async fn enable(&self) {
         self.settings
             .replace(
@@ -299,6 +318,7 @@ impl Fixture {
             .unwrap();
     }
 
+    // 在配置准备完成后启动受控监控器，将关闭句柄交给测试等待清理。
     fn start(&self) -> AlertMonitorHandle {
         monitor::start(
             self.clusters.clone(),
@@ -309,22 +329,27 @@ impl Fixture {
         )
     }
 
+    // 在等待及断言阶段读取创建次数，判断是否发生多余的客户端替换。
     fn created(&self) -> usize {
         self.factory.configs.lock().unwrap().len()
     }
+    // 在等待及断言阶段读取采样次数，观察串行采集和停止行为。
     fn samples(&self) -> usize {
         self.factory.samples.load(Ordering::SeqCst)
     }
+    // 在发送断言阶段复制已记录消息，避免持锁跨越异步等待。
     fn messages(&self) -> Vec<String> {
         self.sender.messages.lock().unwrap().clone()
     }
 
+    // 在暂停时间的测试中推进一个采样周期，再让异步协调工作获得执行机会。
     async fn tick(&self) {
         tokio::time::advance(PERIOD).await;
         settle().await;
     }
 }
 
+// 在告警测试准备阶段构造指定启用状态的有效增长规则。
 fn rule(enabled: bool) -> FeishuAlertRuleInput {
     FeishuAlertRuleInput {
         id: None,
@@ -336,6 +361,7 @@ fn rule(enabled: bool) -> FeishuAlertRuleInput {
     }
 }
 
+// 在监控测试准备阶段按分区 Lag 构造完整有效快照。
 fn snapshot(lags: &[i64]) -> ClusterSnapshot {
     let partitions = lags
         .iter()
@@ -356,12 +382,14 @@ fn snapshot(lags: &[i64]) -> ClusterSnapshot {
     }
 }
 
+// 在不推进虚拟时间的阶段反复让出执行权，让已就绪的后台任务完成。
 async fn settle() {
     for _ in 0..1_000 {
         tokio::task::yield_now().await;
     }
 }
 
+// 在并发测试阶段有界等待可观察状态，避免依赖真实睡眠或推进采样时间。
 async fn until(mut predicate: impl FnMut() -> bool) {
     for _ in 0..100_000 {
         if predicate() {
@@ -373,6 +401,7 @@ async fn until(mut predicate: impl FnMut() -> bool) {
 }
 
 // Catches summing only a subset, trusting a partial row aggregate, or duplicate sends.
+// 验证完整分区 Lag 总和持续增长只发送一次，防止部分求和或重复通知。
 #[tokio::test(start_paused = true)]
 async fn monitor_sends_once_for_complete_total_lag_growth() {
     let mut samples = vec![
@@ -417,6 +446,7 @@ async fn monitor_sends_once_for_complete_total_lag_growth() {
 }
 
 // Each incomplete observation must break the growth window, never become partial/zero Lag.
+// 验证不完整、未知、缺失及不匹配样本中断增长窗口，不能折算为零。
 #[tokio::test(start_paused = true)]
 async fn incomplete_unknown_missing_and_wrong_rows_break_growth() {
     for case in 0..9 {
@@ -455,6 +485,7 @@ async fn incomplete_unknown_missing_and_wrong_rows_break_growth() {
 }
 
 // Eligibility must gate client allocation, including token-only and disabled rules.
+// 验证缺少 Token 或启用规则时不创建客户端，避免无效后台连接。
 #[tokio::test(start_paused = true)]
 async fn no_token_or_no_enabled_rules_never_creates_a_client() {
     let fixture = Fixture::new(vec![]).await;
@@ -494,6 +525,7 @@ async fn no_token_or_no_enabled_rules_never_creates_a_client() {
 }
 
 // Retry timing is measured from completion, with at most three attempts in one round.
+// 验证发送完成后等待三十秒才重试，且同轮最多尝试三次。
 #[tokio::test(start_paused = true)]
 async fn failed_delivery_retries_after_thirty_seconds_and_stops_after_three_attempts() {
     let fixture = Fixture::new(vec![
@@ -526,6 +558,7 @@ async fn failed_delivery_retries_after_thirty_seconds_and_stops_after_three_atte
 }
 
 // A collection error must break continuity just as an unknown row does.
+// 验证采集失败中断连续增长，恢复后须重新积累有效样本。
 #[tokio::test(start_paused = true)]
 async fn collection_failure_resets_growth_and_recovers() {
     let fixture = Fixture::new(vec![
@@ -550,6 +583,7 @@ async fn collection_failure_resets_growth_and_recovers() {
 }
 
 // Updating either alert settings or Kafka connection settings must replace the worker.
+// 验证告警或连接配置变化都替换工作器，避免继续使用旧配置。
 #[tokio::test(start_paused = true)]
 async fn both_settings_and_connection_changes_rebuild_workers() {
     let fixture = Fixture::new(vec![]).await;
@@ -579,6 +613,7 @@ async fn both_settings_and_connection_changes_rebuild_workers() {
 }
 
 // Clearing eligibility or deleting a cluster must release the persistent client.
+// 验证清除 Token、停用规则或删除集群会停止采样并释放客户端。
 #[tokio::test(start_paused = true)]
 async fn clearing_token_disabling_rules_and_deleting_cluster_stop_workers() {
     for action in 0..3 {
@@ -616,6 +651,7 @@ async fn clearing_token_disabling_rules_and_deleting_cluster_stop_workers() {
 }
 
 // An accepted native creation may not be cancelled or detached on shutdown.
+// 验证停机等待已接受的创建完成后直接释放，不能遗留创建或继续采样。
 #[tokio::test(start_paused = true)]
 async fn shutdown_waits_for_creation_then_drops_without_sampling() {
     let mut fixture = Fixture::new(vec![]).await;
@@ -624,6 +660,7 @@ async fn shutdown_waits_for_creation_then_drops_without_sampling() {
     fixture.enable().await;
     let handle = fixture.start();
     until(|| fixture.created() == 1).await;
+    // 并发请求停机后先观察其等待状态，再释放受控闸门，验证在途工作确实被排空。
     let shutdown = tokio::spawn(async move { handle.shutdown().await });
     settle().await;
     assert!(!shutdown.is_finished());
@@ -634,6 +671,7 @@ async fn shutdown_waits_for_creation_then_drops_without_sampling() {
 }
 
 // Long snapshots must never overlap or cause queued catch-up bursts; shutdown drains one.
+// 验证慢采集即使跨过持续时间也需要三个有效样本，防止样本不足误报。
 #[tokio::test(start_paused = true)]
 async fn slow_sampling_requires_three_valid_samples_even_after_duration() {
     let mut fixture = Fixture::new(vec![
@@ -663,6 +701,7 @@ async fn slow_sampling_requires_three_valid_samples_even_after_duration() {
 }
 
 // Long snapshots must never overlap or cause queued catch-up bursts; shutdown drains one.
+// 验证慢采集串行且跳过错过的周期，停机必须等待当前采集释放。
 #[tokio::test(start_paused = true)]
 async fn slow_sampling_is_serial_skips_missed_ticks_and_drains_on_shutdown() {
     let mut fixture = Fixture::new(vec![]).await;
@@ -682,6 +721,7 @@ async fn slow_sampling_is_serial_skips_missed_ticks_and_drains_on_shutdown() {
     gate.forget_permits(gate.available_permits());
     fixture.tick().await;
     until(|| fixture.samples() == 3).await;
+    // 并发请求停机后先观察其等待状态，再释放受控闸门，验证在途工作确实被排空。
     let shutdown = tokio::spawn(async move { handle.shutdown().await });
     settle().await;
     assert!(!shutdown.is_finished());
@@ -692,6 +732,7 @@ async fn slow_sampling_is_serial_skips_missed_ticks_and_drains_on_shutdown() {
 }
 
 // A pending send must finish before client destruction and shutdown completion.
+// 验证停机先等待发送再等待阻塞析构，防止提前宣告资源已释放。
 #[tokio::test(start_paused = true)]
 async fn shutdown_waits_for_send_and_blocking_client_drop() {
     let mut fixture = Fixture::new(vec![
@@ -713,10 +754,12 @@ async fn shutdown_waits_for_send_and_blocking_client_drop() {
     fixture.tick().await;
     fixture.tick().await;
     until(|| fixture.messages().len() == 1).await;
+    // 并发请求停机后先观察其等待状态，再释放受控闸门，验证在途工作确实被排空。
     let shutdown = tokio::spawn(async move { handle.shutdown().await });
     settle().await;
     assert!(!shutdown.is_finished());
     assert!(!drop_gate.started.load(Ordering::SeqCst));
+    // 先让在途发送结束，确认进入析构且停机仍阻塞，再单独放行客户端析构。
     send_gate.add_permits(1);
     until(|| drop_gate.started.load(Ordering::SeqCst)).await;
     assert!(!shutdown.is_finished());
@@ -727,6 +770,7 @@ async fn shutdown_waits_for_send_and_blocking_client_drop() {
 }
 
 // Replacement must not create a second client until the prior native destructor finishes.
+// 验证旧原生客户端析构完成前不创建替代客户端，防止同集群连接重叠。
 #[tokio::test(start_paused = true)]
 async fn configuration_replacement_waits_for_old_client_drop() {
     let mut fixture = Fixture::new(vec![]).await;
@@ -745,12 +789,14 @@ async fn configuration_replacement_waits_for_old_client_drop() {
 }
 
 // Retiring one cluster must not freeze revocation, replacement or new workers elsewhere.
+// 验证单集群析构阻塞不妨碍其他集群协调，停机仍等待全部资源。
 #[tokio::test(start_paused = true)]
 async fn blocked_cluster_drop_does_not_block_other_clusters_and_shutdown_drains_all() {
     for action in 0..3 {
         let mut fixture = Fixture::new(vec![]).await;
         let a_drop = Arc::new(DropGate::default());
         let c_drop = Arc::new(DropGate::default());
+        // 在引入阻塞析构前安装失败清理 guard，保证中途断言展开也能解除所有闸门。
         let _release = ReleaseDropGates(vec![a_drop.clone(), c_drop.clone()]);
         fixture.factory.drop_gate = Some(a_drop.clone());
         let b_sample = Arc::new(Semaphore::new(2));
@@ -845,6 +891,7 @@ async fn blocked_cluster_drop_does_not_block_other_clusters_and_shutdown_drains_
         } else {
             assert_eq!(b_factory.configs.lock().unwrap().len(), 1);
         }
+        // 并发请求停机后先观察其等待状态，再释放受控闸门，验证在途工作确实被排空。
         let shutdown = tokio::spawn(async move { handle.shutdown().await });
         b_sample.add_permits(100);
         until(|| c_drop.started.load(Ordering::SeqCst)).await;
@@ -852,12 +899,14 @@ async fn blocked_cluster_drop_does_not_block_other_clusters_and_shutdown_drains_
             !shutdown.is_finished(),
             "shutdown must await active client destruction"
         );
+        // 先只释放活跃集群的析构，验证停机还等待更早退休的客户端。
         c_drop.release();
         until(|| c_factory.dropped.load(Ordering::SeqCst) == 1).await;
         assert!(
             !shutdown.is_finished(),
             "shutdown must await the retiring client"
         );
+        // 最后释放退休客户端并等待停机，检查所有集群的存活计数归零且无重叠。
         a_drop.release();
         shutdown.await.unwrap();
         for factory in [&fixture.factory, &b_factory, &c_factory] {
@@ -869,6 +918,7 @@ async fn blocked_cluster_drop_does_not_block_other_clusters_and_shutdown_drains_
 
 // A second save while native destruction is blocked must revoke replacement
 // eligibility before any new client is accepted, including between reconcile ticks.
+// 验证阻塞析构期间撤销资格后不会补建客户端，包括协调周期之间的变更。
 #[tokio::test(start_paused = true)]
 async fn replacement_rechecks_eligibility_after_blocked_drop() {
     for action in 0..3 {
@@ -946,6 +996,7 @@ async fn replacement_rechecks_eligibility_after_blocked_drop() {
 
 // A replacement must combine current alert rules, cluster name and connection
 // settings, rather than old alert metadata with newly read connection settings.
+// 验证阻塞析构后的替代工作器同时使用最新规则、名称与连接配置。
 #[tokio::test(start_paused = true)]
 async fn replacement_uses_latest_alert_and_cluster_revisions_after_blocked_drop() {
     let mut fixture = Fixture::new(vec![
@@ -1003,12 +1054,14 @@ async fn replacement_uses_latest_alert_and_cluster_revisions_after_blocked_drop(
 
 // Lost access to persisted eligibility must stop an existing worker, not leave
 // it sampling forever with the last known token and rules.
+// 验证无法读取持久化资格时停止已有工作器，避免沿用旧凭据永久采样。
 #[tokio::test(start_paused = true)]
 async fn repository_read_failure_stops_existing_worker() {
     let fixture = Fixture::new(vec![]).await;
     fixture.enable().await;
     let handle = fixture.start();
     until(|| fixture.samples() == 1).await;
+    // 关闭临时连接池注入资格读取失败，再推进协调周期，检查旧工作器不会无限沿用缓存。
     fixture.pool.close().await;
     fixture.tick().await;
     until(|| fixture.factory.dropped.load(Ordering::SeqCst) == 1).await;
@@ -1020,6 +1073,7 @@ async fn repository_read_failure_stops_existing_worker() {
 }
 
 // A slow send for the first rule must not age the same snapshot for later rules.
+// 验证首条规则发送变慢不会让同一快照在后续规则中被错误计时。
 #[tokio::test(start_paused = true)]
 async fn all_rules_observe_the_same_sampling_time_despite_a_slow_send() {
     let mut snapshots = vec![snapshot(&[5_100]), snapshot(&[5_200]), snapshot(&[5_300])];
@@ -1062,6 +1116,7 @@ async fn all_rules_observe_the_same_sampling_time_despite_a_slow_send() {
         1,
         "send delay must not make an old sample satisfy another rule's duration"
     );
+    // 并发请求停机后先观察其等待状态，再释放受控闸门，验证在途工作确实被排空。
     let shutdown = tokio::spawn(async move { handle.shutdown().await });
     settle().await;
     sample_gate.add_permits(1);

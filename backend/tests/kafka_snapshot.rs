@@ -24,15 +24,18 @@ struct Factory {
 }
 struct Client(Arc<AtomicUsize>);
 impl Drop for Client {
+    // 在 fake 客户端析构阶段累加计数，供取消后等待采集与关闭顺序断言。
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 }
 impl SessionClientFactory for Factory {
     type Client = Client;
+    // 在显式打开测试会话时创建可追踪析构的 fake 客户端。
     async fn create(&self, _: DecryptedClusterConfig) -> Result<Client, SessionError> {
         Ok(Client(self.drops.clone()))
     }
+    // 在采集阶段先通知已进入再等待释放，让测试确定性验证取消与关闭竞争。
     async fn snapshot(
         &self,
         _: &mut Client,
@@ -52,6 +55,7 @@ impl SessionClientFactory for Factory {
 }
 
 // Missing renewal, allowing overlap, or dropping the client while work runs breaks this contract.
+// 验证采样续租、拒绝重叠，HTTP 取消后关闭仍等待已接受的采集完成。
 #[tokio::test]
 async fn snapshot_api_renews_rejects_overlap_and_close_waits_after_http_cancellation() {
     let factory = Factory {
@@ -81,6 +85,7 @@ async fn snapshot_api_renews_rejects_overlap_and_close_waits_after_http_cancella
     let first_app = app.clone();
     let first_uri = uri.clone();
     let first = tokio::spawn(async move { request(&first_app, "GET", &first_uri, None).await });
+    // 先确认采集已经进入阻塞点，再测试续租、重叠拒绝及取消，避免请求尚未开始的竞态。
     factory.entered.notified().await;
     tokio::time::advance(Duration::from_secs(10)).await;
     assert!(
@@ -93,6 +98,7 @@ async fn snapshot_api_renews_rejects_overlap_and_close_waits_after_http_cancella
         response_json(conflict).await["code"],
         "SNAPSHOT_IN_PROGRESS"
     );
+    // 只取消 HTTP 等待方；已接受的采集仍须由会话追踪，不能随请求取消而丢失。
     first.abort();
     let _ = first.await;
     let closing_sessions = sessions.clone();
@@ -101,6 +107,7 @@ async fn snapshot_api_renews_rejects_overlap_and_close_waits_after_http_cancella
     tokio::task::yield_now().await;
     assert!(!closing.is_finished());
     assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
+    // 先证实关闭被在途采集阻塞，再释放采集并等待关闭，最后核对只析构一次。
     factory.release.notify_one();
     closing.await.unwrap().unwrap();
     assert_eq!(factory.drops.load(Ordering::SeqCst), 1);
@@ -130,9 +137,11 @@ async fn snapshot_api_renews_rejects_overlap_and_close_waits_after_http_cancella
     assert_eq!(snapshot["partialFailures"], serde_json::json!([]));
     assert!(snapshot["consumerGroups"].is_array());
     assert!(snapshot["consumerGroupIds"].is_array());
+    // 正常路径显式等待新会话释放，避免客户端析构遗留到测试运行时退出。
     sessions.close_all().await;
 }
 
+// 验证独立提交位置预期必须完整且有效，不能静默忽略不完整环境配置。
 #[test]
 fn known_committed_fixture_requires_complete_and_valid_environment_values() {
     let values = |group: Option<&str>,
@@ -212,6 +221,7 @@ struct KnownOffset {
     committed: Option<i64>,
 }
 
+// 在只读 broker 验收准备阶段解析独立提交位置预期，保留未提交与缺省区别。
 fn known_offset_fixture(values: [Option<String>; 4]) -> Result<Option<KnownOffset>, &'static str> {
     if values.iter().all(Option::is_none) {
         return Ok(None);
@@ -247,6 +257,7 @@ fn known_offset_fixture(values: [Option<String>; 4]) -> Result<Option<KnownOffse
 }
 
 // Read-only integration: never create topics, produce, subscribe, or commit offsets.
+// 验证授权 broker 的只读快照覆盖可发现资源、复用组读取器并保留 Offset 语义。
 #[tokio::test]
 #[ignore = "requires an explicitly authorized TEST_KAFKA_BROKERS"]
 async fn readonly_broker_snapshot_contains_all_discoverable_resources() {
@@ -275,6 +286,7 @@ async fn readonly_broker_snapshot_contains_all_discoverable_resources() {
     let expected_topics = probe.topics().await.unwrap();
     let expected_groups = probe.groups().await.unwrap();
     let snapshot = collect(&probe, "readonly", options).await;
+    // 采集结束后等待探针原生工作收尾，再检查快照，避免阻塞工作遗留到后台。
     probe.finish().await;
     assert!(!expected_topics.is_empty());
     assert_eq!(snapshot.topics.len(), expected_topics.len());

@@ -1,6 +1,7 @@
 mod support;
 
 // A missing explicit body limit permits oversized configuration payloads.
+// 验证配置请求正文上限返回 413 且不回显秘密，防止无界输入及诊断泄露。
 #[tokio::test]
 async fn oversized_configuration_returns_413_without_echoing_secrets() {
     let ctx = support::test_app().await;
@@ -26,11 +27,13 @@ use serde_json::json;
 use support::*;
 use tower::ServiceExt;
 
+// 在集群更新测试中构造省略密码的安全编辑，检查凭据保留契约。
 fn secure_edit(name: &str) -> serde_json::Value {
     json!({"name":name,"bootstrapServers":"broker:9093","securityProtocol":"SASL_SSL","saslMechanism":"PLAIN","username":"reader"})
 }
 
 // Any response built from private connection settings instead of the public DTO leaks secrets.
+// 验证集群增删改查全流程只暴露配置标志，不回显保存的凭据。
 #[tokio::test]
 async fn create_read_list_update_and_delete_cluster_never_expose_secrets() {
     let ctx = test_app().await;
@@ -86,6 +89,7 @@ async fn create_read_list_update_and_delete_cluster_never_expose_secrets() {
 }
 
 // Blank/omitted credentials must retain their old values; clearing must be explicit and field-scoped.
+// 验证普通编辑保留已有秘密，只有明确清除才移除密码。
 #[tokio::test]
 async fn edits_preserve_secrets_until_explicit_password_clear() {
     let ctx = test_app().await;
@@ -133,6 +137,7 @@ async fn edits_preserve_secrets_until_explicit_password_clear() {
 }
 
 // Validation and storage errors must produce stable codes, useful fields, and no rejected input.
+// 验证无效集群、重名与缺失标识返回稳定安全错误，保留数据库细节边界。
 #[tokio::test]
 async fn invalid_clusters_duplicate_names_and_missing_ids_return_safe_errors() {
     let ctx = test_app().await;
@@ -173,6 +178,7 @@ async fn invalid_clusters_duplicate_names_and_missing_ids_return_safe_errors() {
 }
 
 // Default framework JSON rejection text can echo input; errors must use the shared envelope.
+// 验证错误 JSON 与未知路由也返回统一安全信封及请求标识。
 #[tokio::test]
 async fn malformed_json_and_unknown_routes_use_request_ids_and_safe_envelopes() {
     let ctx = test_app().await;
@@ -217,6 +223,7 @@ async fn malformed_json_and_unknown_routes_use_request_ids_and_safe_envelopes() 
 }
 
 // Path decoding is rejected before handlers run; it still needs the public error contract.
+// 验证非法路径编码遵循统一 JSON 错误格式，不能泄露解析细节。
 #[tokio::test]
 async fn invalid_path_encoding_returns_the_shared_json_error_envelope() {
     let ctx = test_app().await;

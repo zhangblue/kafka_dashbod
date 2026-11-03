@@ -35,6 +35,7 @@ struct Factory {
     unconfirmed: bool,
 }
 
+// 构造包含实际值、来源和只读状态的配置响应，供 Topic API 测试使用。
 fn config_values() -> Vec<TopicConfigValue> {
     vec![
         TopicConfigValue {
@@ -55,10 +56,12 @@ fn config_values() -> Vec<TopicConfigValue> {
 impl SessionClientFactory for Factory {
     type Client = ();
 
+    // 在显式会话创建时返回空 fake，供管理 API 校验与转发断言使用。
     async fn create(&self, _: DecryptedClusterConfig) -> Result<(), SessionError> {
         Ok(())
     }
 
+    // 在创建阶段记录已校验的输入并按预设结果返回，检查原生调用边界。
     async fn create_topic(
         &self,
         _: &mut (),
@@ -68,6 +71,7 @@ impl SessionClientFactory for Factory {
         self.error.clone().map_or(Ok(()), Err)
     }
 
+    // 在读取配置阶段返回预设配置值与来源，供序列化与冲突检查断言使用。
     async fn describe_topic_configs(
         &self,
         _: &mut (),
@@ -77,6 +81,7 @@ impl SessionClientFactory for Factory {
         self.error.clone().map_or_else(|| Ok(config_values()), Err)
     }
 
+    // 在修改阶段记录增量输入并模拟确认或未确认结果，检查安全响应映射。
     async fn update_topic_configs(
         &self,
         _: &mut (),
@@ -98,18 +103,21 @@ impl SessionClientFactory for Factory {
         })
     }
 
+    // 在删除阶段记录准确 Topic 名称并返回预设结果，检查确认校验是否先执行。
     async fn delete_topic(&self, _: &mut (), topic: &str) -> Result<(), TopicAdminError> {
         self.calls.lock().await.deleted.push(topic.into());
         self.error.clone().map_or(Ok(()), Err)
     }
 }
 
+// 为 Topic API 测试创建集群和有效会话，注入可观察输入的管理工厂。
 async fn app(factory: Factory) -> (Router, String, SessionManager<Factory>) {
     let sessions = SessionManager::new(Duration::from_secs(15), factory);
     let state = AppState::new(db::connect("sqlite::memory:").await.unwrap())
         .with_session_manager(sessions.clone());
     let app = router_with_state(state);
     let cluster = create_cluster(&app, "topic-admin").await;
+    // 先显式开启有效会话，再使用返回标识发管理请求，保证测试覆盖会话绑定边界。
     let value = response_json(
         request(
             &app,
@@ -123,11 +131,13 @@ async fn app(factory: Factory) -> (Router, String, SessionManager<Factory>) {
     (app, value["sessionId"].as_str().unwrap().into(), sessions)
 }
 
+// 构造带预期旧值的增量修改请求，供配置冲突与响应测试复用。
 fn update_input() -> Value {
     json!({"changes":{"retention.ms":null},"expectedValues":{"retention.ms":"60000"}})
 }
 
 // Missing validation or incorrect forwarding must never send a different creation to Kafka.
+// 验证 Topic 路由只转发通过校验的参数，避免危险输入进入管理层。
 #[tokio::test]
 async fn topic_routes_validate_and_forward_only_safe_values() {
     let factory = Factory::default();
@@ -170,6 +180,7 @@ async fn topic_routes_validate_and_forward_only_safe_values() {
 }
 
 // Responses preserve Kafka's unknown/read-only metadata; reset-default remains a null change.
+// 验证配置返回实时值，且恢复默认保留增量删除覆盖的语义。
 #[tokio::test]
 async fn topic_configs_return_actual_values_and_preserve_incremental_reset() {
     let factory = Factory::default();
@@ -201,6 +212,7 @@ async fn topic_configs_return_actual_values_and_preserve_incremental_reset() {
 }
 
 // A successful alter followed by a failed read must not claim submitted values were confirmed.
+// 验证已应用但未确认的修改返回固定的 202 响应，避免误报成功或泄露错误。
 #[tokio::test]
 async fn applied_but_unconfirmed_has_fixed_accepted_response() {
     let (app, id, _) = app(Factory {
@@ -223,6 +235,7 @@ async fn applied_but_unconfirmed_has_fixed_accepted_response() {
 }
 
 // Encoded session/topic segments must be decoded once before lookup, forwarding and confirmation.
+// 验证编码路径准确定位原 Topic，且删除成功响应不带正文。
 #[tokio::test]
 async fn encoded_paths_reach_the_exact_topic_and_delete_returns_an_empty_body() {
     let factory = Factory::default();
@@ -263,6 +276,7 @@ async fn encoded_paths_reach_the_exact_topic_and_delete_returns_an_empty_body() 
 }
 
 // Frontend bypasses cannot submit invalid counts, unsupported keys, or missing compare values.
+// 验证非法创建及配置字段在原生调用前拒绝，防止校验绕过。
 #[tokio::test]
 async fn invalid_create_and_update_fields_are_rejected_before_native_work() {
     let factory = Factory::default();
@@ -335,6 +349,7 @@ async fn invalid_create_and_update_fields_are_rejected_before_native_work() {
 }
 
 // Decoding must not let separators, NULs, double encoding or protected internal names bypass checks.
+// 验证非法 Topic 路径与不完全匹配的删除确认不会触发 Kafka 工作。
 #[tokio::test]
 async fn invalid_topic_paths_and_delete_confirmations_never_reach_kafka() {
     let factory = Factory::default();
@@ -386,6 +401,7 @@ async fn invalid_topic_paths_and_delete_confirmations_never_reach_kafka() {
 }
 
 // All Admin variants have one stable, safe HTTP translation regardless of the operation.
+// 验证各管理路由对原生错误采用一致的安全映射。
 #[tokio::test]
 async fn native_errors_are_mapped_consistently_on_all_topic_routes() {
     for (error, status, code) in [
@@ -432,6 +448,7 @@ async fn native_errors_are_mapped_consistently_on_all_topic_routes() {
 }
 
 // Closed and unknown IDs cannot regain access to a session's AdminClient through any route.
+// 验证过期会话在所有 Topic 路由返回已失效状态，避免重建隐式连接。
 #[tokio::test]
 async fn expired_sessions_return_gone_on_every_topic_route() {
     let (app, id, sessions) = app(Factory::default()).await;
@@ -460,6 +477,7 @@ async fn expired_sessions_return_gone_on_every_topic_route() {
 }
 
 // JSON rejections must use the common safe body and retain the global size boundary.
+// 验证格式错误、未知字段和超大请求使用安全错误响应。
 #[tokio::test]
 async fn malformed_unknown_and_oversized_requests_have_safe_errors() {
     let factory = Factory::default();

@@ -4,6 +4,7 @@ use axum::{
 };
 use tower::ServiceExt;
 
+// 验证健康接口返回约定的成功 JSON，供启动就绪检测依赖。
 #[tokio::test]
 async fn health_returns_ok_json() {
     let response = kafka_dashboard::app_for_test()

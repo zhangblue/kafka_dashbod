@@ -11,6 +11,7 @@ use tower::ServiceExt;
 
 const INDEX: &str = "<main>dashboard</main>";
 
+// 在静态资源测试准备阶段创建隔离目录，写入最小首页和资源文件。
 fn web_root() -> tempfile::TempDir {
     let web = tempfile::tempdir().unwrap();
     std::fs::create_dir(web.path().join("assets")).unwrap();
@@ -20,6 +21,7 @@ fn web_root() -> tempfile::TempDir {
     web
 }
 
+// 在静态资源测试准备阶段用临时根目录构造生产路由，验证实际回退与路径策略。
 async fn app(web: &Path) -> Router {
     let pool = kafka_dashboard::db::connect("sqlite::memory:")
         .await
@@ -28,6 +30,7 @@ async fn app(web: &Path) -> Router {
     kafka_dashboard::api::router_with_state_and_web_root(state, Some(web.to_owned())).unwrap()
 }
 
+// 在静态资源测试执行阶段保留原始路径和方法，验证编码及条件响应语义。
 async fn request(app: &Router, method: &str, path: &str) -> Response {
     app.clone()
         .oneshot(
@@ -42,6 +45,7 @@ async fn request(app: &Router, method: &str, path: &str) -> Response {
         .unwrap()
 }
 
+// 在静态响应断言阶段读取正文，核对页面回退和安全拒绝结果。
 async fn text(response: Response) -> String {
     String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
@@ -53,6 +57,7 @@ async fn text(response: Response) -> String {
 }
 
 // Fails if static requests keep reaching the API 404 or HTML is sent as JavaScript.
+// 验证真实静态资源具有正确类型与缓存再验证语义。
 #[tokio::test]
 async fn serves_real_assets_with_mime_and_revalidates_cached_files() {
     let web = web_root();
@@ -73,6 +78,7 @@ async fn serves_real_assets_with_mime_and_revalidates_cached_files() {
 }
 
 // Fails if deep links and missing static files cannot load the SPA shell.
+// 验证允许的页面 GET 路径回退到不缓存首页，避免客户端路由失效。
 #[tokio::test]
 async fn non_api_get_paths_fall_back_to_uncached_html() {
     let web = web_root();
@@ -103,6 +109,7 @@ async fn non_api_get_paths_fall_back_to_uncached_html() {
 }
 
 // Fails if an API miss is swallowed by the shell or shadows a real API route.
+// 验证 API 优先匹配且未知 API 始终返回 JSON 404，不能回退为页面。
 #[tokio::test]
 async fn api_routes_take_precedence_and_unknown_api_paths_always_return_json_404() {
     let web = web_root();
@@ -137,6 +144,7 @@ async fn api_routes_take_precedence_and_unknown_api_paths_always_return_json_404
 }
 
 // Fails if percent encoding, hidden files, or parent traversal exposes private files.
+// 验证隐藏路径及编码目录穿越均被拒绝，防止访问根目录之外资源。
 #[tokio::test]
 async fn rejects_hidden_paths_and_encoded_traversal() {
     let web = web_root();
@@ -155,6 +163,7 @@ async fn rejects_hidden_paths_and_encoded_traversal() {
     }
 }
 
+// 验证指向根目录外或隐藏文件的链接被拒绝，保留静态目录安全边界。
 #[cfg(unix)]
 #[tokio::test]
 async fn rejects_symlinks_outside_root_and_to_hidden_files() {
@@ -178,6 +187,7 @@ async fn rejects_symlinks_outside_root_and_to_hidden_files() {
 }
 
 // The secure opener must retain partial responses and browser cache validation.
+// 验证范围请求与条件请求继续遵循文件响应语义，避免被首页回退吞掉。
 #[tokio::test]
 async fn range_and_conditional_get_keep_file_response_semantics() {
     let web = web_root();
@@ -217,6 +227,7 @@ async fn range_and_conditional_get_keep_file_response_semantics() {
 }
 
 // Fails if version processing requires a database or a web directory.
+// 验证版本查询在无有效数据库或静态目录时仍可直接成功退出。
 #[test]
 fn version_exits_without_initializing_configuration() {
     let output = Command::new(env!("CARGO_BIN_EXE_kafka-dashboard"))
@@ -238,6 +249,7 @@ fn version_exits_without_initializing_configuration() {
 }
 
 // Fails if an explicit broken deployment silently starts without serving its UI.
+// 验证静态目录或首页缺失在数据库初始化前失败，防止无效启动产生数据库。
 #[test]
 fn startup_rejects_missing_web_directory_or_index_before_database_initialization() {
     let parent = tempfile::tempdir().unwrap();

@@ -4,6 +4,7 @@ use kafka_dashboard::kafka::config::build_client_properties;
 use serde_json::{Value, json};
 use support::*;
 
+// 在凭据 API 准备阶段构造完整安全配置，供存储、清除及合并测试使用。
 fn secure_cluster(name: &str) -> Value {
     json!({
         "name": name, "bootstrapServers": "broker:9093", "securityProtocol": "SASL_SSL",
@@ -13,6 +14,7 @@ fn secure_cluster(name: &str) -> Value {
     })
 }
 
+// 在凭据更新测试中构造省略秘密的编辑，观察保存值是否正确保留。
 fn secure_edit(name: &str) -> Value {
     json!({
         "name": name, "bootstrapServers": "edited:9093", "securityProtocol": "SASL_SSL",
@@ -20,6 +22,7 @@ fn secure_edit(name: &str) -> Value {
     })
 }
 
+// 在凭据存储断言阶段读取临时数据库原始字节和解析值，核对原子更新与字段清除。
 async fn saved_secret_json(ctx: &TestApp, id: &str) -> (Vec<u8>, Value) {
     let stored: Vec<u8> = sqlx::query_scalar("SELECT secrets_json FROM clusters WHERE id = ?")
         .bind(id)
@@ -31,6 +34,7 @@ async fn saved_secret_json(ctx: &TestApp, id: &str) -> (Vec<u8>, Value) {
 }
 
 // Missing passphrase persistence/mapping would make password-protected TLS keys unusable.
+// 验证私钥口令持久化、保留、替换及 Kafka 映射，公共读取和调试不得回显。
 #[tokio::test]
 async fn key_passphrase_is_stored_preserved_replaced_and_mapped_without_public_echo() {
     let ctx = test_app().await;
@@ -88,6 +92,7 @@ async fn key_passphrase_is_stored_preserved_replaced_and_mapped_without_public_e
 }
 
 // Clearing must be independent per field and validate after the final credential merge.
+// 验证五类凭据可显式清除，并在最终合并校验后允许安全协议切换。
 #[tokio::test]
 async fn explicit_clear_removes_all_five_secret_fields_and_allows_protocol_switch() {
     let ctx = test_app().await;
@@ -174,6 +179,7 @@ async fn explicit_clear_removes_all_five_secret_fields_and_allows_protocol_switc
 }
 
 // Rejecting only the incoming fields permits an invalid protocol switch or an orphan key.
+// 验证合并后的非法协议或孤立密钥被原子拒绝，不能只校验传入字段。
 #[tokio::test]
 async fn invalid_merged_security_edits_are_rejected_atomically() {
     let ctx = test_app().await;
@@ -209,6 +215,7 @@ async fn invalid_merged_security_edits_are_rejected_atomically() {
 }
 
 // Contradictory replace-and-clear intent must never silently erase a supplied credential.
+// 验证同一凭据同时替换与清除会被拒绝，避免静默丢弃用户意图。
 #[tokio::test]
 async fn replacing_and_clearing_the_same_secret_is_rejected() {
     let ctx = test_app().await;
@@ -240,6 +247,7 @@ async fn replacing_and_clearing_the_same_secret_is_rejected() {
 }
 
 // Create must obey the same security constraints as draft tests and updates.
+// 验证新增配置遵守同等安全约束，非法凭据组合不能入库。
 #[tokio::test]
 async fn invalid_new_security_configurations_never_persist() {
     let ctx = test_app().await;

@@ -18,6 +18,7 @@ const SAVED_TOKEN: &str = "fixture-saved-token-secret";
 const DRAFT_TOKEN: &str = "fixture-draft-token-secret";
 
 // Do not put values derived from a token, response, message, or log in panic diagnostics.
+// 在告警 API 的敏感断言中使用固定错误文本，避免失败时打印 Token。
 #[track_caller]
 fn assert_safe(condition: bool) {
     assert!(condition, "Feishu API assertion failed");
@@ -31,24 +32,29 @@ struct FakeAlertSender {
 
 #[async_trait]
 impl AlertSender for FakeAlertSender {
+    // 在测试通知阶段记录 Token 和消息并返回预设结果，隔离真实网络发送。
     async fn send_text(&self, token: &str, text: &str) -> Result<(), AlertSendError> {
         self.sent.lock().unwrap().push((token.into(), text.into()));
         self.error.map_or(Ok(()), Err)
     }
 }
 
+// 在告警 API 测试准备阶段构造完整有效的 Token 与规则请求。
 fn settings() -> Value {
     json!({"accessToken": SAVED_TOKEN, "clearAccessToken":false,
         "rules":[{"groupId":"g","topic":"t","lagThreshold":5000,"growthSeconds":10,"enabled":true}]})
 }
 
+// 在告警响应断言阶段先检查正文不含敏感测试值，再解析 JSON。
 async fn safe_json(response: axum::response::Response) -> Value {
+    // 只用固定诊断检查敏感正文后再解析，避免 JSON 失败诊断回显 Token。
     let text = response_text(response).await;
     assert_safe(!text.contains(SAVED_TOKEN) && !text.contains(DRAFT_TOKEN));
     serde_json::from_str(&text).unwrap_or_else(|_| panic!("Expected safe JSON response"))
 }
 
 // Missing routing or exposing a stored token must fail this public settings round trip.
+// 验证保存只返回掩码配置，测试通知正确使用已存 Token。
 #[tokio::test]
 async fn put_returns_masked_settings_and_test_uses_saved_token() {
     let sender = FakeAlertSender::default();
@@ -86,6 +92,7 @@ async fn put_returns_masked_settings_and_test_uses_saved_token() {
 }
 
 // Empty or omitted replacements preserve the token, while clear removes it and replaces rules.
+// 验证空白或省略 Token 保留原值，显式清除才移除已存值。
 #[tokio::test]
 async fn blank_or_omitted_token_preserves_and_clear_removes_saved_token() {
     let fixture = test_app_with_sender(FakeAlertSender::default()).await;
@@ -127,6 +134,7 @@ async fn blank_or_omitted_token_preserves_and_clear_removes_saved_token() {
 }
 
 // A draft test must use the unsaved token without changing the persisted token or rule list.
+// 验证测试优先使用去空白后的草稿 Token，且支持未保存配置而不写入。
 #[tokio::test]
 async fn test_prefers_trimmed_draft_without_persisting_and_accepts_unsaved_settings() {
     let sender = FakeAlertSender::default();
@@ -154,6 +162,7 @@ async fn test_prefers_trimmed_draft_without_persisting_and_accepts_unsaved_setti
 }
 
 // Validation must reject each invalid field before the repository changes token or rules.
+// 验证非法字段与去空白后重复组合被原子拒绝，防止部分更新。
 #[tokio::test]
 async fn invalid_fields_and_trimmed_duplicate_pairs_are_rejected_atomically() {
     let fixture = test_app_with_sender(FakeAlertSender::default()).await;
@@ -201,6 +210,7 @@ async fn invalid_fields_and_trimmed_duplicate_pairs_are_rejected_atomically() {
 }
 
 // JSON numbers must round-trip exactly through JavaScript without partial saves on failure.
+// 验证安全整数最大值可保存，超界后拒绝且保持原配置。
 #[tokio::test]
 async fn safe_integer_maximum_is_accepted_and_larger_values_are_rejected_atomically() {
     let fixture = test_app_with_sender(FakeAlertSender::default()).await;
@@ -235,6 +245,7 @@ async fn safe_integer_maximum_is_accepted_and_larger_values_are_rejected_atomica
 }
 
 // Normalized strings are stored, zero and ten-second boundaries accepted, IDs survive edits.
+// 验证保存规范化组合、零阈值及合法规则标识，避免重建时丢失身份。
 #[tokio::test]
 async fn saves_trimmed_pairs_zero_threshold_and_preserves_valid_rule_ids() {
     let fixture = test_app_with_sender(FakeAlertSender::default()).await;
@@ -269,6 +280,7 @@ async fn saves_trimmed_pairs_zero_threshold_and_preserves_valid_rule_ids() {
 }
 
 // Token validation must use bytes, reject control characters and never send invalid drafts.
+// 验证保存及测试均安全拒绝非法 Token，字段错误不能回显输入。
 #[tokio::test]
 async fn invalid_tokens_are_safe_field_errors_on_save_and_test() {
     let sender = FakeAlertSender::default();
@@ -305,6 +317,7 @@ async fn invalid_tokens_are_safe_field_errors_on_save_and_test() {
 }
 
 // All three endpoints must use a cluster 404, including a test supplied with a new token.
+// 验证所有告警端点对缺失集群返回安全 404，避免隐式创建配置。
 #[tokio::test]
 async fn missing_cluster_returns_safe_404_on_all_endpoints() {
     let sender = FakeAlertSender::default();
@@ -322,6 +335,7 @@ async fn missing_cluster_returns_safe_404_on_all_endpoints() {
 }
 
 // Malformed JSON and oversized bodies on both write endpoints retain the global safe envelope.
+// 验证 JSON 拒绝和正文超限不回显请求体，保护 Token 等输入。
 #[tokio::test]
 async fn rejected_json_and_body_limit_never_echo_request_body() {
     let fixture = test_app_with_sender(FakeAlertSender::default()).await;
@@ -351,15 +365,18 @@ async fn rejected_json_and_body_limit_never_echo_request_body() {
 #[derive(Clone, Default)]
 struct LogBuffer(Arc<Mutex<Vec<u8>>>);
 impl Write for LogBuffer {
+    // 在日志捕获阶段把写入追加到共享内存，供脱敏断言检查完整日志。
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().write(bytes)
     }
+    // 满足测试内存日志写入器接口；写入已即时保存，无额外刷新工作。
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
 
 // Sending failures must collapse to one safe error with correlation, without logging payloads.
+// 验证发送失败返回安全错误及请求标识，日志不得包含 Token 或原生内容。
 #[tokio::test]
 async fn failed_send_returns_safe_error_and_request_id_without_token_in_logs() {
     let sender = FakeAlertSender {
@@ -399,6 +416,7 @@ async fn failed_send_returns_safe_error_and_request_id_without_token_in_logs() {
     assert_safe(
         body["code"] == "FEISHU_SEND_FAILED" && body["requestId"] == "feishu-api-test-request",
     );
+    // 只通过固定诊断检查捕获日志，失败时不能把可能含秘密的日志整体打印。
     let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     assert_safe(
         output.contains("FEISHU_SEND_FAILED") && output.contains("feishu-api-test-request"),
@@ -407,6 +425,7 @@ async fn failed_send_returns_safe_error_and_request_id_without_token_in_logs() {
     assert_safe(!output.contains("accessToken") && !output.contains("private="));
 }
 
+// 验证敏感断言诊断固定，防止断言失败输出秘密。
 #[test]
 fn sensitive_assertion_diagnostics_are_fixed() {
     let panic =

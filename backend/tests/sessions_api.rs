@@ -22,12 +22,14 @@ struct Factory {
 }
 struct Client(Arc<AtomicUsize>);
 impl Drop for Client {
+    // 在 fake 客户端析构阶段累加释放次数，检查显式关闭、过期及停机是否重复释放。
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 }
 impl SessionClientFactory for Factory {
     type Client = Client;
+    // 在会话打开阶段检查连接地址并返回带释放计数的 fake，避免连接真实 Kafka。
     async fn create(&self, config: DecryptedClusterConfig) -> Result<Client, SessionError> {
         assert_eq!(config.bootstrap_servers, "broker:9092");
         self.creates.fetch_add(1, Ordering::SeqCst);
@@ -35,6 +37,7 @@ impl SessionClientFactory for Factory {
     }
 }
 
+// 在会话 API 准备阶段组装内存数据库、管理器和可观察创建释放的工厂。
 async fn app() -> (axum::Router, SessionManager<Factory>, Factory) {
     let factory = Factory {
         creates: Arc::new(AtomicUsize::new(0)),
@@ -47,6 +50,7 @@ async fn app() -> (axum::Router, SessionManager<Factory>, Factory) {
 }
 
 // Configuration requests must never create Kafka resources; session POST owns that boundary.
+// 验证保存配置不建连接，显式开启会话后删除只释放一次。
 #[tokio::test]
 async fn sessions_open_only_on_request_and_delete_releases_once() {
     let (app, sessions, factory) = app().await;
@@ -84,6 +88,7 @@ async fn sessions_open_only_on_request_and_delete_releases_once() {
 }
 
 // Missing clusters must not create an orphan Kafka client; stale session IDs are recognizable.
+// 验证缺失集群与未知会话返回稳定错误，避免混淆资源状态。
 #[tokio::test]
 async fn sessions_missing_cluster_and_unknown_session_return_stable_errors() {
     let (app, _, factory) = app().await;
@@ -97,6 +102,7 @@ async fn sessions_missing_cluster_and_unknown_session_return_stable_errors() {
 }
 
 // Cluster deletion must drop only its sessions before deleting its saved configuration.
+// 验证关闭、删除集群及整体停机都会释放全部会话资源。
 #[tokio::test]
 async fn sessions_cluster_deletion_and_shutdown_release_all_resources() {
     let (app, sessions, factory) = app().await;
@@ -130,6 +136,7 @@ async fn sessions_cluster_deletion_and_shutdown_release_all_resources() {
         Err(SessionError::Expired)
     ));
     assert!(sessions.get(&ids[2]).await.is_ok());
+    // 等待全部会话释放后再检查析构计数，防止把异步清理尚未完成误判为泄漏。
     sessions.close_all().await;
     assert_eq!(factory.drops.load(Ordering::SeqCst), 3);
     assert!(matches!(
@@ -148,6 +155,7 @@ async fn sessions_cluster_deletion_and_shutdown_release_all_resources() {
 }
 
 // Even before the five-second reaper runs, an expired ID must never renew or collect again.
+// 验证租约到期能通过 API 明确识别，避免把过期会话当成普通缺失。
 #[tokio::test]
 async fn sessions_expiry_is_identifiable_through_api() {
     let (app, sessions, factory) = app().await;

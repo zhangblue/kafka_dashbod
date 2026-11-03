@@ -11,6 +11,7 @@ use kafka_dashboard::{
 };
 use sqlx::Row;
 
+// 在仓储测试准备阶段构造含安全配置的完整集群输入。
 fn cluster_input(name: &str) -> ClusterInput {
     let mut input = ClusterInput::plaintext(name, "localhost:9092");
     input.security_protocol = SecurityProtocol::SaslSsl;
@@ -23,6 +24,7 @@ fn cluster_input(name: &str) -> ClusterInput {
     input
 }
 
+// 在仓储更新测试中构造省略敏感字段的编辑，检查旧凭据合并行为。
 fn cluster_edit(name: &str) -> ClusterInput {
     let mut input = ClusterInput::plaintext(name, "broker:9092");
     input.security_protocol = SecurityProtocol::SaslSsl;
@@ -31,6 +33,7 @@ fn cluster_edit(name: &str) -> ClusterInput {
     input
 }
 
+// 为每个仓储测试创建独立内存数据库及仓储，隔离迁移和事务状态。
 async fn repositories() -> (sqlx::SqlitePool, ClusterRepository, LagRuleRepository) {
     let pool = db::connect("sqlite::memory:").await.unwrap();
     let clusters = ClusterRepository::new(pool.clone());
@@ -38,6 +41,7 @@ async fn repositories() -> (sqlx::SqlitePool, ClusterRepository, LagRuleReposito
     (pool, clusters, rules)
 }
 
+// 在仓储测试准备阶段构造指定 Group 与 Topic 的有效 Lag 覆盖规则。
 fn rule(group: &str, topic: &str) -> LagRuleInput {
     LagRuleInput {
         group_id: group.into(),
@@ -48,6 +52,7 @@ fn rule(group: &str, topic: &str) -> LagRuleInput {
     }
 }
 
+// 在告警仓储测试准备阶段构造指定 Group 与 Topic 的有效规则。
 fn alert_rule(group: &str, topic: &str) -> FeishuAlertRuleInput {
     FeishuAlertRuleInput {
         id: None,
@@ -60,11 +65,13 @@ fn alert_rule(group: &str, topic: &str) -> FeishuAlertRuleInput {
 }
 
 // Never format sensitive values or stringify their assertion expressions on failure.
+// 在敏感值断言阶段仅输出固定失败信息，防止诊断打印凭据。
 #[track_caller]
 fn assert_sensitive(condition: bool) {
     assert!(condition, "Feishu settings assertion failed");
 }
 
+// 验证敏感断言失败使用固定诊断，避免泄露参与比较的值。
 #[test]
 fn feishu_sensitive_assertions_use_fixed_failure_diagnostics() {
     let access_token = String::from("diagnostic-fixture-token");
@@ -81,6 +88,7 @@ fn feishu_sensitive_assertions_use_fixed_failure_diagnostics() {
 }
 
 // Public reads may expose only a suffix; persistence and internal reads retain the token.
+// 验证替换告警规则时保存 Token，但公共配置不回显 Token。
 #[tokio::test]
 async fn feishu_settings_replace_rules_without_exposing_token() {
     let access_token = "token-secret";
@@ -140,6 +148,7 @@ async fn feishu_settings_replace_rules_without_exposing_token() {
 }
 
 // Omitted/blank tokens preserve credentials, clears retain rules, and stable IDs retain creation time.
+// 验证更新保留 Token 和既有规则标识，同时刷新版本以触发工作器重建。
 #[tokio::test]
 async fn feishu_settings_preserve_tokens_and_rule_ids_but_refresh_revision() {
     let access_token = "token-secret";
@@ -201,6 +210,7 @@ async fn feishu_settings_preserve_tokens_and_rule_ids_but_refresh_revision() {
 }
 
 // A late database error must roll back the token, revision, deleted rules, and new inserts together.
+// 验证规则替换原子提交且校验标识归属，失败不能污染已有配置。
 #[tokio::test]
 async fn feishu_settings_replace_is_atomic_and_validates_rule_ownership() {
     let access_token = "token-secret";
@@ -283,6 +293,7 @@ async fn feishu_settings_replace_is_atomic_and_validates_rule_ownership() {
             .await
             .is_err(),
     );
+    // 在临时库注入第二条规则插入失败，检查事务是否连同 Token 与先前插入一起回滚。
     sqlx::query("CREATE TRIGGER reject_feishu_rule BEFORE INSERT ON feishu_alert_rules WHEN NEW.group_id = 'reject' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END").execute(&pool).await.unwrap();
     assert_sensitive(
         alerts
@@ -337,6 +348,7 @@ async fn feishu_settings_replace_is_atomic_and_validates_rule_ownership() {
 }
 
 // Direct repository callers must preserve token, rules and revision on oversized integers.
+// 验证安全整数边界，越界输入拒绝后数据库保持原样。
 #[tokio::test]
 async fn feishu_settings_enforce_safe_integer_bounds_without_mutation() {
     let access_token = "integer-boundary-saved-token";
@@ -382,6 +394,7 @@ async fn feishu_settings_enforce_safe_integer_bounds_without_mutation() {
 }
 
 // The worker sees exactly eligible clusters and enabled rules; deletion removes both tables.
+// 验证只筛选具备监控资格的集群，删除集群时级联移除告警配置。
 #[tokio::test]
 async fn feishu_settings_filter_workers_and_cascade_on_cluster_delete() {
     let access_token = "token-secret";
@@ -449,6 +462,7 @@ async fn feishu_settings_filter_workers_and_cascade_on_cluster_delete() {
 }
 
 // SQL constraints protect stored rule invariants even when inserts bypass the repository.
+// 验证迁移约束拒绝非法规则及重复 Group、Topic 组合，防止绕过应用校验。
 #[tokio::test]
 async fn feishu_settings_migration_rejects_invalid_rules_and_duplicate_pairs() {
     let (pool, clusters, _) = repositories().await;
@@ -470,6 +484,7 @@ async fn feishu_settings_migration_rejects_invalid_rules_and_duplicate_pairs() {
 }
 
 // Missing plaintext persistence or secrets leaking into public output breaks this contract.
+// 验证凭据按约定明文存储，而公共读取和调试表示仅暴露配置标志。
 #[tokio::test]
 async fn clusters_store_plaintext_secret_json_but_public_reads_only_expose_flags() {
     let (pool, clusters, _) = repositories().await;
@@ -538,6 +553,7 @@ async fn clusters_store_plaintext_secret_json_but_public_reads_only_expose_flags
     }
 }
 
+// 验证集群更新、删除与同名检查遵循仓储约定，失败保留原配置。
 #[tokio::test]
 async fn cluster_updates_delete_and_duplicate_names_preserve_repository_contract() {
     let (_, clusters, _) = repositories().await;
@@ -593,6 +609,7 @@ async fn cluster_updates_delete_and_duplicate_names_preserve_repository_contract
 }
 
 // Omitted/blank edits must retain every credential; nonempty edits replace only their field.
+// 验证省略或留空的凭据被保留，局部更新正确合并已存配置。
 #[tokio::test]
 async fn cluster_update_preserves_omitted_and_empty_secrets_and_merges_partial_edits() {
     let (_, clusters, _) = repositories().await;
@@ -675,6 +692,7 @@ async fn cluster_update_preserves_omitted_and_empty_secrets_and_merges_partial_e
 }
 
 // A zero duration means immediate eligibility; only negative durations are invalid.
+// 验证集群持续时间允许零但拒绝负数，失败更新必须保留已有配置。
 #[tokio::test]
 async fn cluster_duration_accepts_zero_and_rejects_negative_values() {
     let (_, clusters, _) = repositories().await;
@@ -697,6 +715,7 @@ async fn cluster_duration_accepts_zero_and_rejects_negative_values() {
     assert!(clusters.create(&input).await.is_err());
 }
 
+// 验证自定义规则持续时间允许零但拒绝负数，防止非法计时配置入库。
 #[tokio::test]
 async fn lag_rule_duration_accepts_zero_and_rejects_negative_values() {
     let (pool, clusters, rules) = repositories().await;
@@ -722,6 +741,7 @@ async fn lag_rule_duration_accepts_zero_and_rejects_negative_values() {
 }
 
 // Valid rules must survive both validation failures and a SQL error mid-replacement.
+// 验证 Lag 规则整批替换及组合唯一性，插入失败必须回滚原规则。
 #[tokio::test]
 async fn lag_rules_replace_atomically_and_enforce_unique_group_topic() {
     let (pool, clusters, rules) = repositories().await;
@@ -754,6 +774,7 @@ async fn lag_rules_replace_atomically_and_enforce_unique_group_topic() {
     );
     assert_eq!(rules.list(&cluster.id).await.unwrap(), before);
     assert!(sqlx::query("INSERT INTO lag_rules (id, cluster_id, group_id, topic, normal_lag_max, high_lag_min, over_limit_seconds) VALUES ('duplicate', ?, 'billing', 'orders', 10, 100, 5)").bind(&cluster.id).execute(&pool).await.unwrap_err().as_database_error().unwrap().is_unique_violation());
+    // 先安装可控失败触发器，再整批替换，验证删除旧规则与插入新规则处于同一事务。
     sqlx::query("CREATE TRIGGER reject_fixture_rule BEFORE INSERT ON lag_rules WHEN NEW.group_id = 'reject' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END").execute(&pool).await.unwrap();
     assert!(
         rules
@@ -783,6 +804,7 @@ async fn lag_rules_replace_atomically_and_enforce_unique_group_topic() {
     );
 }
 
+// 验证迁移默认阈值和外键级联删除生效，重复迁移保持可执行。
 #[tokio::test]
 async fn migration_defaults_and_foreign_key_cascade_are_applied() {
     let (pool, clusters, rules) = repositories().await;
@@ -805,6 +827,7 @@ async fn migration_defaults_and_foreign_key_cascade_are_applied() {
     db::MIGRATOR.run(&pool).await.unwrap();
 }
 
+// 验证明文连接构造器不携带凭据且使用约定的默认超时。
 #[test]
 fn plaintext_connection_config_has_no_credentials() {
     let plaintext = DecryptedClusterConfig::plaintext("broker:9092");

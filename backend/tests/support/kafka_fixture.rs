@@ -20,6 +20,7 @@ use std::{
     time::Duration,
 };
 
+// 在任何 fixture 写入前严格校验一次性授权、IPv4 回环地址与非零端口。
 pub fn validate_target(broker: &str, permit: &str) -> Result<(), &'static str> {
     let address: SocketAddr = broker
         .parse()
@@ -33,6 +34,7 @@ pub fn validate_target(broker: &str, permit: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+// 在原生客户端创建前读取并校验显式写入许可，不接受任意已有集群目标。
 fn authorized_broker() -> String {
     let broker = std::env::var("E2E_KAFKA_BROKERS").expect("missing fixture broker");
     let permit = std::env::var("E2E_KAFKA_FIXTURE_PERMIT").unwrap_or_default();
@@ -40,7 +42,9 @@ fn authorized_broker() -> String {
     broker
 }
 
+// 在授权的一次性容器准备阶段创建种子 Topic、写入消息并提交独立已知位置。
 pub async fn seed() {
+    // 必须先验证一次性写入授权，再创建原生客户端；不能把 fixture 指向已有集群。
     let broker = authorized_broker();
     let topic = "dashboard-e2e-orders";
     let mut config = ClientConfig::new();
@@ -59,6 +63,7 @@ pub async fn seed() {
         results.iter().all(Result::is_ok),
         "fixture requires a fresh Kafka container"
     );
+    // 只有确认新 Topic 创建成功后才生产消息，固定水位供只读验收独立比较。
     let producer: FutureProducer = config.create().unwrap();
     for offset in 0..10 {
         let payload = format!("fixture-{offset}");
@@ -87,6 +92,7 @@ pub async fn seed() {
     offsets
         .add_partition_offset(topic, 1, Offset::Offset(0))
         .unwrap();
+    // 提交仅属于获授权的一次性 fixture 准备，随后回读校验独立预期；产品路径不提交 Offset。
     consumer.commit(&offsets, CommitMode::Sync).unwrap();
     let committed = consumer
         .committed_offsets(offsets, Duration::from_secs(10))
@@ -122,6 +128,7 @@ struct ManagedTopic {
 }
 
 impl ManagedTopic {
+    // 创建随机唯一 Topic 成功后才激活清理 guard，禁止把已有资源纳入删除目标。
     async fn create(admin: Arc<TopicAdminClient>) -> Self {
         let name = format!("dashboard-e2e-managed-fixture-{}", uuid::Uuid::new_v4());
         admin
@@ -133,6 +140,7 @@ impl ManagedTopic {
             })
             .await
             .expect("fixture Topic creation failed");
+        // 创建成功后才持有已激活 guard，失败或既有资源绝不能成为清理目标。
         Self {
             admin,
             name,
@@ -140,17 +148,20 @@ impl ManagedTopic {
         }
     }
 
+    // 在正常验收收尾阶段等待删除成功后解除 guard，失败时仍保留兜底清理。
     async fn delete(mut self) -> String {
         self.admin
             .delete(&self.name)
             .await
             .expect("fixture Topic deletion failed");
+        // 等删除成功才解除兜底，删除失败时仍由 Drop 尝试回收本次资源。
         self.armed = false;
         self.name.clone()
     }
 }
 
 impl Drop for ManagedTopic {
+    // 在异常展开阶段同步等待独立线程删除本次成功创建的 Topic，避免遗留清理任务。
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -159,6 +170,7 @@ impl Drop for ManagedTopic {
         let name = self.name.clone();
         // Drop must also run while unwinding an async test. Join a separate
         // runtime instead of detaching cleanup or nesting block_on in Tokio.
+        // 在独立线程创建运行时并 join，兼容异步测试展开且确保清理不会脱离测试后台运行。
         let cleanup = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -176,6 +188,7 @@ impl Drop for ManagedTopic {
     }
 }
 
+// 在真实配置断言阶段按键查找 broker 返回项，缺项立即使验收失败。
 fn setting<'a>(entries: &'a [TopicConfigValue], key: &str) -> &'a TopicConfigValue {
     entries
         .iter()
@@ -183,6 +196,7 @@ fn setting<'a>(entries: &'a [TopicConfigValue], key: &str) -> &'a TopicConfigVal
         .expect("missing Kafka configuration")
 }
 
+// 在删除及异常清理后有界重读，确认异步元数据传播完成并已不可见。
 async fn assert_deleted(admin: &TopicAdminClient, name: &str) {
     for _ in 0..30 {
         if matches!(admin.describe(name).await, Err(TopicAdminError::NotFound)) {
@@ -195,7 +209,9 @@ async fn assert_deleted(admin: &TopicAdminClient, name: &str) {
 
 // Catches incorrect native result decoding, SET/DELETE semantics and accidental
 // replacement of unrelated configuration on a real, explicitly authorized broker.
+// 在授权 broker 上验证真实增量 SET、DELETE 和来源解码，且保留无关配置。
 pub async fn verify_topic_management() {
+    // 必须先验证一次性写入授权，再创建原生客户端；不能把 fixture 指向已有集群。
     let broker = authorized_broker();
     let native = ClientConfig::new()
         .set("bootstrap.servers", broker)
@@ -205,6 +221,7 @@ pub async fn verify_topic_management() {
         Arc::new(native),
         Duration::from_secs(10),
     ));
+    // 仅让本次成功创建的随机 Topic 进入 guard；不删除种子 Topic 或调用方已有资源。
     let guard = ManagedTopic::create(admin.clone()).await;
     let before = admin.describe(&guard.name).await.unwrap();
     assert_eq!(before.len(), 8);
@@ -213,6 +230,7 @@ pub async fn verify_topic_management() {
     assert_eq!(original.source, TopicConfigSource::BrokerDefault);
     assert!(!original.read_only);
     for value in [Some("3600000".to_owned()), None] {
+        // 每次修改前重新读取预期值，再增量写入并回读来源，覆盖 SET 与恢复默认两条路径。
         let current = admin.describe(&guard.name).await.unwrap();
         admin
             .update(
@@ -252,6 +270,7 @@ pub async fn verify_topic_management() {
     // leave its resource behind until the whole Compose environment is removed.
     let guard = ManagedTopic::create(admin.clone()).await;
     let abandoned = guard.name.clone();
+    // 主动模拟断言展开并等待 guard 清理后再确认删除，证明失败路径也不遗留 Topic。
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let _guard = guard;
         std::panic::resume_unwind(Box::new("synthetic fixture assertion failure"));

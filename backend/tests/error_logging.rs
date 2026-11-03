@@ -26,9 +26,11 @@ use tower::ServiceExt;
 #[derive(Clone)]
 struct LogBuffer(Arc<Mutex<Vec<u8>>>);
 impl Write for LogBuffer {
+    // 在日志捕获阶段把写入追加到共享内存，供脱敏断言检查完整日志。
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().write(bytes)
     }
+    // 满足测试内存日志写入器接口；写入已即时保存，无额外刷新工作。
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
@@ -37,6 +39,7 @@ impl Write for LogBuffer {
 #[derive(Clone)]
 struct NativeErrorFactory;
 
+// 构造带敏感上下文的原生失败，检查 API 和日志映射是否严格脱敏。
 fn native_failure() -> TopicAdminError {
     let raw =
         "never-log-native broker=never-log-broker password=never-log-password retention.ms=1234567";
@@ -49,14 +52,17 @@ fn native_failure() -> TopicAdminError {
 impl SessionClientFactory for NativeErrorFactory {
     type Client = ();
 
+    // 为日志脱敏测试返回空 fake 客户端，使请求仅经过错误映射路径。
     async fn create(&self, _: DecryptedClusterConfig) -> Result<(), SessionError> {
         Ok(())
     }
 
+    // 在创建 Topic 阶段注入含敏感上下文的原生失败，检查日志过滤。
     async fn create_topic(&self, _: &mut (), _: &CreateTopicInput) -> Result<(), TopicAdminError> {
         Err(native_failure())
     }
 
+    // 在读取配置阶段注入原生失败，检查对应操作上下文与脱敏。
     async fn describe_topic_configs(
         &self,
         _: &mut (),
@@ -65,6 +71,7 @@ impl SessionClientFactory for NativeErrorFactory {
         Err(native_failure())
     }
 
+    // 在更新配置阶段注入原生失败，防止修改路径绕过安全映射。
     async fn update_topic_configs(
         &self,
         _: &mut (),
@@ -74,12 +81,14 @@ impl SessionClientFactory for NativeErrorFactory {
         Err(native_failure())
     }
 
+    // 在删除阶段注入原生失败，检查高风险操作同样只输出安全诊断。
     async fn delete_topic(&self, _: &mut (), _: &str) -> Result<(), TopicAdminError> {
         Err(native_failure())
     }
 }
 
 // Administration errors must correlate to the cluster without recording native text or payloads.
+// 验证所有 Topic 失败只记录稳定请求上下文，避免原生错误及凭据进入日志。
 #[tokio::test]
 async fn topic_failures_log_only_stable_context_on_every_route() {
     let sessions = SessionManager::new(Duration::from_secs(15), NativeErrorFactory);
@@ -100,11 +109,13 @@ async fn topic_failures_log_only_stable_context_on_every_route() {
     let session = created["sessionId"].as_str().unwrap();
     let logs = LogBuffer(Arc::new(Mutex::new(Vec::new())));
     let writer = logs.clone();
+    // 先安装内存日志收集器再执行失败请求，才能同时检查响应和关联日志的脱敏边界。
     let subscriber = tracing_subscriber::fmt()
         .without_time()
         .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
+    // 在失败请求执行前绑定当前测试日志收集器，保留 guard 直到日志断言结束。
     let _guard = tracing::subscriber::set_default(subscriber);
     let base = format!("/api/sessions/{session}/topics");
     for (method, path, payload, route) in [
@@ -133,6 +144,7 @@ async fn topic_failures_log_only_stable_context_on_every_route() {
             "/api/sessions/{id}/topics/{topic}",
         ),
     ] {
+        // 每条路由前清空上一条日志，避免错误地用其他请求的关联上下文通过断言。
         logs.0.lock().unwrap().clear();
         let response = app
             .clone()
@@ -189,6 +201,7 @@ async fn topic_failures_log_only_stable_context_on_every_route() {
 }
 
 // Logging before middleware context is available loses correlation and cluster identity.
+// 验证失败日志保留请求、集群和操作标识，但不包含秘密或查询字符串。
 #[tokio::test]
 async fn failed_requests_log_request_cluster_operation_without_secrets_or_query() {
     let test = test_app().await;
@@ -200,6 +213,7 @@ async fn failed_requests_log_request_cluster_operation_without_secrets_or_query(
         .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
+    // 在失败请求执行前绑定当前测试日志收集器，保留 guard 直到日志断言结束。
     let _guard = tracing::subscriber::set_default(subscriber);
     let response = test
         .app

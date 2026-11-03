@@ -23,9 +23,11 @@ use tower::ServiceExt;
 struct Factory(Arc<Mutex<Vec<DecryptedClusterConfig>>>);
 impl SessionClientFactory for Factory {
     type Client = ();
+    // 若草稿测试误走监控会话创建路径立即失败，防止保存或测试意外保持连接。
     async fn create(&self, _: DecryptedClusterConfig) -> Result<(), SessionError> {
         panic!("draft testing must not create a monitoring session")
     }
+    // 在草稿连接测试阶段记录最终合并配置并返回固定摘要，不建立真实 Kafka 连接。
     async fn test_connection(
         &self,
         config: DecryptedClusterConfig,
@@ -39,6 +41,7 @@ impl SessionClientFactory for Factory {
     }
 }
 
+// 为草稿 API 测试注入可记录连接输入的工厂，隔离持久化与原生连接副作用。
 async fn app() -> (TestApp, Factory) {
     let factory = Factory::default();
     let pool = db::connect("sqlite::memory:").await.unwrap();
@@ -57,6 +60,7 @@ async fn app() -> (TestApp, Factory) {
     )
 }
 
+// 在草稿测试准备阶段构造完整安全连接输入，检查敏感字段合并与清除。
 fn secure(name: &str) -> Value {
     json!({
         "name": name, "bootstrapServers": "127.0.0.1:1", "securityProtocol": "SASL_SSL",
@@ -67,6 +71,7 @@ fn secure(name: &str) -> Value {
 }
 
 // A new draft uses the submitted connection settings and never creates a saved cluster.
+// 验证新草稿通过管理器测试提交的连接配置，且不保存集群或创建监控会话。
 #[tokio::test]
 async fn new_draft_test_is_manager_owned_and_does_not_persist() {
     let (ctx, factory) = app().await;
@@ -93,6 +98,7 @@ async fn new_draft_test_is_manager_owned_and_does_not_persist() {
 }
 
 // Unsaved edits must change the test destination while omitted credentials reuse saved values.
+// 验证编辑草稿使用新目标并复用省略的凭据，同时不改变已存配置。
 #[tokio::test]
 async fn existing_draft_merges_secrets_and_keeps_saved_configuration_unchanged() {
     let (ctx, factory) = app().await;
@@ -143,6 +149,7 @@ async fn existing_draft_merges_secrets_and_keeps_saved_configuration_unchanged()
 }
 
 // Draft clear flags affect only the test; saved secrets survive and are used by a bodyless test.
+// 验证草稿清除只影响本次测试，无正文调用仍复用已存凭据。
 #[tokio::test]
 async fn draft_clear_is_temporary_and_bodyless_test_retains_compatibility() {
     let (ctx, factory) = app().await;
@@ -181,6 +188,7 @@ async fn draft_clear_is_temporary_and_bodyless_test_retains_compatibility() {
 }
 
 // Invalid drafts must fail before native work, and missing IDs must not fall back to new drafts.
+// 验证非法草稿在原生工作前拒绝，未知标识也不能降级为新草稿。
 #[tokio::test]
 async fn invalid_drafts_are_rejected_without_tests_or_storage_changes() {
     let (ctx, factory) = app().await;
@@ -219,6 +227,7 @@ async fn invalid_drafts_are_rejected_without_tests_or_storage_changes() {
 }
 
 // Simple cross-origin bodies must not redirect a saved secret to an arbitrary broker.
+// 验证非 JSON 请求不能复用已存秘密向任意 broker 发起连接，防止跨源简单请求绕过。
 #[tokio::test]
 async fn draft_requires_json_content_type_before_reusing_saved_secrets() {
     let (ctx, factory) = app().await;
@@ -262,6 +271,7 @@ async fn draft_requires_json_content_type_before_reusing_saved_secrets() {
 }
 
 // The security check must retain standard JSON media types and legacy empty-body calls.
+// 验证安全媒体类型检查保留标准 JSON 类型及旧版空正文调用兼容性。
 #[tokio::test]
 async fn draft_accepts_json_media_types_and_empty_body_without_content_type() {
     let (ctx, factory) = app().await;
