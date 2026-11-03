@@ -1,8 +1,12 @@
 import type { ClusterSnapshot } from '../../api/types'
 
+// 生成 Topic 陈旧标记时编码资源身份，避免名称分隔符造成键冲突。
 export const topicDisplayKey = (topic: string) => JSON.stringify(['topic', topic])
+// 生成 Topic 分区陈旧标记时组合名称与分区编号。
 export const topicPartitionDisplayKey = (topic: string, partition: number) => JSON.stringify(['topic', topic, partition])
+// 生成消费组与 Topic 关联行的陈旧标记时组合两个身份。
 export const groupDisplayKey = (group: string, topic: string) => JSON.stringify(['group', group, topic])
+// 生成消费组分区陈旧标记时组合消费组、Topic 与分区编号。
 export const groupPartitionDisplayKey = (group: string, topic: string, partition: number) => JSON.stringify(['group', group, topic, partition])
 export interface DisplaySnapshot { snapshot: ClusterSnapshot; staleResources: Record<string, string> }
 export interface MonitorDisplay {
@@ -10,27 +14,35 @@ export interface MonitorDisplay {
   staleResources?: Record<string, string>
 }
 
-/** Presentation only. Never feed retained values into history or lag evaluation. */
+/** 新快照到达时仅为展示保留采集失败的旧资源；保留值不得进入历史或 Lag 判定。 */
 export function retainDisplaySnapshot(current: ClusterSnapshot, previous?: DisplaySnapshot): DisplaySnapshot {
   if (!previous || previous.snapshot.clusterId !== current.clusterId) return { snapshot: current, staleResources: {} }
   const before = previous.snapshot
   const staleResources: Record<string, string> = {}
+  // 合并快照时匹配采集失败范围与资源名，确定是否允许保留旧值。
   const fails = (scope: string, resources: string[]) => current.partialFailures.some(failure => failure.scope === scope && resources.includes(failure.resource))
+  // 合并 Topic 时判断该 Topic 或整个发现阶段是否失败。
   const topicFailed = (topic: string) => fails('topics', [current.clusterId, 'cluster', topic])
+  // 合并消费组时识别具体组、集群及未知组发现失败。
   const groupFailed = (group: string) => fails('groups', [current.clusterId, 'cluster', 'unknown', group])
+  // 合并分区时汇总 Topic 发现及水位、元数据失败，判断旧水位是否可展示。
   const watermarkFailed = (topic: string, partition: number) => topicFailed(topic)
     || ['watermark', 'metadata', 'topics'].some(scope => fails(scope, [`${topic}:${partition}`]))
+  // 合并消费分区时结合发现、水位与提交位置失败，判断旧 Lag 是否可展示。
   const committedFailed = (group: string, topic: string, partition: number) => groupFailed(group)
     || watermarkFailed(topic, partition) || fails('committed', [group, `${group}/${topic}:${partition}`])
+  // 采用旧资源时延续首次陈旧时间，避免连续失败把保留值伪装成新采样。
   const retain = (key: string) => {
     const at = previous.staleResources[key] ?? before.collectedAt
     staleResources[key] = at
     return at
   }
+  // 子分区合并后将最早陈旧时间传播到父行，提示汇总含有保留值。
   const parentTime = (key: string, childKeys: string[]) => {
     const times = childKeys.flatMap(child => staleResources[child] ? [staleResources[child]] : [])
     if (times.length) staleResources[key] = times.sort()[0]
   }
+  // 合并当前与旧资源列表时，仅补回明确由失败遮蔽且当前缺失的资源。
   function merge<T>(now: T[], old: T[], key: (value: T) => string | number, retainMissing: (value: T) => boolean) {
     return [...now, ...old.filter(item => !now.some(value => key(value) === key(item)) && retainMissing(item))]
   }
@@ -55,8 +67,7 @@ export function retainDisplaySnapshot(current: ClusterSnapshot, previous?: Displ
       const groupUnknown = groupFailed(row.groupId), topicUnknown = topicFailed(row.topic)
       const associationUnknown = fails('committed', [row.groupId,
         ...row.partitions.map(partition => `${row.groupId}/${row.topic}:${partition.partition}`)])
-      // Failure in one discovery dimension cannot revive a resource deleted in the other.
-      // A failed committed read may also hide a previously known inactive-group association.
+      // 单一发现维度失败不能复活另一维度已确认删除的资源；提交读取失败也可能遮蔽已知非活跃组关联。
       return (groupUnknown || topicUnknown || associationUnknown)
         && (currentGroups.has(row.groupId) || groupUnknown)
         && (currentTopics.has(row.topic) || topicUnknown)

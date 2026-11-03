@@ -7,7 +7,9 @@ import { TopicsPage } from '../features/topics/TopicsPage'
 import { ConsumerGroupsPage } from '../features/consumer-groups/ConsumerGroupsPage'
 import { OverviewPage } from '../features/overview/OverviewPage'
 
+// 应用根节点渲染时建立稳定查询上下文、导航与页面路由，监控页面共享仪表盘布局。
 function App() {
+  // 首次挂载时创建查询客户端，后续重渲染复用缓存，失败重连由页面显式处理。
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
   return (
     <QueryClientProvider client={client}><BrowserRouter>

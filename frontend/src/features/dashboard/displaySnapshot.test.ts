@@ -12,8 +12,10 @@ const complete: ClusterSnapshot = {
     { partition: 0, high: 100, committedOffset: 50, lag: 50 }, { partition: 1, high: 100, committedOffset: 50, lag: 50 },
   ] }],
 }
+// 展示保留用例构造指定范围和资源的安全失败记录，用于验证精确保留边界。
 const failure = (scope: string, resource: string) => ({ scope, resource, code: 'KAFKA_TIMEOUT', message: 'timeout' })
 
+// 验证发现失败时保留缺失资源，连续失败不会刷新原始成功采集时间。
 it.each(['topics', 'groups'])('retains rows lost to %s discovery and preserves their original successful time across repeated failures', scope => {
   const prior = retainDisplaySnapshot(complete)
   const raw = { ...complete, collectedAt: '2026-10-15T00:00:05Z', consumerGroups: [],
@@ -30,6 +32,7 @@ it.each(['topics', 'groups'])('retains rows lost to %s discovery and preserves t
   expect(retainDisplaySnapshot(complete, display).staleResources).toEqual({})
 })
 
+// 验证另一发现维度已确认缺失时删除旧关联，防止失败维度复活已删除资源。
 it.each(['topics', 'groups'])('drops old group/topic rows when %s fails but the other discovery successfully confirms absence', scope => {
   const raw: ClusterSnapshot = { ...complete, collectedAt: '2026-10-15T00:00:05Z', topics: [], consumerGroupIds: [], consumerGroups: [],
     partialFailures: [failure(scope, 'a')] }
@@ -40,6 +43,7 @@ it.each(['topics', 'groups'])('drops old group/topic rows when %s fails but the 
   expect(display.snapshot.consumerGroupIds).toEqual(scope === 'groups' ? ['worker'] : [])
 })
 
+// 验证发现失败仅保留另一维度仍存在的关联，保持消费组身份一致性。
 it.each(['topics', 'groups'])('retains only rows whose other dimension still exists during %s discovery failure', scope => {
   const prior: ClusterSnapshot = { ...complete, consumerGroupIds: ['worker', 'deleted-group'],
     topics: [...complete.topics, { ...complete.topics[0], topic: 'deleted-topic' }],
@@ -59,6 +63,7 @@ it.each(['topics', 'groups'])('retains only rows whose other dimension still exi
   expect(display.snapshot.consumerGroups.every(row => display.snapshot.consumerGroupIds.includes(row.groupId))).toBe(true)
 })
 
+// 验证提交位置失败仅保留受影响分区，健康值与原始未知状态保持独立。
 it('retains failed committed positions while preserving healthy current partitions and raw unknowns', () => {
   const raw: ClusterSnapshot = { ...complete, collectedAt: '2026-10-15T00:00:05Z', partialFailures: [failure('committed', 'worker/orders:0')],
     consumerGroups: [{ ...complete.consumerGroups[0], lag: 20, incomplete: true, unknownPartitionCount: 1, partitions: [
@@ -73,6 +78,7 @@ it('retains failed committed positions while preserving healthy current partitio
   expect(raw.consumerGroups[0].partitions[0].committedOffset).toBeNull()
 })
 
+// 验证水位失败可同时保留 Topic 和消费组展示，但不会覆盖当前已知汇总。
 it('retains a failed partition watermark in topic and consumer displays without replacing current known totals', () => {
   const raw: ClusterSnapshot = { ...complete, collectedAt: '2026-10-15T00:00:05Z', partialFailures: [failure('watermark', 'orders:0')],
     topics: [{ ...complete.topics[0], low: 10, latestMessageOffset: 109, retainedOffsetSpan: 100, incomplete: true, partitions: [
@@ -90,12 +96,14 @@ it('retains a failed partition watermark in topic and consumer displays without 
   expect(raw.consumerGroups[0].lag).toBe(20)
 })
 
+// 验证成功发现确认删除后清理旧行，切换集群时也不保留旧资源。
 it('drops previous rows after successful discovery confirms deletion and isolates clusters', () => {
   const empty = { ...complete, topics: [], consumerGroupIds: [], consumerGroups: [] }
   expect(retainDisplaySnapshot(empty, retainDisplaySnapshot(complete)).snapshot.consumerGroups).toEqual([])
   expect(retainDisplaySnapshot({ ...empty, clusterId: 'b', partialFailures: [failure('topics', 'b')] }, retainDisplaySnapshot(complete)).snapshot.topics).toEqual([])
 })
 
+// 验证以消费组资源标识报告的整组提交失败仍能保留旧分区展示。
 it('retains whole-group committed failures using the collector group resource form', () => {
   const raw: ClusterSnapshot = { ...complete, collectedAt: '2026-10-15T00:00:05Z', partialFailures: [failure('committed', 'worker')],
     consumerGroups: [{ ...complete.consumerGroups[0], lag: 0, incomplete: true, unknownPartitionCount: 2,
@@ -106,6 +114,7 @@ it('retains whole-group committed failures using the collector group resource fo
   expect(raw.consumerGroups[0].lag).toBe(0)
 })
 
+// 验证提交读取失败遮蔽关联时保留展示与首次时间，原始历史仍保持缺失。
 it.each(['worker', 'worker/orders:0'])('retains previously associated rows missing after committed failure %s without filling raw history', resource => {
   const raw: ClusterSnapshot = { ...complete, collectedAt: '2026-10-15T00:00:05Z', consumerGroups: [],
     partialFailures: [failure('committed', resource)] }
@@ -121,6 +130,7 @@ it.each(['worker', 'worker/orders:0'])('retains previously associated rows missi
   expect(retainDisplaySnapshot(complete, display).staleResources).toEqual({})
 })
 
+// 验证关联已确认缺失、健康或只有无关失败时不会复活旧行。
 it.each(['group', 'topic', 'unrelated failure', 'no failure'])('does not revive an association after %s confirms it is absent or healthy', reason => {
   const raw: ClusterSnapshot = { ...complete, consumerGroups: [],
     consumerGroupIds: reason === 'group' ? [] : complete.consumerGroupIds,

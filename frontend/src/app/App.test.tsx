@@ -5,11 +5,13 @@ import { clustersApi, lagRulesApi, sessionsApi } from '../api/client'
 import { clusterFixture, rulesFixture, snapshotFixture } from '../test/handlers'
 import type { ClusterSnapshot } from '../api/types'
 
-// Canvas rendering is covered by the chart lifecycle test; jsdom has no canvas context.
-vi.mock('echarts/core', () => ({ init: () => ({ setOption() {}, resize() {}, dispose() {} }), use() {} }))
+// 路由测试无画布上下文，图表替身只承接调用，图表生命周期由专属用例覆盖。
+vi.mock('echarts/core', () => ({ /* 页面创建图表时返回无绘制替身。 */ init: () => ({ /* 图表更新时接收配置，避免访问画布。 */ setOption() {}, /* 容器变化时接收尺寸同步调用。 */ resize() {}, /* 图表卸载时接收释放调用。 */ dispose() {} }), /* 模块加载时接收图表插件注册。 */ use() {} }))
 
+// 每个路由用例结束后恢复替身并返回根路径，避免下个用例继承导航位置。
 afterEach(() => { vi.restoreAllMocks(); window.history.replaceState({}, '', '/') })
 
+// 验证应用导航与监控管理文案完整，避免仍显示已失效的只读模式。
 it('renders the dashboard navigation', () => {
   vi.spyOn(clustersApi, 'list').mockResolvedValue([])
   render(<App />)
@@ -24,6 +26,7 @@ it('renders the dashboard navigation', () => {
   expect(screen.getByText('集群设置')).toBeInTheDocument()
 })
 
+// 验证进入设置会释放监控会话，直接打开设置也不会额外建立连接。
 it('opens settings without retaining a dashboard session and supports direct settings entry', async () => {
   const closed: string[] = []
   vi.spyOn(clustersApi, 'list').mockResolvedValue([clusterFixture])
@@ -42,6 +45,7 @@ it('opens settings without retaining a dashboard session and supports direct set
   expect(sessionsApi.create).not.toHaveBeenCalled()
 })
 
+// 验证 Consumer Groups 路由消费真实快照行，避免页面与布局上下文断开。
 it('opens the Consumer Groups route with real snapshot rows', async () => {
   window.history.replaceState({}, '', '/consumer-groups')
   vi.spyOn(clustersApi, 'list').mockResolvedValue([clusterFixture])
@@ -54,7 +58,8 @@ it('opens the Consumer Groups route with real snapshot rows', async () => {
   expect(screen.getByRole('row', { name: /audit-worker.*audit-log/ })).toBeInTheDocument()
 })
 
-// Catches lag state being owned by a route that unmounts while the monitoring session remains live.
+// 防止持续连接期间将 Lag 状态放在会卸载的子路由中，造成页面切换后丢失累计时间。
+// 验证跨 Topics 路由仍保持 Lag 持续时间与趋势，且不会重复累计保留样本。
 it('preserves lag duration and trend across Topics navigation without replaying retained samples', async () => {
   window.history.replaceState({}, '', '/consumer-groups')
   vi.spyOn(clustersApi, 'list').mockResolvedValue([clusterFixture])
@@ -69,8 +74,10 @@ it('preserves lag duration and trend across Topics navigation without replaying 
       partitions: [{ partition: 0, high: 10000, committedOffset: 10000 - lag, lag }] }],
   }))
   render(<App />)
+  // 断言消费组状态时定位当前行，避免路由切换后继续引用旧 DOM。
   const dataRow = () => screen.getByRole('row', { name: /busy-worker/ })
   await screen.findByRole('table', { name: 'Consumer Groups 汇总' })
+  // 趋势用例推进模拟时间与 Lag 后手动刷新，并等待本次快照和按钮状态更新。
   const refresh = async (nextSeconds: number, nextLag: number) => {
     seconds = nextSeconds; lag = nextLag
     fireEvent.click(screen.getByRole('button', { name: '手动刷新' }))
@@ -86,7 +93,7 @@ it('preserves lag duration and trend across Topics navigation without replaying 
   await refresh(30, 7000)
   expect(within(dataRow()).getByText('高 Lag')).toBeInTheDocument()
   fireEvent.click(screen.getByRole('link', { name: 'Topics' }))
-  // Collection continues on Topics; the duration gate remains satisfied after a change of range.
+  // Topics 页面仍持续采集，跨 Lag 区间变化后持续时长门槛仍应满足。
   await refresh(40, 2000)
   fireEvent.click(screen.getByRole('link', { name: 'Consumer Groups' }))
   expect(within(dataRow()).getByText('积压')).toBeInTheDocument()
@@ -97,6 +104,7 @@ it('preserves lag duration and trend across Topics navigation without replaying 
   expect(within(dataRow()).getByLabelText('Lag 下降')).toBeInTheDocument()
 })
 
+// 验证多路由共享失败资源的展示保留值，同时汇总、历史和计时始终使用原始样本。
 it('retains failed resource display values across overview, topics and groups while using raw samples for totals and timing', async () => {
   const complete: ClusterSnapshot = { clusterId: 'cluster-a', collectedAt: new Date().toISOString(), partialFailures: [], consumerGroupIds: ['worker'],
     topics: [{ topic: 'orders', low: 0, latestMessageOffset: 99, retainedOffsetSpan: 200, incomplete: false, partitions: [
@@ -114,12 +122,14 @@ it('retains failed resource display values across overview, topics and groups wh
   vi.spyOn(sessionsApi, 'snapshot').mockImplementation(async () => sample)
   render(<App />)
   await screen.findByText('暂无异常 Consumer Groups。')
+  // 展示保留用例切换原始样本后手动采集，等待新时间被接纳。
   const collect = async (next: ClusterSnapshot) => {
     sample = next
     fireEvent.click(screen.getByRole('button', { name: '手动刷新' }))
     await waitFor(() => expect(screen.getByLabelText('最后更新时间')).toHaveAttribute('datetime', next.collectedAt))
     await waitFor(() => expect(screen.getByRole('button', { name: '手动刷新' })).toBeEnabled())
   }
+  // 构造连续采样用例时基于首个快照生成指定秒数后的采集时间。
   const at = (seconds: number) => new Date(Date.parse(complete.collectedAt) + seconds * 1000).toISOString()
   await collect({ ...complete, collectedAt: at(10), partialFailures: [{ scope: 'committed', resource: 'worker/orders:0', code: 'KAFKA_TIMEOUT', message: 'timeout' }],
     consumerGroups: [{ ...complete.consumerGroups[0], lag: 20, incomplete: true, unknownPartitionCount: 1, partitions: [

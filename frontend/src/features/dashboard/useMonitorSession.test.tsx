@@ -12,11 +12,14 @@ let created: string[]
 let closed: string[]
 let collected: string[]
 let clock: number
+// 每次 Hook 测试挂载时建立稳定且独立的查询客户端，隔离缓存与重试状态。
 function Wrapper({ children }: { children: ReactNode }) {
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>
 }
+// 异步状态断言前推进最小计时步长，等待查询通知与 React 更新完成。
 async function flush() { await act(async () => { await vi.advanceTimersByTimeAsync(1) }) }
+// 隐藏或恢复场景中派发真实可见性事件，再等待 Hook 处理查询取消或恢复。
 async function visibility(value: DocumentVisibilityState) {
   await act(async () => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value })
@@ -24,6 +27,7 @@ async function visibility(value: DocumentVisibilityState) {
   })
   await flush()
 }
+// 各用例前重置可见性、时钟和会话替身，确保生命周期场景相互隔离。
 beforeEach(() => {
   vi.useFakeTimers()
   sequence = 0; clock = 0; created = []; closed = []; collected = []
@@ -38,16 +42,16 @@ beforeEach(() => {
     return { ...snapshotFixture, collectedAt: new Date(clock++ * 1000).toISOString() }
   })
 })
+// 每个会话用例结束时先卸载 Hook 并等待关闭队列，再恢复替身和真实计时器。
 afterEach(async () => {
-  // Vitest runs this file's teardown before setup.ts's automatic cleanup.
-  // Release hooks while the API fakes still own their resources, then await the
-  // page-wide queue before restoring fetch clients or starting the next test.
+  // 本文件清理先于自动卸载执行，须在 API 替身仍有效时卸载 Hook，再等待页面级关闭队列后恢复客户端。
   cleanup()
   await sessionTransition(async () => {})
   vi.restoreAllMocks()
   vi.useRealTimers()
 })
 
+// 验证会话标识必须等自身首个快照成功后公开，切换或停用立即撤回标识。
 it('exposes only the current lease after its first accepted snapshot and clears it on switching or disabling', async () => {
   let finish!: (value: typeof snapshotFixture) => void
   vi.mocked(sessionsApi.snapshot).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
@@ -67,6 +71,7 @@ it('exposes only the current lease after its first accepted snapshot and clears 
   expect(result.current.sessionId).toBeUndefined()
 })
 
+// 验证隐藏、页面离开及采样失败期间不向管理操作暴露会话标识。
 it('withholds session IDs while hidden, after pagehide, and after a sampling failure', async () => {
   vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }))
   const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
@@ -88,6 +93,7 @@ it('withholds session IDs while hidden, after pagehide, and after a sampling fai
   expect(result.current.sessionId).toBeUndefined()
 })
 
+// 验证失效后替换的租约必须完成自己的快照后才能用于管理。
 it('withholds a replacement lease until its own snapshot succeeds', async () => {
   const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
   await flush()
@@ -103,6 +109,7 @@ it('withholds a replacement lease until its own snapshot succeeds', async () => 
   expect(result.current.sessionId).toBe('a-2')
 })
 
+// 验证下次快照一直等待时，到期会话标识仍会按时撤回。
 it('withdraws an expired ID even when the next snapshot remains pending', async () => {
   const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
   await flush()
@@ -113,9 +120,11 @@ it('withdraws an expired ID even when the next snapshot remains pending', async 
   expect(result.current.status).toBe('connecting')
 })
 
+// 验证初次或刷新请求迟到时不能延长已失效租约。
 it.each(['initial', 'refresh'] as const)('does not reactivate a lease from a late %s snapshot response', async phase => {
   vi.setSystemTime(0)
   let finish!: (value: typeof snapshotFixture) => void
+  // 迟到响应场景先挂起快照并暴露完成入口，由测试选择返回时机。
   const pending = () => new Promise<typeof snapshotFixture>(resolve => { finish = resolve })
   if (phase === 'initial') vi.mocked(sessionsApi.snapshot).mockImplementationOnce(pending)
   const { result, rerender } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
@@ -135,6 +144,7 @@ it.each(['initial', 'refresh'] as const)('does not reactivate a lease from a lat
   expect(result.current.status).toBe('connecting')
 })
 
+// 验证忙碌响应晚于旧到期检查时仍会重新安排续租后的到期检查。
 it('rearms expiry after a busy reply arrives after the previous expiry timer has stopped', async () => {
   vi.setSystemTime(0)
   const { result, rerender } = renderHook(({ interval }) => useMonitorSession('a', interval), {
@@ -160,6 +170,7 @@ it('rearms expiry after a busy reply arrives after the previous expiry timer has
   expect(result.current.status).toBe('connecting')
 })
 
+// 验证三种刷新频率均按周期采集，变更频率保留历史且卸载会关闭会话。
 it.each([3, 5, 10] as const)('collects at %ss without clearing history when cadence changes', async seconds => {
   const { result, rerender, unmount } = renderHook(({ interval }) => useMonitorSession('a', interval), { wrapper: Wrapper, initialProps: { interval: seconds } })
   await flush()
@@ -174,6 +185,7 @@ it.each([3, 5, 10] as const)('collects at %ss without clearing history when cade
   expect(closed).toEqual(['a-1'])
 })
 
+// 验证隐藏时暂停采集并重置连续性，可见后立即恢复有效会话。
 it('pauses hidden pages, immediately resumes a valid session, and resets continuity', async () => {
   const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
   await flush()
@@ -189,6 +201,7 @@ it('pauses hidden pages, immediately resumes a valid session, and resets continu
   expect(result.current.history).toHaveLength(2)
 })
 
+// 验证初始隐藏或停用时不会创建会话，恢复可见仍尊重停用状态。
 it('never creates a session when mounted hidden or disabled', async () => {
   await visibility('hidden')
   const { rerender } = renderHook(({ active }) => useMonitorSession('a', 3, active), { wrapper: Wrapper, initialProps: { active: true } })
@@ -199,6 +212,7 @@ it('never creates a session when mounted hidden or disabled', async () => {
   expect(created).toEqual([])
 })
 
+// 验证隐藏超出租期后重建连接，并以服务端采集时间淘汰旧历史。
 it('rebuilds an expired lease after hiding and retains server-time history', async () => {
   const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
   await flush()
@@ -211,6 +225,7 @@ it('rebuilds an expired lease after hiding and retains server-time history', asy
   expect(result.current.history.map(item => item.at)).toEqual([3_602_000])
 })
 
+// 验证会话失效只自动重建一次，再失败后必须显式重连。
 it('rebuilds once on SESSION_EXPIRED then stops errors until explicit reconnect', async () => {
   const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
   await flush()
@@ -229,6 +244,7 @@ it('rebuilds once on SESSION_EXPIRED then stops errors until explicit reconnect'
   expect(result.current.history).toHaveLength(2)
 })
 
+// 验证切换集群立即隔离快照与历史，并在切换和卸载时释放各自会话。
 it('releases old sessions and clears current cluster state when switching', async () => {
   const { result, rerender, unmount } = renderHook(({ cluster }) => useMonitorSession(cluster, 3), { wrapper: Wrapper, initialProps: { cluster: 'a' } })
   await flush()
@@ -242,6 +258,7 @@ it('releases old sessions and clears current cluster state when switching', asyn
   expect(closed).toContain('b-2')
 })
 
+// 验证跨组件挂载创建新会话前必须等旧 DELETE 完成，避免原生资源重叠。
 it('waits for the previous mount DELETE to finish before creating another cluster session', async () => {
   let finishClose!: () => void
   vi.mocked(sessionsApi.close).mockImplementation(async id => {
@@ -266,6 +283,7 @@ it('waits for the previous mount DELETE to finish before creating another cluste
   second.unmount()
 })
 
+// 验证跨挂载的废弃创建及其关闭全部结束后，才创建新集群会话。
 it('waits for an abandoned in-flight creation and its DELETE across mounts', async () => {
   let finishCreate!: (value: { sessionId: string; leaseSeconds: number }) => void
   let finishClose!: () => void
@@ -289,6 +307,7 @@ it('waits for an abandoned in-flight creation and its DELETE across mounts', asy
   second.unmount()
 })
 
+// 验证慢采集与轮询、连续手动刷新不产生重叠请求。
 it('does not overlap slow snapshots with polling or manual refresh', async () => {
   let finish!: (value: typeof snapshotFixture) => void
   vi.mocked(sessionsApi.snapshot).mockImplementation(id => {
@@ -304,6 +323,7 @@ it('does not overlap slow snapshots with polling or manual refresh', async () =>
   expect(result.current.history).toHaveLength(1)
 })
 
+// 验证卸载后才完成创建的会话会立即释放，且不会采样。
 it('releases a session whose creation finishes after unmount', async () => {
   let finish!: (value: { sessionId: string; leaseSeconds: number }) => void
   vi.mocked(sessionsApi.create).mockImplementation(() => new Promise(resolve => { finish = resolve }))
@@ -314,6 +334,7 @@ it('releases a session whose creation finishes after unmount', async () => {
   expect(collected).toEqual([])
 })
 
+// 验证 pagehide 通过 keepalive 关闭会话，离开后持续停止采样。
 it('releases its session with keepalive on pagehide and stays stopped', async () => {
   const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }))
   renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
@@ -324,6 +345,7 @@ it('releases its session with keepalive on pagehide and stays stopped', async ()
   expect(collected).toEqual(['a-1'])
 })
 
+// 验证 pagehide 后才创建完成的会话不会被接纳或采样。
 it('does not retain or collect a session created after pagehide', async () => {
   let finish!: (value: { sessionId: string; leaseSeconds: number }) => void
   vi.mocked(sessionsApi.create).mockImplementation(() => new Promise(resolve => { finish = resolve }))
@@ -335,6 +357,7 @@ it('does not retain or collect a session created after pagehide', async () => {
   expect(collected).toEqual([])
 })
 
+// 验证历史保留原始未知分区值与部分失败，避免转为伪造零值。
 it('keeps unknown partition values and partial failures unchanged in history', async () => {
   const partial = { ...snapshotFixture, partialFailures: [{ scope: 'watermark', resource: 'topic:0', code: 'TIMEOUT', message: 'timeout' }] }
   vi.mocked(sessionsApi.snapshot).mockResolvedValue(partial)
@@ -345,6 +368,7 @@ it('keeps unknown partition values and partial failures unchanged in history', a
   expect(result.current.history[0].snapshot.partialFailures).toEqual(partial.partialFailures)
 })
 
+// 验证 HTTP 200 全量失败会断连，但不覆盖上次成功快照和历史。
 it('treats a collector HTTP 200 full-failure response as disconnected without replacing successful data or history', async () => {
   const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
   await flush()
@@ -365,6 +389,7 @@ it('treats a collector HTTP 200 full-failure response as disconnected without re
   expect(result.current.history.map(sample => sample.at)).toEqual([0, 2000])
 })
 
+// 验证普通错误停止自动尝试，隐藏时屏蔽手动操作，显式重连才恢复。
 it('stops non-expiry errors, blocks hidden manual refresh, and reconnects explicitly', async () => {
   vi.mocked(sessionsApi.snapshot).mockRejectedValueOnce(new ApiError(503, { code: 'KAFKA_ERROR', message: 'unavailable' }))
   const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
@@ -383,7 +408,9 @@ it('stops non-expiry errors, blocks hidden manual refresh, and reconnects explic
   expect(result.current.status).toBe('connected')
 })
 
+// 验证严格模式回放生命周期不会泄漏会话或重复采样。
 it('survives React StrictMode effect replay without leaking or double collecting', async () => {
+  // 严格模式风险用例渲染时回放挂载清理，验证会话不会泄漏或重复采集。
   function StrictWrapper({ children }: { children: ReactNode }) {
     return <StrictMode><Wrapper>{children}</Wrapper></StrictMode>
   }
@@ -395,6 +422,7 @@ it('survives React StrictMode effect replay without leaking or double collecting
   expect(closed).toEqual(created)
 })
 
+// 验证重建期间保留上次快照供展示，但连接状态必须体现尚未就绪。
 it('retains the last snapshot but marks it disconnected while rebuilding', async () => {
   const { result } = renderHook(() => useMonitorSession('a', 3), { wrapper: Wrapper })
   await flush()
@@ -410,6 +438,7 @@ it('retains the last snapshot but marks it disconnected while rebuilding', async
   expect(result.current.history).toHaveLength(2)
 })
 
+// 验证隐藏取消仅终止 HTTP 后，恢复会话会退避等待服务端原生采集结束且不重叠。
 it('backs off on a server collection still running after hidden cancellation and resumes the same session', async () => {
   let serverBusy = false
   let finishCollection!: () => void
@@ -424,6 +453,7 @@ it('backs off on a server collection still running after hidden cancellation and
     maxCollections = Math.max(maxCollections, activeCollections)
     if (requests === 2) {
       serverBusy = true
+      // 模拟原生采集真正结束时释放服务端忙碌标志，而非在 HTTP 被取消时提前释放。
       finishCollection = () => { serverBusy = false; activeCollections-- }
       // Abort ends only the HTTP request; the simulated server collection stays busy.
       await new Promise<never>((_, reject) => signal!.addEventListener('abort',
@@ -459,6 +489,7 @@ it('backs off on a server collection still running after hidden cancellation and
   expect(requests).toBe(5)
 })
 
+// 验证隐藏或卸载取消忙碌退避后不再重试，并按生命周期决定是否释放会话。
 it.each(['hidden', 'unmount'] as const)('cancels SNAPSHOT_IN_PROGRESS backoff on %s', async action => {
   let requests = 0
   vi.mocked(sessionsApi.snapshot).mockImplementation(async () => {
@@ -477,6 +508,7 @@ it.each(['hidden', 'unmount'] as const)('cancels SNAPSHOT_IN_PROGRESS backoff on
   expect(closed).toEqual(action === 'hidden' ? [] : ['a-1'])
 })
 
+// 验证忙碌退避上限为两秒，且不消耗会话失效的一次重建机会。
 it('caps busy backoff and preserves the independent single expiry rebuild allowance', async () => {
   const busy = new ApiError(409, { code: 'SNAPSHOT_IN_PROGRESS' })
   const expired = new ApiError(410, { code: 'SESSION_EXPIRED' })

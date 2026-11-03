@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
+// 指标字段渲染时提供可悬停、聚焦或固定的说明，并将提示挂到当前弹窗或页面。
 export function MetricHelp({ label, children, trigger = '?' }: { label: string; children: ReactNode; trigger?: ReactNode }) {
   const id = useId()
   const anchor = useRef<HTMLSpanElement>(null)
@@ -11,11 +12,14 @@ export function MetricHelp({ label, children, trigger = '?' }: { label: string; 
   const [pinned, setPinned] = useState(false)
   const [dismissed, setDismissed] = useState(false)
   const visible = !dismissed && (hovered || focused || pinned)
+  // 提示可见期间监听定位和关闭事件，隐藏或卸载时成对移除，避免遗留全局监听器。
   useEffect(() => {
     if (!visible) return
+    // 提示打开期间响应 Escape，关闭并解除固定状态。
     const dismiss = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { setDismissed(true); setPinned(false) }
     }
+    // 提示初次打开及窗口滚动、缩放时重新定位，尽量保持在视口边界内。
     const position = () => {
       if (!anchor.current || !tooltip.current) return
       const rect = anchor.current.getBoundingClientRect()
@@ -23,6 +27,7 @@ export function MetricHelp({ label, children, trigger = '?' }: { label: string; 
       box.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - box.offsetWidth - 8))}px`
       box.style.top = `${Math.max(8, rect.bottom + box.offsetHeight + 8 <= window.innerHeight ? rect.bottom + 8 : rect.top - box.offsetHeight - 8)}px`
     }
+    // 先计算首次位置，再监听后续视口变化，避免提示保持初始坐标。
     position()
     document.addEventListener('keydown', dismiss)
     window.addEventListener('resize', position)
