@@ -29,7 +29,7 @@ const snapshot: ClusterSnapshot = { ...snapshotFixture, topics: [
 function show(value: ClusterSnapshot | null = snapshot, overrides: Partial<DashboardContext['monitor']> = {}) {
   const context: DashboardContext = { cluster: clusterFixture, monitor: {
     snapshot: value, history: [], status: 'connected', error: null, isFetching: false,
-    sessionId: 'session-a', continuityKey: 'test', refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => {}, reconnect: /* 在页面测试提供重连入口替身，隔离真实 Kafka 会话创建。 */ () => {}, ...overrides,
+    sessionId: 'session-a', continuityKey: 'test', refresh: /* 在页面测试中提供默认的空刷新替身，立即完成且不更新快照。 */ async () => {}, reconnect: /* 在页面测试提供重连入口替身，隔离真实 Kafka 会话创建。 */ () => {}, ...overrides,
   } }
   // 在测试挂载和重渲染时组合仪表盘上下文与路由，保留页面状态。
   const content = () => <MemoryRouter><Routes><Route element={<Outlet context={context} />}>
@@ -234,7 +234,7 @@ it('keeps a created Topic locked after refresh failure and retains its page noti
     creates++
     return HttpResponse.json({ status: 'created' }, { status: 201 })
   }))
-  show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => { throw new Error('synthetic refresh failure') } })
+  show(snapshot, { refresh: /* 在创建成功后的刷新调用中注入失败，验证刷新错误不会掩盖已创建结果。 */ async () => { throw new Error('synthetic refresh failure') } })
   await user.click(screen.getByRole('button', { name: '新建 Topic' }))
   await user.type(screen.getByLabelText('Topic 名称'), 'created-orders')
   await user.click(screen.getByRole('button', { name: '创建 Topic' }))
@@ -314,7 +314,7 @@ it('refreshes the list after confirmed configuration changes', /* 在本用例�
 it('restores focus to the toolbar when the deleted Topic row disappears during refresh', /* 在本用例执行时验证删除行刷新消失后焦点回到工具栏。 */ async () => {
   const user = userEvent.setup()
   server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => new HttpResponse(null, { status: 204 })))
-  const view = show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => { view.update({ snapshot: { ...snapshot, topics: [snapshot.topics[1]] } }) } })
+  const view = show(snapshot, { refresh: /* 在删除后的刷新中移除快照里的目标 Topic，验证原触发器消失后的焦点恢复。 */ async () => { view.update({ snapshot: { ...snapshot, topics: [snapshot.topics[1]] } }) } })
   await user.click(screen.getByRole('button', { name: '删除 order-events' }))
   await user.type(screen.getByLabelText('确认 Topic 名称'), 'order-events')
   await user.click(screen.getByRole('button', { name: '确认删除' }))
@@ -326,7 +326,7 @@ it('restores focus to the toolbar when the deleted Topic row disappears during r
 it.each(['trigger', 'search', 'background'] as const)('recovers delayed deletion focus only while it remains on the trigger (%s)', /* 在本用例执行时验证延迟删除焦点只在仍停留触发器时恢复。 */ async focus => {
   const user = userEvent.setup()
   server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => new HttpResponse(null, { status: 204 })))
-  const view = show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => {} })
+  const view = show(snapshot, { refresh: /* 删除后的刷新立即完成但保留原快照，供后续步骤单独模拟元数据延迟更新。 */ async () => {} })
   const trigger = screen.getByRole('button', { name: '删除 order-events' })
   await user.click(trigger)
   await user.type(screen.getByLabelText('确认 Topic 名称'), 'order-events')
@@ -385,7 +385,7 @@ it('retains the submitted outcome when refreshing disconnects the monitor sessio
   const user = userEvent.setup()
   server.use(http.put('/api/sessions/:id/topics/:topic/configs', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () =>
     HttpResponse.json({ status: 'appliedButUnconfirmed' }, { status: 202 })))
-  const view = show(snapshot, { refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => {
+  const view = show(snapshot, { refresh: /* 配置提交后的刷新先使会话失效再抛错，验证已提交的 202 结果仍然保留。 */ async () => {
     view.update({ sessionId: undefined, status: 'error' })
     throw new Error('synthetic refresh failure')
   } })

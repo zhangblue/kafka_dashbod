@@ -29,7 +29,7 @@ function show(value: ClusterSnapshot | null = snapshot, ruleSet = rules, entry =
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
   client.setQueryData(['lag-rules', clusterFixture.id], ruleSet)
   const context: DashboardContext = { cluster: clusterFixture, monitor: { snapshot: value, history: [], status: 'connected',
-    error: null, isFetching: false, continuityKey: 'a', refresh: /* 在页面交互测试模拟快照刷新完成或失败，验证写入结果与刷新反馈的顺序。 */ async () => {}, reconnect: /* 在页面测试提供重连入口替身，隔离真实 Kafka 会话创建。 */ () => {} } }
+    error: null, isFetching: false, continuityKey: 'a', refresh: /* 在页面测试中提供立即完成的空刷新替身，不更新快照。 */ async () => {}, reconnect: /* 在页面测试提供重连入口替身，隔离真实 Kafka 会话创建。 */ () => {} } }
   // 在测试挂载或重渲染时建立共享查询与路由树，保留同一组件实例状态。
   const tree = () => <QueryClientProvider client={client}><MemoryRouter initialEntries={[entry]}><Routes><Route element={
     <ConsumerGroupLagProvider clusterId={context.cluster!.id} monitor={context.monitor}><Outlet context={{ ...context }} /></ConsumerGroupLagProvider>}>

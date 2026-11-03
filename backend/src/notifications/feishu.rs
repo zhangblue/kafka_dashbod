@@ -248,7 +248,7 @@ pub fn format_growth_alert(message: &GrowthAlertMessage<'_>) -> String {
     )
 }
 
-// 测试通知接口调用时生成明确标识测试用途的集群与时间文本。
+// 生成明确标识测试用途的集群与时间文本；当前仅由本模块单元测试直接调用以验证文本格式。
 pub fn format_test_alert(cluster_name: &str, detected_at: DateTime<FixedOffset>) -> String {
     format!(
         "Kafka Lens 飞书测试通知\n集群：{}\n检测时间：{}",
