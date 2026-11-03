@@ -203,18 +203,18 @@ docker compose -f docker-compose.test.yml -p kafka-lens-manual down --volumes --
 ```bash
 ./tools/build-release.sh --platform linux-amd64
 ./tools/build-release.sh --platform linux-arm64
-./tools/build-release.sh --platform darwin-arm64 --version v0.3.0
-./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-linux-amd64
-./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-linux-arm64
-./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-darwin-arm64
+./tools/build-release.sh --platform darwin-arm64 --version v0.4.0
+./tools/verify-release.sh dist/kafka-dashboard-v0.4.0-linux-amd64
+./tools/verify-release.sh dist/kafka-dashboard-v0.4.0-linux-arm64
+./tools/verify-release.sh dist/kafka-dashboard-v0.4.0-darwin-arm64
 ```
 
 `--version` 可省略；显式版本必须为 `vX.Y.Z` 且与 Cargo 包版本一致。每次只编译并打包所选架构，保留 Cargo 锁文件检查。`CARGO_TARGET_DIR` 可指定共享构建缓存；默认使用仓库 `target/`。同一 worktree 的独占构建锁防止前端和 dist 竞争，不要并发打包。构建、归档或发布任一步失败均保留已有三件产物；若目标目录有 `data/` 或真实 `.env`，脚本拒绝替换，避免删除部署数据。不同架构可共存。`dist/` 不进入 Git。
 
-每个平台输出 `dist/kafka-dashboard-v<版本>-<platform>/`、同名 `.tar.gz` 和 `.tar.gz.sha256`。归档 sidecar 校验真实压缩字节；例如在 dist 下执行 `shasum -a 256 -c kafka-dashboard-v0.3.0-linux-arm64.tar.gz.sha256`。目录结构如下（每包只含一个二进制）：
+每个平台输出 `dist/kafka-dashboard-v<版本>-<platform>/`、同名 `.tar.gz` 和 `.tar.gz.sha256`。归档 sidecar 校验真实压缩字节；例如在 dist 下执行 `shasum -a 256 -c kafka-dashboard-v0.4.0-linux-arm64.tar.gz.sha256`。目录结构如下（每包只含一个二进制）：
 
 ```text
-kafka-dashboard-v0.3.0-linux-arm64/
+kafka-dashboard-v0.4.0-linux-arm64/
 ├── bin/kafka-dashboard-linux-arm64
 ├── web/                 # 完整前端页面和 assets
 ├── start.sh

@@ -64,9 +64,9 @@ npm --prefix frontend run test:e2e
 ./tools/build-release.sh --platform linux-amd64
 ./tools/build-release.sh --platform linux-arm64
 ./tools/build-release.sh --platform darwin-arm64
-./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-linux-amd64
-./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-linux-arm64
-./tools/verify-release.sh dist/kafka-dashboard-v0.3.0-darwin-arm64
+./tools/verify-release.sh dist/kafka-dashboard-v0.4.0-linux-amd64
+./tools/verify-release.sh dist/kafka-dashboard-v0.4.0-linux-arm64
+./tools/verify-release.sh dist/kafka-dashboard-v0.4.0-darwin-arm64
 git diff --check
 ```
 
