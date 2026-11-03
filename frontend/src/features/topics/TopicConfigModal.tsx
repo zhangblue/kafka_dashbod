@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { localizeApiError } from '../../api/errorMessages'
 import { ApiError, topicsApi } from '../../api/client'
 import type { TopicConfigSource, TopicConfigValue, TopicMutationResult, UpdateTopicConfigsInput } from '../../api/types'
 import { Modal } from '../../components/Modal'
@@ -21,9 +23,12 @@ const errorMessages: Record<string, string> = {
 
 // 在 Topic 管理请求失败时展示统一安全错误和未由字段控件承接的提示。
 export function TopicAdminErrorNotice({ error }: { error: unknown }) {
+  const { t } = useTranslation()
   if (!error) return null
-  return <div role="alert"><p>{error instanceof ApiError
-    ? errorMessages[error.code] ?? error.message : '请求失败，请稍后重试。'}</p>
+  // 保留 Topic 专属提示；其余错误按当前语言安全翻译，避免内部占位或后端原文进入页面。
+  const message = error instanceof ApiError && Object.hasOwn(errorMessages, error.code)
+    ? errorMessages[error.code] : localizeApiError(error, t).message
+  return <div role="alert"><p>{message}</p>
     {error instanceof ApiError && error.requestId && <p>Request ID: {error.requestId}</p>}
     {error instanceof ApiError && Object.entries(error.fields).filter(([key]) =>
       !topicConfigDefinitions.some(item => key === item.key || key === `configs.${item.key}` || key === `changes.${item.key}`)
