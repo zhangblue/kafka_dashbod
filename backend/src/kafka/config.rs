@@ -10,12 +10,14 @@ pub struct ClientProperties {
 }
 
 impl ClientProperties {
+    // 配置检查调用时读取指定属性；调用方不得将敏感属性写入日志。
     pub fn get(&self, key: &str) -> Option<&str> {
         self.inner.get(key)
     }
 }
 
 impl fmt::Debug for ClientProperties {
+    // 调试格式化时仅输出固定脱敏标记，避免检查内部连接配置。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ClientProperties([REDACTED])")
     }
@@ -26,6 +28,7 @@ impl fmt::Debug for ClientProperties {
 pub struct ConfigError;
 
 /// Validate combinations before passing any values to librdkafka.
+// 创建客户端前校验安全配置组合，再构造禁止自动提交和自动建 Topic 的属性。
 pub fn build_client_properties(
     input: &DecryptedClusterConfig,
 ) -> Result<ClientProperties, ConfigError> {
@@ -150,7 +153,9 @@ mod tests {
 
     struct QuietContext;
     impl ClientContext for QuietContext {
+        // 原生日志回调触发时丢弃文本，防止连接配置进入日志。
         fn log(&self, _: RDKafkaLogLevel, _: &str, _: &str) {}
+        // 原生错误回调触发时丢弃原始诊断，避免泄漏敏感连接信息。
         fn error(&self, _: KafkaError, _: &str) {}
     }
 
@@ -175,6 +180,7 @@ E0kRG74UTO1K1FIydgmRTHgQ3HyygnyQjX05WcibhfKlaweq4H79xagnSnM5xVBA
 ZiyyKG9Z8lI=
 -----END CERTIFICATE-----";
 
+    // 安全配置测试准备时构造可独立修改的最小集群配置。
     fn fixture_cluster() -> DecryptedClusterConfig {
         DecryptedClusterConfig {
             bootstrap_servers: "kafka:9093".into(),
@@ -192,6 +198,7 @@ ZiyyKG9Z8lI=
 
     // A protocol/mechanism mismatch would silently weaken or break authentication.
     #[test]
+    // 验证所有支持的安全协议和认证机制正确生成客户端属性。
     fn maps_all_supported_security_protocols_and_sasl_mechanisms() {
         for (protocol, expected) in [
             (SecurityProtocol::Plaintext, "PLAINTEXT"),
@@ -237,6 +244,7 @@ ZiyyKG9Z8lI=
 
     // Unsupported authentication must fail before constructing a native client.
     #[test]
+    // 验证非法安全配置组合被拒绝且错误不回显配置值。
     fn rejects_invalid_combinations_without_echoing_values() {
         let mut cases = Vec::new();
         for mechanism in [
@@ -283,6 +291,7 @@ ZiyyKG9Z8lI=
     }
 
     #[test]
+    // 验证双向 TLS 的成对配置和私钥口令映射正确。
     fn maps_paired_mutual_tls_credentials() {
         let mut input = fixture_cluster();
         input.client_certificate_pem = Some("public-client-cert".into());
@@ -304,6 +313,7 @@ ZiyyKG9Z8lI=
     // The API accepts every positive millisecond timeout, including values below
     // librdkafka's socket-timeout minimum. The request deadline must still work.
     #[test]
+    // 验证有效正超时在原生套接字范围外仍安全转换。
     fn accepts_positive_timeouts_outside_native_socket_range() {
         for (millis, expected_socket_ms) in [(1, "10"), (600_000, "300000")] {
             let mut input = DecryptedClusterConfig::plaintext("127.0.0.1:9092");

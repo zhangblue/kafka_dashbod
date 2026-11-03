@@ -57,11 +57,13 @@ pub enum TopicOperationError {
 
 pub trait SessionClientFactory: Clone + Send + Sync + 'static {
     type Client: Send + 'static;
+    // 需要新会话或告警客户端时按配置创建资源，由工厂实现负责原生创建完成。
     fn create(
         &self,
         config: DecryptedClusterConfig,
     ) -> impl Future<Output = Result<Self::Client, SessionError>> + Send;
 
+    // 连接测试调用时运行临时探测并等待资源释放，不建立监控会话。
     fn test_connection(
         &self,
         config: DecryptedClusterConfig,
@@ -73,6 +75,7 @@ pub trait SessionClientFactory: Clone + Send + Sync + 'static {
         }
     }
 
+    // 页面或告警需要样本时由实现提供快照；默认实现拒绝未支持采集的工厂。
     fn snapshot(
         &self,
         _client: &mut Self::Client,
@@ -82,6 +85,7 @@ pub trait SessionClientFactory: Clone + Send + Sync + 'static {
         async { Err(SessionError::Connection(ConnectionError::InvalidConfig)) }
     }
 
+    // 会话接受创建请求时由实现执行；默认拒绝，避免未实现工厂意外具有管理能力。
     fn create_topic(
         &self,
         _client: &mut Self::Client,
@@ -90,6 +94,7 @@ pub trait SessionClientFactory: Clone + Send + Sync + 'static {
         async { Err(TopicAdminError::Unavailable) }
     }
 
+    // 会话接受删除请求时由实现执行；默认返回不可用，不提供隐式管理操作。
     fn delete_topic(
         &self,
         _client: &mut Self::Client,
@@ -98,6 +103,7 @@ pub trait SessionClientFactory: Clone + Send + Sync + 'static {
         async { Err(TopicAdminError::Unavailable) }
     }
 
+    // 打开配置界面时由实现读取实时参数；默认返回不可用，不以示例值代替。
     fn describe_topic_configs(
         &self,
         _client: &mut Self::Client,
@@ -106,6 +112,7 @@ pub trait SessionClientFactory: Clone + Send + Sync + 'static {
         async { Err(TopicAdminError::Unavailable) }
     }
 
+    // 保存配置时由实现增量修改并确认；默认拒绝未实现的配置管理能力。
     fn update_topic_configs(
         &self,
         _client: &mut Self::Client,
@@ -119,8 +126,11 @@ pub trait SessionClientFactory: Clone + Send + Sync + 'static {
 /// Suppress native messages, which may contain decrypted credentials.
 pub struct SessionContext;
 impl ClientContext for SessionContext {
+    // 原生日志回调触发时丢弃文本，防止连接配置进入日志。
     fn log(&self, _: RDKafkaLogLevel, _: &str, _: &str) {}
+    // 原生错误回调触发时丢弃原始诊断，避免泄漏敏感连接信息。
     fn error(&self, _: KafkaError, _: &str) {}
+    // 原生统计回调触发时丢弃原始载荷，避免输出连接相关信息。
     fn stats_raw(&self, _: &[u8]) {}
 }
 impl ConsumerContext for SessionContext {}
@@ -138,7 +148,9 @@ pub struct KafkaSessionClientFactory;
 impl SessionClientFactory for KafkaSessionClientFactory {
     type Client = KafkaSessionClient;
 
+    // 创建真实会话或告警客户端时在阻塞线程构建管理客户端，等待完整创建结果。
     async fn create(&self, config: DecryptedClusterConfig) -> Result<Self::Client, SessionError> {
+        // 原生创建可能启动轮询线程，将其放到阻塞池并由拥有者等待，避免阻塞异步执行器。
         tokio::task::spawn_blocking(move || {
             let properties =
                 build_client_properties(&config).map_err(|_| ConnectionError::InvalidConfig)?;
@@ -156,6 +168,7 @@ impl SessionClientFactory for KafkaSessionClientFactory {
         .map_err(|_| ConnectionError::Timeout)?
     }
 
+    // 页面或告警需要样本时通过工厂采集快照，返回前等待全部原生采集工作。
     async fn snapshot(
         &self,
         client: &mut Self::Client,
@@ -169,10 +182,12 @@ impl SessionClientFactory for KafkaSessionClientFactory {
         let probe = NativeProbe::new(client, options);
         let snapshot = collect(&probe, cluster_id, options).await;
         // Timed-out native calls cannot be cancelled: retain session locks until they exit.
+        // 采集超时不取消 C 调用；先收齐任务，再允许释放客户端和共享操作锁。
         probe.finish().await;
         Ok(snapshot)
     }
 
+    // 创建 Topic 时通过会话管理适配执行已校验请求。
     async fn create_topic(
         &self,
         client: &mut Self::Client,
@@ -183,6 +198,7 @@ impl SessionClientFactory for KafkaSessionClientFactory {
             .await
     }
 
+    // 删除 Topic 时通过会话管理适配执行受保护的目标删除。
     async fn delete_topic(
         &self,
         client: &mut Self::Client,
@@ -193,6 +209,7 @@ impl SessionClientFactory for KafkaSessionClientFactory {
             .await
     }
 
+    // 打开配置界面时通过会话读取当前 Topic 参数，不持久化副本。
     async fn describe_topic_configs(
         &self,
         client: &mut Self::Client,
@@ -203,6 +220,7 @@ impl SessionClientFactory for KafkaSessionClientFactory {
             .await
     }
 
+    // 保存 Topic 配置时通过会话增量修改并保留写后确认状态。
     async fn update_topic_configs(
         &self,
         client: &mut Self::Client,
@@ -224,6 +242,7 @@ pub struct SessionEntry<C> {
 }
 
 impl<C: Send + 'static> SessionEntry<C> {
+    // 快照开始时尝试取得会话互斥锁，拒绝重叠采集并复核关闭状态。
     pub fn try_collect(&self) -> Result<MutexGuard<'_, ()>, SessionError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(SessionError::Expired);
@@ -238,10 +257,12 @@ impl<C: Send + 'static> SessionEntry<C> {
         Ok(guard)
     }
 
+    // 管理操作排队时取得与采集共享的互斥锁，获锁后再次拒绝已关闭会话。
     async fn lock_operation(&self) -> Result<MutexGuard<'_, ()>, SessionError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(SessionError::Expired);
         }
+        // 管理操作可以排队；持锁后必须再查关闭标记，防止排队期间关闭后仍执行写入。
         let guard = self.collection_lock.lock().await;
         if self.closed.load(Ordering::Acquire) {
             return Err(SessionError::Expired);
@@ -249,13 +270,16 @@ impl<C: Send + 'static> SessionEntry<C> {
         Ok(guard)
     }
 
+    // 释放会话时先拒绝新操作，再按采集和客户端锁顺序等待在途工作及阻塞析构。
     async fn close(&self) {
+        // 先阻止新的采集或管理操作，再沿相同锁顺序排空已接受工作，避免锁反转。
         self.closed.store(true, Ordering::Release);
         // Match the collection/admin lock order and drain queued operations first.
         let _operation = self.collection_lock.lock().await;
         let clients = self.clients.lock().await.take();
         // Native client destruction can block while its poll threads terminate.
         if let Some(clients) = clients {
+            // 析构可能等待原生轮询线程；在阻塞池完成并等待后，关闭才能对外报告完成。
             let _ = tokio::task::spawn_blocking(move || drop(clients)).await;
         }
     }
@@ -283,6 +307,7 @@ struct Operation {
 }
 
 impl<C> Sessions<C> {
+    // 接受任务时在管理器锁内登记完成记录，供取消、关闭和退出持续追踪。
     fn register_operation(
         &mut self,
         cluster_id: Option<String>,
@@ -321,6 +346,7 @@ pub struct SessionManager<F: SessionClientFactory = KafkaSessionClientFactory> {
 }
 
 impl<F: SessionClientFactory> Clone for SessionManager<F> {
+    // 共享句柄被复制时保留同一状态与生命周期协调对象。
     fn clone(&self) -> Self {
         Self {
             factory: self.factory.clone(),
@@ -332,6 +358,7 @@ impl<F: SessionClientFactory> Clone for SessionManager<F> {
 }
 
 impl<F: SessionClientFactory> SessionManager<F> {
+    // 连接测试调用时运行临时探测并等待资源释放，不建立监控会话。
     pub async fn test_connection(
         &self,
         cluster_id: Option<String>,
@@ -341,6 +368,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         if state.shutting_down {
             return Err(SessionError::ShuttingDown);
         }
+        // 登记和创建拥有者任务都在状态锁内，关闭不会漏掉已接受但尚未调度的连接测试。
         let (operation_id, done, _, _) = state.register_operation(cluster_id, None, None, false);
         let shared = self.state.clone();
         let factory = self.factory.clone();
@@ -359,10 +387,12 @@ impl<F: SessionClientFactory> SessionManager<F> {
             .map_err(|_| SessionError::Connection(ConnectionError::Timeout))?
     }
 
+    // 页面或告警需要样本时通过工厂采集快照，返回前等待全部原生采集工作。
     pub async fn snapshot(
         &self,
         id: &str,
     ) -> Result<crate::domain::snapshot::ClusterSnapshot, SessionError> {
+        // 接受快照前先检查并续租；拥有者任务继续持锁直至全部原生采集收尾。
         let session = self.get_and_renew(id).await?;
         let factory = self.factory.clone();
         // The owned task retains the collection/client locks even if HTTP is cancelled.
@@ -376,6 +406,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         .map_err(|_| SessionError::Connection(ConnectionError::Timeout))?
     }
 
+    // 创建 Topic 时通过会话管理适配执行已校验请求。
     pub async fn create_topic(
         &self,
         id: &str,
@@ -387,6 +418,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         .await
     }
 
+    // 删除 Topic 时通过会话管理适配执行受保护的目标删除。
     pub async fn delete_topic(&self, id: &str, topic: &str) -> Result<(), TopicOperationError> {
         let topic = topic.to_owned();
         self.topic_operation(id, move |factory, client| {
@@ -395,6 +427,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         .await
     }
 
+    // 打开配置界面时通过会话读取当前 Topic 参数，不持久化副本。
     pub async fn describe_topic_configs(
         &self,
         id: &str,
@@ -407,6 +440,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         .await
     }
 
+    // 保存 Topic 配置时通过会话增量修改并保留写后确认状态。
     pub async fn update_topic_configs(
         &self,
         id: &str,
@@ -420,6 +454,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         .await
     }
 
+    // 接受管理操作时续租并登记拥有者任务，与快照互斥且取消 HTTP 后仍追踪至任务析构。
     async fn topic_operation<T: Send + 'static>(
         &self,
         id: &str,
@@ -448,6 +483,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
             false,
         );
         let factory = self.factory.clone();
+        // 锁内先登记再派发，使关闭能看见尚未运行的任务；管理和快照共用会话操作锁。
         // Registration and spawn are atomic to close, even before this task is scheduled.
         let task = tokio::spawn(async move {
             let _operation = session.lock_operation().await?;
@@ -459,6 +495,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         });
         let shared = self.state.clone();
         let (reply, result) = oneshot::channel();
+        // 独立等待者连同任务捕获值的析构一起等待，再删除完成记录；取消 HTTP 仅丢弃接收端。
         // Joining includes task capture destruction; HTTP cancellation only drops its receiver.
         tokio::spawn(async move {
             let outcome = task
@@ -472,12 +509,14 @@ impl<F: SessionClientFactory> SessionManager<F> {
         result.await.map_err(|_| TopicAdminError::Unavailable)?
     }
 
+    // 应用初始化时创建会话管理器，并以弱引用启动每五秒一次的过期清理。
     pub fn new(lease: Duration, factory: F) -> Self {
         let state = Arc::new(Mutex::new(Sessions {
             entries: HashMap::<String, LeasedEntry<F::Client>>::new(),
             operations: HashMap::new(),
             shutting_down: false,
         }));
+        // 清理器只持弱引用，管理器消失后不再永久维持状态；每五秒回收遗弃会话。
         let weak = Arc::downgrade(&state);
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -501,11 +540,13 @@ impl<F: SessionClientFactory> SessionManager<F> {
         }
     }
 
+    // 创建会话响应时返回租约秒数，供调用方安排续租。
     pub fn lease_seconds(&self) -> u64 {
         self.lease.as_secs()
     }
 
     /// Read correlation metadata without renewing leases or taking ownership of clients.
+    // 关联请求与集群时只读取元数据，不续租或占有客户端。
     pub async fn cluster_id(&self, id: &str) -> Option<String> {
         let state = self.state.lock().await;
         state
@@ -522,10 +563,12 @@ impl<F: SessionClientFactory> SessionManager<F> {
     }
 
     /// Serializes API cluster lookup/create with close/delete to prevent orphan sessions.
+    // 集群读取、创建会话与删除前取得统一门锁，防止删除后留下孤立会话。
     pub async fn cluster_operation(&self) -> MutexGuard<'_, ()> {
         self.cluster_gate.lock().await
     }
 
+    // 页面需要采样时登记并创建短租约会话；取消调用后仍跟踪创建和必要的释放。
     pub async fn create(
         &self,
         cluster_id: impl Into<String>,
@@ -561,6 +604,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
                             SessionError::Expired
                         };
                         drop(state);
+                        // 创建已完成但调用方取消或管理器正在关闭，必须先释放资源，不能留下无人续租的连接。
                         session.close().await;
                         let _ = reply.send(Err(error));
                     } else {
@@ -592,10 +636,12 @@ impl<F: SessionClientFactory> SessionManager<F> {
             .map_err(|_| SessionError::Connection(ConnectionError::Timeout))?
     }
 
+    // 内部读取会话时检查有效租约但不续期，过期时等待资源释放。
     pub async fn get(&self, id: &str) -> Result<Arc<SessionEntry<F::Client>>, SessionError> {
         self.lookup(id, false).await
     }
 
+    // 快照或管理操作开始时读取有效会话并续租，过期会话不得复活。
     pub async fn get_and_renew(
         &self,
         id: &str,
@@ -603,6 +649,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         self.lookup(id, true).await
     }
 
+    // 查询会话时检查租约，必要时启动并等待释放，再决定是否续租。
     async fn lookup(
         &self,
         id: &str,
@@ -632,6 +679,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         Ok(entry.session.clone())
     }
 
+    // 调用方关闭单个会话时移除可见条目，复用已有清理并等待实际释放。
     pub async fn close(&self, id: &str) -> Result<(), SessionError> {
         let mut state = self.state.lock().await;
         let (completion, expired) = if let Some(entry) = state.entries.remove(id) {
@@ -663,6 +711,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         }
     }
 
+    // 删除或切换集群时取消在途创建并等待该集群所有已接受任务及资源释放。
     pub async fn close_for_cluster(&self, cluster_id: &str) {
         let completions = {
             let mut state = self.state.lock().await;
@@ -694,14 +743,17 @@ impl<F: SessionClientFactory> SessionManager<F> {
             }
             completions
         };
+        // 状态锁已经释放，慢速析构只影响本次关闭，不阻塞无关会话的读取或续租。
         for completion in completions {
             Self::wait(completion).await;
         }
     }
 
+    // 进程退出时先禁止接受新任务，再等待所有会话和在途操作释放。
     pub async fn close_all(&self) {
         let completions = {
             let mut state = self.state.lock().await;
+            // 先封闭接收入口，再收集包括在途创建在内的完成信号，确保退出不遗漏原生任务。
             state.shutting_down = true;
             for (id, entry) in std::mem::take(&mut state.entries) {
                 let expired = Instant::now().duration_since(entry.renewed_at) >= self.lease;
@@ -718,10 +770,12 @@ impl<F: SessionClientFactory> SessionManager<F> {
         }
     }
 
+    // 主动清理调用时按当前租约回收已过期会话并等待释放。
     pub async fn reap_expired(&self) {
         Self::reap(&self.state, self.lease).await;
     }
 
+    // 定时或主动清理时先移除过期条目，再在全局锁外等待各项释放完成。
     async fn reap(shared: &Arc<Mutex<Sessions<F::Client>>>, lease: Duration) {
         let completions = {
             let mut state = shared.lock().await;
@@ -755,6 +809,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         }
     }
 
+    // 查询已移除会话时查找仍在进行的关闭记录，以等待实际资源释放。
     fn pending_close(state: &Sessions<F::Client>, id: &str) -> Option<watch::Receiver<bool>> {
         state
             .operations
@@ -763,6 +818,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
             .map(|operation| operation.completion.clone())
     }
 
+    // 关闭或租约过期时先标记关闭并登记清理任务，持续追踪至原生析构及已接受任务结束。
     fn start_cleanup(
         shared: &Arc<Mutex<Sessions<F::Client>>>,
         state: &mut Sessions<F::Client>,
@@ -770,6 +826,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         entry: Arc<SessionEntry<F::Client>>,
         expired: bool,
     ) -> watch::Receiver<bool> {
+        // 先标记关闭，已排队的管理任务随后获锁也必须退出；清理任务则持续保有资源。
         entry.closed.store(true, Ordering::Release);
         let operations: Vec<_> = state
             .operations
@@ -783,6 +840,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         // The operation stays tracked while waiting for a collector's client lock and
         // while native destruction runs. Request cancellation cannot abort this task.
         tokio::spawn(async move {
+            // 先等待会话锁和原生析构，再等待任务捕获值析构，最后发布完成信号。
             entry.close().await;
             for operation in operations {
                 Self::wait(operation).await;
@@ -793,6 +851,7 @@ impl<F: SessionClientFactory> SessionManager<F> {
         completion
     }
 
+    // 关闭路径等待共享完成信号；调用方取消等待不会取消资源清理任务。
     async fn wait(mut completion: watch::Receiver<bool>) {
         let _ = completion.wait_for(|done| *done).await;
     }
@@ -813,6 +872,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    // 生命周期测试推进一次异步状态，用于观察尚未完成的操作而不一直等待。
     async fn poll_once<F: Future>(mut future: std::pin::Pin<&mut F>) -> Option<F::Output> {
         std::future::poll_fn(|cx| {
             std::task::Poll::Ready(match future.as_mut().poll(cx) {
@@ -829,6 +889,7 @@ mod tests {
     struct FakeClient(Arc<AtomicUsize>, Arc<tokio::sync::Notify>);
 
     impl Drop for FakeClient {
+        // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
             self.1.notify_one();
@@ -837,11 +898,13 @@ mod tests {
 
     impl SessionClientFactory for FakeSessionClientFactory {
         type Client = FakeClient;
+        // 会话测试请求创建时提供对应的可控客户端，模拟创建或资源释放生命周期。
         async fn create(&self, _: DecryptedClusterConfig) -> Result<FakeClient, SessionError> {
             Ok(FakeClient(self.0.clone(), self.1.clone()))
         }
     }
 
+    // 会话测试准备时创建十五秒租约管理器，并返回共享析构计数。
     fn manager() -> (SessionManager<FakeSessionClientFactory>, Arc<AtomicUsize>) {
         let drops = Arc::new(AtomicUsize::new(0));
         (
@@ -855,6 +918,7 @@ mod tests {
 
     // Without reaping at the lease boundary, native clients survive abandoned pages.
     #[tokio::test(start_paused = true)]
+    // 验证十五秒未续租的会话被回收并释放客户端。
     async fn expires_session_after_fifteen_seconds_without_renewal() {
         let (manager, drops) = manager();
         let id = manager
@@ -871,6 +935,7 @@ mod tests {
 
     // DELETE must report an expired lease even before the five-second reaper runs.
     #[tokio::test(start_paused = true)]
+    // 验证删除尚未清理的过期会话时先释放再报告过期。
     async fn deleting_expired_unreaped_session_reports_expired_after_release() {
         let (manager, drops) = manager();
         let id = manager
@@ -894,6 +959,7 @@ mod tests {
 
     // Cluster/global cleanup must not erase lease expiry while native release is pending.
     #[tokio::test]
+    // 验证集群或全局清理中的过期会话仍正确报告过期。
     async fn deleting_expired_session_during_cluster_or_global_cleanup_reports_expired() {
         for global in [false, true] {
             let (manager, drops) = manager();
@@ -941,6 +1007,7 @@ mod tests {
 
     // Renewal must extend only a live lease; stale sessions cannot resurrect.
     #[tokio::test(start_paused = true)]
+    // 验证有效租约可续期，未经过清理器的过期租约仍不可复活。
     async fn renews_live_lease_but_rejects_expired_lease_without_reaper() {
         let (manager, drops) = manager();
         let id = manager
@@ -961,6 +1028,7 @@ mod tests {
 
     // Removing entries must release resources once, including externally held handles.
     #[tokio::test]
+    // 验证集群关闭及退出只释放每个客户端一次。
     async fn close_cluster_and_shutdown_release_each_client_once() {
         let (manager, drops) = manager();
         let first = manager
@@ -1011,6 +1079,7 @@ mod tests {
 
     // Omitting the background task leaves unused sessions alive indefinitely.
     #[tokio::test(start_paused = true)]
+    // 验证后台清理器回收被页面遗弃的会话。
     async fn background_reaper_releases_abandoned_sessions() {
         let (manager, drops) = manager();
         manager
@@ -1025,6 +1094,7 @@ mod tests {
 
     // Per-session locks must reject overlap while allowing another cluster to collect.
     #[tokio::test]
+    // 验证同会话采集互斥而不同会话可以独立进行。
     async fn prevents_overlapping_collection_only_for_same_session() {
         let (manager, _) = manager();
         let a = manager
@@ -1060,9 +1130,11 @@ mod tests {
 
     impl SessionClientFactory for BlockingTestFactory {
         type Client = ();
+        // 会话测试请求创建时提供对应的可控客户端，模拟创建或资源释放生命周期。
         async fn create(&self, _: DecryptedClusterConfig) -> Result<(), SessionError> {
             Ok(())
         }
+        // 连接生命周期测试调用时阻塞模拟工作及析构，用于证明取消后仍受管理器追踪。
         async fn test_connection(
             &self,
             _: DecryptedClusterConfig,
@@ -1077,6 +1149,7 @@ mod tests {
                     std::sync::mpsc::Receiver<()>,
                 );
                 impl Drop for ClientDrop {
+                    // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
                     fn drop(&mut self) {
                         self.0.notify_one();
                         self.2.recv().unwrap();
@@ -1100,6 +1173,7 @@ mod tests {
 
     // Both HTTP cancellation and slow native destruction must stay visible to close operations.
     #[tokio::test]
+    // 验证取消连接测试后管理器仍等待原生工作和析构完成。
     async fn connection_tests_remain_owned_until_native_work_and_destructor_finish() {
         for global in [false, true] {
             for cancel in [false, true] {
@@ -1167,6 +1241,7 @@ mod tests {
 
     impl SessionClientFactory for SlowFactory {
         type Client = FakeClient;
+        // 会话测试请求创建时提供对应的可控客户端，模拟创建或资源释放生命周期。
         async fn create(&self, _: DecryptedClusterConfig) -> Result<FakeClient, SessionError> {
             self.started.notify_one();
             self.proceed.notified().await;
@@ -1179,6 +1254,7 @@ mod tests {
 
     // Shutdown must wait for already-started native creation, otherwise clients outlive close_all.
     #[tokio::test]
+    // 验证退出等待在途客户端创建及其资源释放。
     async fn shutdown_waits_for_inflight_client_creation_and_release() {
         let factory = SlowFactory {
             started: Arc::new(tokio::sync::Notify::new()),
@@ -1225,6 +1301,7 @@ mod tests {
 
     impl SessionClientFactory for BlockingFactory {
         type Client = FakeClient;
+        // 会话测试请求创建时提供对应的可控客户端，模拟创建或资源释放生命周期。
         async fn create(&self, _: DecryptedClusterConfig) -> Result<FakeClient, SessionError> {
             let release = self.release.lock().unwrap().take().unwrap();
             let factory = self.clone();
@@ -1241,6 +1318,7 @@ mod tests {
 
     // Aborting a request must not detach its still-running native creation from shutdown.
     #[tokio::test]
+    // 验证取消创建请求后原生创建和析构仍受管理器追踪。
     async fn cancelled_creation_remains_tracked_until_native_creation_and_drop_finish() {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let factory = BlockingFactory {
@@ -1277,6 +1355,7 @@ mod tests {
 
     // Cluster deletion must also drain creation whose API request released its cluster gate.
     #[tokio::test]
+    // 验证集群关闭等待未完成创建，无论调用方是否取消。
     async fn cluster_close_drains_pending_creation_with_live_or_cancelled_caller() {
         for cancel_caller in [false, true] {
             let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -1319,6 +1398,7 @@ mod tests {
         }
     }
 
+    // 取消关闭测试按不同关闭入口验证清理仍被管理器追踪至资源释放。
     async fn assert_cancelled_close_remains_tracked(mode: u8) {
         let (manager, drops) = manager();
         let id = manager
@@ -1359,22 +1439,26 @@ mod tests {
     }
 
     #[tokio::test]
+    // 验证显式关闭被调用方取消后清理仍被追踪。
     async fn cancelled_explicit_close_remains_tracked() {
         assert_cancelled_close_remains_tracked(0).await;
     }
 
     #[tokio::test]
+    // 验证集群关闭被调用方取消后清理仍被追踪。
     async fn cancelled_cluster_close_remains_tracked() {
         assert_cancelled_close_remains_tracked(1).await;
     }
 
     #[tokio::test]
+    // 验证退出等待被调用方取消后清理仍被追踪。
     async fn cancelled_shutdown_remains_tracked() {
         assert_cancelled_close_remains_tracked(2).await;
     }
 
     // Closing one session must not consume another session's lease while waiting on native work.
     #[tokio::test]
+    // 验证慢速释放不会阻碍无关会话续租。
     async fn slow_close_does_not_block_an_unrelated_sessions_renewal() {
         let (manager, _) = manager();
         let first = manager
@@ -1423,6 +1507,7 @@ mod tests {
     ];
 
     impl TopicOperation {
+        // 管理互斥测试按枚举选择四类操作，核对适配结果以复用同一生命周期断言。
         async fn run(
             self,
             manager: &SessionManager<BlockingTopicFactory>,
@@ -1476,6 +1561,7 @@ mod tests {
         }
     }
 
+    // 管理操作测试构造固定配置值，供读取结果断言使用。
     fn topic_config() -> TopicConfigValue {
         TopicConfigValue {
             key: "retention.ms".into(),
@@ -1504,6 +1590,7 @@ mod tests {
     struct BlockingTopicClient(BlockingTopicFactory);
 
     impl Drop for BlockingTopicClient {
+        // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
         fn drop(&mut self) {
             self.0.dropping.notify_one();
             if let Some(release) = self.0.release_drop.lock().unwrap().take() {
@@ -1514,6 +1601,7 @@ mod tests {
     }
 
     impl BlockingTopicFactory {
+        // 管理操作替身收到请求时停在可控生命周期阶段，便于验证取消与关闭等待。
         async fn operation(&self) -> Result<(), TopicAdminError> {
             self.started.notify_one();
             self.proceed.notified().await;
@@ -1528,10 +1616,12 @@ mod tests {
     impl SessionClientFactory for BlockingTopicFactory {
         type Client = BlockingTopicClient;
 
+        // 会话测试请求创建时提供对应的可控客户端，模拟创建或资源释放生命周期。
         async fn create(&self, _: DecryptedClusterConfig) -> Result<Self::Client, SessionError> {
             Ok(BlockingTopicClient(self.clone()))
         }
 
+        // 会话测试采集时返回可控快照，并按替身设置停在指定阶段以验证互斥。
         async fn snapshot(
             &self,
             _: &mut Self::Client,
@@ -1551,6 +1641,7 @@ mod tests {
             })
         }
 
+        // 管理测试调用时核对传入参数，并通过可控替身验证操作生命周期。
         async fn create_topic(
             &self,
             _: &mut Self::Client,
@@ -1563,6 +1654,7 @@ mod tests {
             self.operation().await
         }
 
+        // 管理测试调用时核对传入参数，并通过可控替身验证操作生命周期。
         async fn delete_topic(
             &self,
             _: &mut Self::Client,
@@ -1572,6 +1664,7 @@ mod tests {
             self.operation().await
         }
 
+        // 管理测试调用时核对传入参数，并通过可控替身验证操作生命周期。
         async fn describe_topic_configs(
             &self,
             _: &mut Self::Client,
@@ -1582,6 +1675,7 @@ mod tests {
             Ok(vec![topic_config()])
         }
 
+        // 管理测试调用时核对传入参数，并通过可控替身验证操作生命周期。
         async fn update_topic_configs(
             &self,
             _: &mut Self::Client,
@@ -1596,6 +1690,7 @@ mod tests {
         }
     }
 
+    // 管理生命周期测试准备时创建带阻塞替身的会话并返回其标识。
     async fn topic_manager(
         factory: BlockingTopicFactory,
     ) -> (SessionManager<BlockingTopicFactory>, String) {
@@ -1607,6 +1702,7 @@ mod tests {
         (manager, id)
     }
 
+    // 管理生命周期测试等待指定阶段信号，并用超时防止失败时永久挂起。
     async fn wait_for_topic_signal(signal: &tokio::sync::Notify) {
         tokio::time::timeout(Duration::from_secs(5), signal.notified())
             .await
@@ -1615,6 +1711,7 @@ mod tests {
 
     // A separate admin mutex would let writes overlap collection or make snapshots wait.
     #[tokio::test]
+    // 验证管理操作等待采集，且新的重叠快照立即被拒绝。
     async fn topic_operations_wait_for_snapshot_and_reject_overlapping_snapshots() {
         for operation in TOPIC_OPERATIONS {
             let factory = BlockingTopicFactory::default();
@@ -1657,6 +1754,7 @@ mod tests {
 
     // Returning CollectionInProgress for writes would discard an authorized queued operation.
     #[tokio::test]
+    // 验证同会话的管理操作按顺序执行。
     async fn topic_operations_wait_for_another_topic_operation() {
         for operation in TOPIC_OPERATIONS {
             let factory = BlockingTopicFactory::default();
@@ -1686,6 +1784,7 @@ mod tests {
 
     // Dropping HTTP must not drop the admin future or unlock clients before its final await.
     #[tokio::test]
+    // 验证取消管理请求后关闭仍等待其工作与析构结束。
     async fn cancelled_topic_operations_remain_owned_until_close_and_destructor_finish() {
         for operation in TOPIC_OPERATIONS {
             for mode in 0..3 {
@@ -1730,6 +1829,7 @@ mod tests {
 
     // Failing the second closed check could perform an admin request after close started.
     #[tokio::test]
+    // 验证排队管理操作获锁后拒绝已关闭会话。
     async fn queued_topic_operations_reject_a_closed_session() {
         for operation in TOPIC_OPERATIONS {
             let factory = BlockingTopicFactory::default();
@@ -1759,6 +1859,7 @@ mod tests {
 
     // Administration must renew leases and preserve Kafka errors without locking out snapshots.
     #[tokio::test(start_paused = true)]
+    // 验证管理操作续租且保留稳定的管理错误。
     async fn topic_operations_renew_live_leases_and_preserve_admin_errors() {
         for operation in TOPIC_OPERATIONS {
             let factory = BlockingTopicFactory {
@@ -1805,6 +1906,7 @@ mod tests {
     }
 
     impl Clone for UnscheduledTopicFactory {
+        // 调度边界测试复制工厂时标记下一份捕获值，使其析构可控以验证关闭等待。
         fn clone(&self) -> Self {
             Self {
                 shared: self.shared.clone(),
@@ -1814,6 +1916,7 @@ mod tests {
     }
 
     impl Drop for UnscheduledTopicFactory {
+        // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
         fn drop(&mut self) {
             if self.block_drop {
                 let _ = self.shared.dropping.send(());
@@ -1827,10 +1930,12 @@ mod tests {
     impl SessionClientFactory for UnscheduledTopicFactory {
         type Client = ();
 
+        // 会话测试请求创建时提供对应的可控客户端，模拟创建或资源释放生命周期。
         async fn create(&self, _: DecryptedClusterConfig) -> Result<Self::Client, SessionError> {
             Ok(())
         }
 
+        // 未调度任务测试意外进入适配器时立即失败，确保关闭检查发生在管理调用之前。
         async fn create_topic(
             &self,
             _: &mut Self::Client,
@@ -1842,6 +1947,7 @@ mod tests {
 
     // A lock cannot track a spawned task that has not yet run or joined its wait queue.
     #[test]
+    // 验证关闭也等待尚未调度的已接受任务及其捕获工厂析构。
     fn close_waits_for_unscheduled_topic_task_and_its_factory_drop() {
         for mode in 0..3 {
             for cancel_caller in [false, true] {

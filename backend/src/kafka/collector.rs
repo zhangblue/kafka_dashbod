@@ -59,6 +59,7 @@ pub enum ProbeError {
 }
 
 impl ProbeError {
+    // 快照记录局部失败时生成安全分类与资源标识，保留失败范围。
     pub fn failure(self, scope: &str, resource: impl Into<String>) -> PartialFailure {
         let (code, message) = match self {
             Self::Timeout => ("KAFKA_TIMEOUT", "Kafka query timed out"),
@@ -77,14 +78,19 @@ impl ProbeError {
 
 #[async_trait]
 pub trait KafkaProbe: Send + Sync {
+    // 采集开始时读取 Topic 与分区元数据，保留逐项失败信息。
     async fn topics(&self) -> Result<Vec<TopicMetadata>, ProbeError>;
+    // 采集分区时读取保留起点和下一写入位置，失败保持未知。
     async fn watermarks(&self, topic: &str, partition: i32) -> Result<(i64, i64), ProbeError>;
+    // 采集开始时发现消费组及活跃分配，不依赖消费组当前有活跃成员。
     async fn groups(&self) -> Result<Vec<GroupMetadata>, ProbeError>;
+    // 汇总组 Lag 前读取指定组的全部目标分区提交位置，不提交或改变偏移。
     async fn committed(
         &self,
         group: &str,
         partitions: &[TopicPartition],
     ) -> Result<Vec<CommittedOffset>, ProbeError>;
+    // 快照结束时取走补充的局部失败记录，避免丢失原生查询细节。
     fn take_failures(&self) -> Vec<PartialFailure> {
         Vec::new()
     }
@@ -97,6 +103,7 @@ pub struct CollectionOptions {
 }
 
 impl Default for CollectionOptions {
+    // 创建默认采集选项时设置有界并发和单次操作超时。
     fn default() -> Self {
         Self {
             concurrency: 8,
@@ -105,6 +112,7 @@ impl Default for CollectionOptions {
     }
 }
 
+// 采集各项指标时限制等待时间，将逾期结果标为未知而非零。
 async fn deadline<T>(
     duration: Duration,
     future: impl Future<Output = Result<T, ProbeError>>,
@@ -114,6 +122,7 @@ async fn deadline<T>(
         .unwrap_or(Err(ProbeError::Timeout))
 }
 
+// 请求快照时汇总元数据、水位与提交位置，保留未知值和局部失败。
 pub async fn collect(
     probe: &impl KafkaProbe,
     cluster_id: &str,
@@ -122,6 +131,7 @@ pub async fn collect(
     let concurrency = options.concurrency.max(1);
     let timeout = options.operation_timeout;
     let mut failures = Vec::new();
+    // 元数据与组发现相互独立，并行读取且分别保留失败，避免一项失败吞掉另一项。
     let (topics, groups) = tokio::join!(
         deadline(timeout, probe.topics()),
         deadline(timeout, probe.groups())
@@ -172,6 +182,7 @@ pub async fn collect(
             )
         }
     }))
+    // 流缓冲限制同时等待的水位查询；原生调用另有许可，超时不会放宽原生并发上限。
     .buffer_unordered(concurrency)
     .collect::<HashMap<_, _>>()
     .await;
@@ -201,6 +212,7 @@ pub async fn collect(
         snapshot.incomplete |= !topic.metadata_complete;
         topic_snapshots.push(snapshot);
     }
+    // 水位失败不代表提交位置未知：仍查每个已发现分区，保留可以独立成功的信息。
     // Query every discovered partition, including those whose watermark failed.
     let results = stream::iter(groups.into_iter().map(|group| {
         let partitions = &partitions;
@@ -239,6 +251,7 @@ pub async fn collect(
             };
             committed.insert(offset.partition, value);
         }
+        // 只有活跃分配或有效提交位置能建立组与 Topic 的关联，避免生成无关的未提交行。
         for topic in &topic_snapshots {
             if !group.assigned_topics.contains(&topic.topic)
                 && !committed
@@ -295,6 +308,7 @@ pub struct NativeProbe {
     failures: Arc<Mutex<Vec<PartialFailure>>>,
 }
 
+// 原生采集失败时只转换类型化错误码，屏蔽底层错误文本。
 fn native_error(error: KafkaError) -> ProbeError {
     match error.rdkafka_error_code() {
         Some(
@@ -313,17 +327,21 @@ fn native_error(error: KafkaError) -> ProbeError {
 
 // Kafka ConsumerProtocolAssignment versions 0–3 use the same non-flexible schema.
 // Newer versions preserve the prefix; lengths are checked before any allocation.
+// 发现活跃消费组时解析分配字节，检查长度后提取实际分配的 Topic。
 fn assignment_topics(mut bytes: &[u8]) -> Result<Vec<String>, ProbeError> {
+    // 解析分配协议时有界取出指定字节并推进游标，截断输入立即失败。
     fn take<'a>(bytes: &mut &'a [u8], count: usize) -> Result<&'a [u8], ProbeError> {
         let (value, rest) = bytes.split_at_checked(count).ok_or(ProbeError::Query)?;
         *bytes = rest;
         Ok(value)
     }
+    // 解析分配协议时读取大端短整数，复用边界检查避免越界。
     fn short(bytes: &mut &[u8]) -> Result<i16, ProbeError> {
         Ok(i16::from_be_bytes(
             take(bytes, 2)?.try_into().map_err(|_| ProbeError::Query)?,
         ))
     }
+    // 解析分配协议时读取大端整数，用于校验数组与数据长度。
     fn integer(bytes: &mut &[u8]) -> Result<i32, ProbeError> {
         Ok(i32::from_be_bytes(
             take(bytes, 4)?.try_into().map_err(|_| ProbeError::Query)?,
@@ -371,6 +389,7 @@ fn assignment_topics(mut bytes: &[u8]) -> Result<Vec<String>, ProbeError> {
 }
 
 impl NativeProbe {
+    // 会话开始采集时复用客户端与组缓存，并为原生任务建立独立并发和收尾记录。
     pub fn new(client: &KafkaSessionClient, options: CollectionOptions) -> Self {
         Self {
             admin: client.admin.clone(),
@@ -383,6 +402,7 @@ impl NativeProbe {
         }
     }
 
+    // 采集器调用原生接口时登记阻塞任务，并将并发许可保留至原生调用结束。
     async fn blocking<T: Send + 'static>(
         &self,
         work: impl FnOnce() -> Result<T, ProbeError> + Send + 'static,
@@ -394,10 +414,12 @@ impl NativeProbe {
             .await
             .map_err(|_| ProbeError::Query)?;
         let (send, receive) = tokio::sync::oneshot::channel();
+        // 将许可移进阻塞任务；即使外层超时并丢弃接收端，原生工作退出前仍占用许可。
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _ = send.send(work());
         });
+        // 独立保存句柄，使超时返回后仍能由 finish 在会话锁保护下等待所有原生调用。
         self.workers
             .lock()
             .expect("worker registry poisoned")
@@ -406,6 +428,7 @@ impl NativeProbe {
     }
 
     /// Must finish while the caller still holds its session client/collection locks.
+    // 采集结束后等待全部原生任务退出；调用方此时仍须持有会话及采集锁。
     pub async fn finish(&self) {
         let workers = std::mem::take(&mut *self.workers.lock().expect("worker registry poisoned"));
         for worker in workers {
@@ -416,6 +439,7 @@ impl NativeProbe {
 
 // rust-rdkafka 0.39 discards __PARTIAL and hides per-group errors. Own the native list
 // immediately so partial results are retained and every native allocation is released.
+// 快照发现消费组时直接接管原生列表，保留部分结果和逐组失败。
 fn discover_groups(
     admin: &AdminClient<SessionContext>,
     timeout: Duration,
@@ -423,6 +447,7 @@ fn discover_groups(
 ) -> Result<Vec<GroupMetadata>, ProbeError> {
     struct List(*const bindings::rd_kafka_group_list);
     impl Drop for List {
+        // 拥有者离开作用域时释放原生资源；提前返回同样经过此出口。
         fn drop(&mut self) {
             if !self.0.is_null() {
                 // SAFETY: unique list ownership transferred by rd_kafka_list_groups.
@@ -441,6 +466,7 @@ fn discover_groups(
             timeout.as_millis().min(i32::MAX as u128) as i32,
         )
     };
+    // 原生状态检查前即建立释放守卫，成功、部分结果和后续解析失败都不会泄漏列表。
     let list = List(pointer);
     use bindings::rd_kafka_resp_err_t::{RD_KAFKA_RESP_ERR__PARTIAL, RD_KAFKA_RESP_ERR_NO_ERROR};
     if status != RD_KAFKA_RESP_ERR_NO_ERROR && status != RD_KAFKA_RESP_ERR__PARTIAL {
@@ -542,6 +568,7 @@ fn discover_groups(
 
 #[async_trait]
 impl KafkaProbe for NativeProbe {
+    // 采集开始时读取 Topic 与分区元数据，保留逐项失败信息。
     async fn topics(&self) -> Result<Vec<TopicMetadata>, ProbeError> {
         let admin = self.admin.clone();
         let timeout = self.options.operation_timeout;
@@ -588,6 +615,7 @@ impl KafkaProbe for NativeProbe {
         })
         .await
     }
+    // 采集分区时读取保留起点和下一写入位置，失败保持未知。
     async fn watermarks(&self, topic: &str, partition: i32) -> Result<(i64, i64), ProbeError> {
         let admin = self.admin.clone();
         let topic = topic.to_owned();
@@ -600,6 +628,7 @@ impl KafkaProbe for NativeProbe {
         })
         .await
     }
+    // 采集开始时发现消费组及活跃分配，不依赖消费组当前有活跃成员。
     async fn groups(&self) -> Result<Vec<GroupMetadata>, ProbeError> {
         let admin = self.admin.clone();
         let failures = self.failures.clone();
@@ -607,6 +636,7 @@ impl KafkaProbe for NativeProbe {
         self.blocking(move || discover_groups(&admin, timeout, &failures))
             .await
     }
+    // 汇总组 Lag 前读取指定组的全部目标分区提交位置，不提交或改变偏移。
     async fn committed(
         &self,
         group: &str,
@@ -621,6 +651,7 @@ impl KafkaProbe for NativeProbe {
         let partitions = partitions.to_vec();
         let timeout = self.options.operation_timeout;
         self.blocking(move || {
+            // 以目标组创建只读客户端；使用别的组会读到错误的提交位置，且这里绝不订阅或提交。
             let consumer = cache.get_or_create(&group, &config)?;
             let mut list = TopicPartitionList::new();
             for p in partitions {
@@ -647,6 +678,7 @@ impl KafkaProbe for NativeProbe {
         })
         .await
     }
+    // 快照结束时取走补充的局部失败记录，避免丢失原生查询细节。
     fn take_failures(&self) -> Vec<PartialFailure> {
         std::mem::take(&mut *self.failures.lock().expect("failures poisoned"))
     }
@@ -659,6 +691,7 @@ mod tests {
 
     // Consumer assignment includes topic/partition arrays, not subscriptions or user data.
     #[test]
+    // 验证分配协议提取 Topic 并拒绝截断和非法长度。
     fn parses_assignment_topics_and_rejects_truncated_or_invalid_lengths() {
         let assignment = b"\x00\x03\x00\x00\x00\x02\x00\x06orders\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x02\x00\x05empty\x00\x00\x00\x00\xff\xff\xff\xff";
         assert_eq!(assignment_topics(assignment).unwrap(), ["orders"]);
@@ -687,6 +720,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KafkaProbe for FakeProbe {
+        // 采集测试请求元数据时返回固定分区或模拟查询失败，用于验证局部结果保留。
         async fn topics(&self) -> Result<Vec<TopicMetadata>, ProbeError> {
             if self.topics_fails {
                 return Err(ProbeError::Query);
@@ -704,11 +738,13 @@ mod tests {
                 },
             ])
         }
+        // 采集测试请求水位时记录并发峰值并按配置延迟或失败，验证并发限制和未知状态。
         async fn watermarks(&self, topic: &str, partition: i32) -> Result<(i64, i64), ProbeError> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
             struct Release<'a>(&'a AtomicUsize);
             impl Drop for Release<'_> {
+                // 测试对象析构时记录或控制释放阶段，验证资源最终释放及等待顺序。
                 fn drop(&mut self) {
                     self.0.fetch_sub(1, Ordering::SeqCst);
                 }
@@ -725,6 +761,7 @@ mod tests {
                 _ => Ok((0, 10)),
             }
         }
+        // 采集测试发现组时生成非活跃组和可选额外组，验证组标识与 Topic 关联。
         async fn groups(&self) -> Result<Vec<GroupMetadata>, ProbeError> {
             // No active members are required to discover an inactive group.
             let mut groups = vec![GroupMetadata {
@@ -739,6 +776,7 @@ mod tests {
             }
             Ok(groups)
         }
+        // 采集测试查询提交位置时核对目标组和完整分区集合，再模拟有效、未知或失败结果。
         async fn committed(
             &self,
             group: &str,
@@ -783,6 +821,7 @@ mod tests {
         }
     }
 
+    // 采集测试准备时创建可控制延迟和失败的探针，避免依赖真实 Kafka。
     fn probe(delay: Duration) -> FakeProbe {
         FakeProbe {
             active: AtomicUsize::new(0),
@@ -799,6 +838,7 @@ mod tests {
 
     // Unrelated topics cannot produce artificial uncommitted/abnormal group rows.
     #[tokio::test]
+    // 验证提交位置仅关联目标 Topic，同时保留关联 Topic 的全部分区。
     async fn committed_topics_exclude_unrelated_topics_but_keep_every_associated_partition() {
         let snapshot = collect(
             &probe(Duration::ZERO),
@@ -816,6 +856,7 @@ mod tests {
     }
 
     #[tokio::test]
+    // 验证无关联且提交位置失败的消费组仍保留组标识。
     async fn unassociated_group_with_failed_offsets_keeps_only_its_identity() {
         let mut probe = probe(Duration::ZERO);
         probe.committed_fails = true;
@@ -831,6 +872,7 @@ mod tests {
     }
 
     #[tokio::test]
+    // 验证活跃分配保留未提交 Topic，负偏移不会建立虚假关联。
     async fn active_assignments_keep_uncommitted_topic_and_negative_offsets_do_not_associate_topics()
      {
         let mut probe = probe(Duration::ZERO);
@@ -854,6 +896,7 @@ mod tests {
 
     // Dropping a failed partition, treating uncommitted as zero, or missing inactive groups breaks this.
     #[tokio::test]
+    // 验证健康指标、非活跃组、未知位置和局部失败同时保留。
     async fn preserves_healthy_topics_inactive_groups_unknown_offsets_and_partial_failures() {
         let snapshot = collect(
             &probe(Duration::ZERO),
@@ -897,6 +940,7 @@ mod tests {
 
     // Starting all partition requests at once breaks the measured upper bound.
     #[tokio::test]
+    // 验证水位查询并发不会超过设定上限。
     async fn bounds_parallel_watermark_requests() {
         let probe = probe(Duration::from_millis(5));
         collect(
@@ -913,6 +957,7 @@ mod tests {
 
     // An unbounded await or aborting the entire snapshot on a local timeout breaks this.
     #[tokio::test]
+    // 验证单项查询超时后返回保留健康部分的快照。
     async fn operation_deadlines_return_partial_snapshot() {
         let snapshot = collect(
             &probe(Duration::from_secs(60)),
@@ -935,6 +980,7 @@ mod tests {
 
     // A failed committed request must leave the discovered group visible with unknown lag.
     #[tokio::test]
+    // 验证提交位置失败仍保留已发现组及健康 Topic。
     async fn committed_failure_preserves_discovered_group_and_healthy_topics() {
         let mut probe = probe(Duration::ZERO);
         probe.committed_fails = true;
@@ -952,6 +998,7 @@ mod tests {
 
     // Independent committed success must survive failure of this partition's watermark.
     #[tokio::test]
+    // 验证水位失败仍保留分区标识和已成功读取的提交位置。
     async fn failed_watermark_keeps_partition_identity_and_successful_committed_offset() {
         let snapshot = serde_json::to_value(
             collect(
@@ -977,6 +1024,7 @@ mod tests {
 
     // All watermark failures must still preserve known offsets and every partition.
     #[tokio::test]
+    // 验证所有水位失败时指标保持未知且已知提交位置不丢失。
     async fn all_watermarks_failed_retains_unknown_metrics_and_known_committed_offsets() {
         let mut probe = probe(Duration::ZERO);
         probe.all_watermarks_fail = true;
@@ -1003,6 +1051,7 @@ mod tests {
 
     // Topic metadata failure must not erase successful group discovery.
     #[tokio::test]
+    // 验证元数据失败仍保留消费组发现结果。
     async fn metadata_failure_preserves_discovered_group_identities() {
         let mut probe = probe(Duration::ZERO);
         probe.topics_fails = true;
@@ -1021,6 +1070,7 @@ mod tests {
 
     // A wrong group.id, swapped offsets, or replacing unknown with zero breaks this.
     #[tokio::test]
+    // 验证提交位置查询及汇总严格使用对应的消费组。
     async fn committed_offsets_are_aggregated_for_the_exact_target_group() {
         let mut probe = probe(Duration::ZERO);
         probe.multiple_groups = true;
@@ -1047,6 +1097,7 @@ mod tests {
 
     // Cancellation of an async timeout must not release the native concurrency slot.
     #[tokio::test]
+    // 验证原生调用超时后仍持有并发许可，收尾等待阻塞工作结束。
     async fn native_timeouts_retain_permits_and_finish_waits_for_blocking_work() {
         use crate::sessions::manager::{KafkaSessionClientFactory, SessionClientFactory};
         let client = KafkaSessionClientFactory

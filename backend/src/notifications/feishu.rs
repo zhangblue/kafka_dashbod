@@ -28,10 +28,12 @@ pub enum AlertSendError {
 
 #[async_trait]
 pub trait AlertSender: Send + Sync {
+    // 通知触发时发送文本并返回稳定安全结果，供告警状态机记录本次投递。
     async fn send_text(&self, access_token: &str, text: &str) -> Result<(), AlertSendError>;
 }
 
 /// Validate before constructing a URL; callers may persist the normalized return value.
+// 保存或发送前校验并规范化机器人凭据，拒绝无效路径片段及控制字符。
 pub fn validate_access_token(access_token: &str) -> Result<&str, AlertSendError> {
     let token = access_token.trim();
     if token.is_empty()
@@ -44,6 +46,7 @@ pub fn validate_access_token(access_token: &str) -> Result<&str, AlertSendError>
     Ok(token)
 }
 
+// 创建通知客户端时设置总时限、仅允许 HTTPS 并禁用重定向，约束凭据发送边界。
 fn configured_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .timeout(SEND_TIMEOUT)
@@ -57,12 +60,14 @@ pub struct ReqwestFeishuSender {
 }
 
 impl fmt::Debug for ReqwestFeishuSender {
+    // 调试格式化时仅输出固定脱敏标记，避免检查内部连接配置。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ReqwestFeishuSender([REDACTED])")
     }
 }
 
 impl ReqwestFeishuSender {
+    // 应用初始化通知服务时创建受限客户端和生产传输适配器。
     pub fn new() -> Result<Self, AlertSendError> {
         let client = configured_client_builder()
             .build()
@@ -76,6 +81,7 @@ impl ReqwestFeishuSender {
     }
 
     #[cfg(test)]
+    // 通知单元测试创建发送器时注入假传输，避免访问真实通知服务。
     fn with_transport(transport: impl FeishuTransport + 'static) -> Self {
         Self {
             client: configured_client_builder().build().unwrap(),
@@ -102,7 +108,9 @@ struct BusinessResponse {
 
 #[async_trait]
 impl AlertSender for ReqwestFeishuSender {
+    // 通知触发时发送文本并返回稳定安全结果，供告警状态机记录本次投递。
     async fn send_text(&self, access_token: &str, text: &str) -> Result<(), AlertSendError> {
+        // 先校验凭据，再作为单一路径片段编码；目标主机和机器人路径前缀保持固定。
         let token = validate_access_token(access_token)?;
         let mut url = reqwest::Url::parse("https://open.feishu.cn/open-apis/bot/v2/hook/")
             .map_err(|_| AlertSendError::ClientConfiguration)?;
@@ -120,6 +128,7 @@ impl AlertSender for ReqwestFeishuSender {
             })
             .build()
             .map_err(|_| AlertSendError::ClientConfiguration)?;
+        // 外层超时覆盖整个传输及响应体读取，假传输和生产传输都受相同五秒预算约束。
         let response = tokio::time::timeout(SEND_TIMEOUT, self.transport.execute(request))
             .await
             .map_err(|_| AlertSendError::Timeout)??;
@@ -145,6 +154,7 @@ struct TransportResponse {
 
 #[async_trait]
 trait FeishuTransport: Send + Sync {
+    // 发送通知时执行请求并有界读取响应，非成功状态不读取远端正文。
     async fn execute(&self, request: reqwest::Request)
     -> Result<TransportResponse, AlertSendError>;
 }
@@ -153,6 +163,7 @@ struct ReqwestTransport {
     client: reqwest::Client,
 }
 
+// 通知网络调用失败时只区分超时与网络故障，不暴露请求或响应内容。
 fn classify_reqwest_error(error: reqwest::Error) -> AlertSendError {
     if error.is_timeout() {
         AlertSendError::Timeout
@@ -163,6 +174,7 @@ fn classify_reqwest_error(error: reqwest::Error) -> AlertSendError {
 
 #[async_trait]
 impl FeishuTransport for ReqwestTransport {
+    // 发送通知时执行请求并有界读取响应，非成功状态不读取远端正文。
     async fn execute(
         &self,
         request: reqwest::Request,
@@ -173,6 +185,7 @@ impl FeishuTransport for ReqwestTransport {
             .await
             .map_err(classify_reqwest_error)?;
         let status = response.status().as_u16();
+        // 先检查状态再读取正文，失败响应不保留远端内容；成功体也必须受字节上限约束。
         // Reject unsuccessful status before reading any potentially sensitive remote body.
         if !response.status().is_success() {
             return Ok(TransportResponse {
@@ -187,6 +200,7 @@ impl FeishuTransport for ReqwestTransport {
             return Err(AlertSendError::InvalidResponse);
         }
         let mut body = Vec::new();
+        // 流式逐块累计上限，不依赖可能缺失或不可信的长度头，避免无限响应占用内存。
         while let Some(chunk) = response.chunk().await.map_err(classify_reqwest_error)? {
             if chunk.len() > MAX_RESPONSE_BYTES - body.len() {
                 return Err(AlertSendError::InvalidResponse);
@@ -207,6 +221,7 @@ pub struct GrowthAlertMessage<'a> {
     pub detected_at: DateTime<FixedOffset>,
 }
 
+// 拼装通知时为非负数量添加千分位，保持大整数完整精度。
 fn format_count(value: u64) -> String {
     let digits = value.to_string();
     let mut formatted = String::new();
@@ -219,6 +234,7 @@ fn format_count(value: u64) -> String {
     formatted
 }
 
+// 增长规则决定发送时生成含阈值、总 Lag、持续时间和时区的通知文本。
 pub fn format_growth_alert(message: &GrowthAlertMessage<'_>) -> String {
     format!(
         "Kafka Lens Lag 持续增长告警\n集群：{}\nTopic：{}\nConsumer Group：{}\n阈值：{}\n当前积压量（全部 Partition Lag 总和）：{}\n连续增长时间：{} 秒\n检测时间：{}",
@@ -232,6 +248,7 @@ pub fn format_growth_alert(message: &GrowthAlertMessage<'_>) -> String {
     )
 }
 
+// 测试通知接口调用时生成明确标识测试用途的集群与时间文本。
 pub fn format_test_alert(cluster_name: &str, detected_at: DateTime<FixedOffset>) -> String {
     format!(
         "Kafka Lens 飞书测试通知\n集群：{}\n检测时间：{}",
@@ -248,11 +265,13 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[track_caller]
+    // 敏感通知测试断言失败时仅输出固定诊断，避免泄漏请求上下文。
     fn assert_sensitive(condition: bool) {
         assert!(condition, "Feishu sender assertion failed");
     }
 
     #[test]
+    // 验证敏感断言的失败诊断保持固定文本。
     fn sensitive_assertions_use_fixed_failure_diagnostics() {
         let token = String::from("diagnostic-fixture-token");
         let panic = std::panic::catch_unwind(|| assert_sensitive(token.is_empty()))
@@ -275,6 +294,7 @@ mod tests {
     }
 
     impl RecordingTransport {
+        // 通知测试准备假传输时设置可控状态与响应体，并初始化请求记录。
         fn responding(status: u16, body: &[u8]) -> Self {
             Self {
                 requests: Arc::default(),
@@ -286,6 +306,7 @@ mod tests {
 
     #[async_trait]
     impl FeishuTransport for RecordingTransport {
+        // 通知测试调用时返回可控传输结果，验证发送器行为。
         async fn execute(
             &self,
             request: reqwest::Request,
@@ -300,6 +321,7 @@ mod tests {
 
     // Catch URL interpolation, missing JSON envelope, and accepting a response without code=0.
     #[tokio::test]
+    // 验证通知正文符合文本消息结构且仅业务成功码被接受。
     async fn text_payload_and_success_code_follow_feishu_contract() {
         let transport = RecordingTransport::responding(200, br#"{"code":0,"msg":"success"}"#);
         let sender = ReqwestFeishuSender::with_transport(transport.clone());
@@ -327,6 +349,7 @@ mod tests {
     }
 
     #[tokio::test]
+    // 验证机器人凭据不能改变目标主机或越出固定路径前缀。
     async fn token_cannot_change_host_or_escape_the_hook_prefix() {
         for token in [
             "https://evil.invalid/hook",
@@ -353,6 +376,7 @@ mod tests {
     }
 
     #[tokio::test]
+    // 验证无效机器人凭据在进入传输前被拒绝。
     async fn invalid_tokens_are_rejected_before_transport() {
         for token in [
             String::new(),
@@ -375,6 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
+    // 验证 HTTP 与业务失败转换为安全分类。
     async fn http_and_business_failures_are_safely_classified() {
         for (status, body, expected) in [
             (302, br#"{"code":0}"#.as_slice(), AlertSendError::HttpStatus),
@@ -415,6 +440,7 @@ mod tests {
     }
 
     #[tokio::test]
+    // 验证超大业务响应被拒绝，避免无限读取。
     async fn oversized_business_response_is_rejected() {
         let body = format!(r#"{{"code":0,"msg":"{}"}}"#, "a".repeat(16 * 1024));
         let sender = ReqwestFeishuSender::with_transport(RecordingTransport::responding(
@@ -431,12 +457,14 @@ mod tests {
 
     #[async_trait]
     impl FeishuTransport for HangingTransport {
+        // 超时测试调用时保持传输挂起，验证发送器外层总时限能够终止等待。
         async fn execute(&self, _: reqwest::Request) -> Result<TransportResponse, AlertSendError> {
             std::future::pending().await
         }
     }
 
     #[tokio::test(start_paused = true)]
+    // 验证完整发送链路在五秒后超时。
     async fn total_send_times_out_after_five_seconds() {
         let sender = ReqwestFeishuSender::with_transport(HangingTransport);
         let started = tokio::time::Instant::now();
@@ -448,6 +476,7 @@ mod tests {
     }
 
     #[tokio::test]
+    // 验证传输超时与网络失败保持不同分类。
     async fn transport_failures_keep_timeout_distinct_from_network_errors() {
         for should_timeout in [true, false] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -482,6 +511,7 @@ mod tests {
     }
 
     #[tokio::test]
+    // 验证生产客户端拒绝明文 HTTP 请求。
     async fn production_client_rejects_plain_http() {
         let client = configured_client_builder().build().unwrap();
         assert!(
@@ -496,6 +526,7 @@ mod tests {
 
     // Allow only loopback HTTP in this test to exercise the production redirect policy.
     #[tokio::test]
+    // 验证通知客户端不会跟随重定向转发敏感请求。
     async fn configured_client_does_not_follow_redirects() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -528,6 +559,7 @@ mod tests {
     }
 
     #[test]
+    // 验证增长通知包含所有必要字段与明确时区。
     fn growth_message_has_all_required_fields_and_timezone() {
         let text = format_growth_alert(&GrowthAlertMessage {
             cluster_name: "订单生产集群",
@@ -552,6 +584,7 @@ mod tests {
     }
 
     #[test]
+    // 验证增长持续时间超过 32 位无符号整数范围时不会截断。
     fn growth_message_preserves_durations_above_u32_max() {
         let text = format_growth_alert(&GrowthAlertMessage {
             cluster_name: "fixture",
@@ -566,6 +599,7 @@ mod tests {
     }
 
     #[test]
+    // 验证测试通知明确包含测试用途、集群与时间。
     fn test_message_clearly_identifies_test_cluster_and_time() {
         let detected_at =
             chrono::DateTime::parse_from_rfc3339("2026-10-22T09:30:00+08:00").unwrap();

@@ -34,8 +34,10 @@ struct MonitorTask {
 pub struct AlertMonitorHandle(Arc<MonitorTask>);
 
 impl AlertMonitorHandle {
+    // 进程退出时通知告警停止并等待唯一协调任务，取消等待者不会丢失任务句柄。
     pub async fn shutdown(&self) {
         self.0.stop.send_replace(true);
+        // 共享锁保护唯一句柄，等待者取消也不会取走句柄，后续关闭仍能继续等待协调器。
         let mut task = self.0.task.lock().await;
         if let Some(task) = task.as_mut() {
             let _ = task.await;
@@ -44,6 +46,7 @@ impl AlertMonitorHandle {
     }
 }
 
+// 应用启动时创建告警协调任务，返回可共享且可等待的停止句柄。
 pub fn start<F: SessionClientFactory>(
     clusters: ClusterRepository,
     settings: FeishuAlertRepository,
@@ -74,10 +77,12 @@ struct Worker {
     task: JoinHandle<()>,
 }
 
+// 协调器和 worker 接受新工作前检查停止标记，发送端消失也视作停止。
 fn stopped(stop: &watch::Receiver<bool>) -> bool {
     *stop.borrow() || stop.has_changed().is_err()
 }
 
+// 后台周期核对告警与集群版本，按集群启动或退役 worker 并在退出时排空。
 async fn coordinate<F: SessionClientFactory>(
     clusters: ClusterRepository,
     settings: FeishuAlertRepository,
@@ -147,6 +152,7 @@ async fn coordinate<F: SessionClientFactory>(
             if let Some(worker) = workers.remove(&id) {
                 worker.stop.send_replace(true);
                 retiring_ids.insert(id.clone());
+                // 退役只等待不强制取消，保留已接受采集和通知的结果；其他集群仍能继续协调。
                 retiring.spawn(async move {
                     let _ = worker.task.await;
                     id
@@ -159,6 +165,7 @@ async fn coordinate<F: SessionClientFactory>(
             }
             // Only this cluster waits for its old native work and destructor.
             // Other clusters still reconcile while a retirement is in progress.
+            // 同一集群旧 worker 的原生工作和析构未结束前禁止启动替代者，防止连接重叠。
             if workers.contains_key(&id) || retiring_ids.contains(&id) {
                 continue;
             }
@@ -173,6 +180,7 @@ async fn coordinate<F: SessionClientFactory>(
             // These repositories read separately. Bracket the connection read
             // with revision checks so old alert/name metadata cannot be paired
             // with a connection from a newer cluster revision.
+            // 解密读取前后复核集群及告警版本，避免把新连接与旧规则或旧名称组合使用。
             let cluster_unchanged = match clusters.get(&id).await {
                 Ok(Some(current)) => current.updated_at == cluster.updated_at,
                 Ok(None) => false,
@@ -222,6 +230,7 @@ async fn coordinate<F: SessionClientFactory>(
         let _ = worker.task.await;
     }
     // Drain rather than abort: retirement includes accepted native work and sends.
+    // 退出时排空退役集合，等待原生工作、发送与析构完成，不把任务留在后台。
     while retiring.join_next().await.is_some() {}
 }
 
@@ -231,6 +240,7 @@ struct RuleState {
     attempt: u8,
 }
 
+// 启用告警后独占该集群客户端按期采样，执行增长判定、发送及失败重试状态记录。
 async fn run_worker<F: SessionClientFactory>(
     setting: EnabledAlertCluster,
     cluster_name: String,
@@ -245,6 +255,7 @@ async fn run_worker<F: SessionClientFactory>(
     }
     // Creation/snapshot/send are deliberately outside select: accepted native
     // work cannot be cancelled, and a delivery result must reach AlertState.
+    // 创建、采样和发送不放入可取消分支；接收工作后必须等待完成，保留资源和投递状态。
     let mut client = match factory.create(config).await {
         Ok(client) => client,
         Err(_) => {
@@ -279,6 +290,7 @@ async fn run_worker<F: SessionClientFactory>(
         let snapshot = factory.snapshot(&mut client, &setting.cluster_id).await;
         // Every rule evaluates this sample at its collection completion time;
         // a slow notification for another rule must not extend its growth window.
+        // 用采集完成时刻评估所有规则，避免较慢的通知发送虚增其他规则的持续增长窗口。
         let observed_at = Instant::now().into_std();
         if snapshot.is_err() {
             tracing::warn!(cluster_id = %setting.cluster_id, code = "ALERT_COLLECTION_FAILED");
@@ -322,6 +334,7 @@ async fn run_worker<F: SessionClientFactory>(
                 detected_at: chrono::Local::now().fixed_offset(),
             });
             runtime.attempt += 1;
+            // 串行等待本次投递并记录结果，失败重试间隔和次数由状态机控制，不能因停止丢失结果。
             let result = sender.send_text(&setting.access_token, &text).await;
             runtime
                 .state
@@ -338,9 +351,11 @@ async fn run_worker<F: SessionClientFactory>(
     }
     // Native destructors may join poll threads. The coordinator awaits this
     // blocking drop before replacing the worker or reporting shutdown complete.
+    // 原生析构可能等待线程退出；协调器等待该阻塞释放后才替换 worker 或完成全局关闭。
     let _ = tokio::task::spawn_blocking(move || drop(client)).await;
 }
 
+// 告警规则评估时仅汇总完整且可检查求和的分区 Lag，缺项或溢出返回未知。
 fn complete_total_lag(snapshot: &ClusterSnapshot, rule: &FeishuAlertRule) -> Option<i64> {
     let row = snapshot
         .consumer_groups

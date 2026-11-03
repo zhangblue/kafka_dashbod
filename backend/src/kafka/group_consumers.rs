@@ -11,11 +11,13 @@ use std::{
 pub struct GroupConsumerCache(Arc<Mutex<HashMap<String, Arc<BaseConsumer<SessionContext>>>>>);
 
 impl GroupConsumerCache {
+    // 查询指定组提交位置时复用会话内读客户端，首次访问才按组创建且不订阅或提交。
     pub fn get_or_create(
         &self,
         group: &str,
         config: &DecryptedClusterConfig,
     ) -> Result<Arc<BaseConsumer<SessionContext>>, ProbeError> {
+        // 查询和首次创建共用缓存锁，防止同一组并发创建多个原生读客户端。
         let mut cache = self.0.lock().map_err(|_| ProbeError::Query)?;
         if let Some(consumer) = cache.get(group) {
             return Ok(consumer.clone());
