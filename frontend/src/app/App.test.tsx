@@ -18,7 +18,7 @@ it('renders the dashboard navigation', () => {
   vi.spyOn(clustersApi, 'list').mockResolvedValue([])
   render(<App />)
   expect(screen.getByText('Kafka Lens')).toBeInTheDocument()
-  expect(screen.getByText('Cluster observability')).toBeInTheDocument()
+  expect(screen.getByText('集群可观测性')).toBeInTheDocument()
   expect(screen.getByRole('complementary', { name: 'Kafka Lens' })).toHaveTextContent('监控与 Topic 管理')
   expect(screen.getByRole('complementary', { name: 'Kafka Lens' })).not.toHaveTextContent('只读模式')
   expect(screen.getByRole('navigation')).toBeInTheDocument()

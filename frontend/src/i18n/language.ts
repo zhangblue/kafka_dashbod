@@ -2,6 +2,24 @@ export type AppLanguage = 'zh-CN' | 'en'
 
 export const LANGUAGE_STORAGE_KEY = 'kafka-lens.language'
 
+// 初始化时分别安全读取浏览器语言列表和单值回退，任一属性被禁用都不能阻断首屏。
+export function readBrowserLanguages(): readonly string[] {
+  const preferences: string[] = []
+  try {
+    const languages = navigator.languages
+    if (Array.isArray(languages)) preferences.push(...languages)
+  } catch {
+    // 多语言属性不可读时继续尝试单值属性。
+  }
+  try {
+    const language = navigator.language
+    if (typeof language === 'string') preferences.push(language)
+  } catch {
+    // navigator 或单值属性也不可读时保留已有列表，由解析层统一兜底。
+  }
+  return preferences
+}
+
 // 应用初始化时优先恢复明确选择，否则仅按首个有效浏览器偏好确定内置语言。
 export function resolveInitialLanguage(input: { stored: string | null; browserLanguages: readonly string[] }): AppLanguage {
   if (input.stored === 'zh-CN' || input.stored === 'en') return input.stored

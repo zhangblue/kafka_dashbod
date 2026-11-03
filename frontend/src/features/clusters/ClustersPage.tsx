@@ -252,7 +252,7 @@ export function ClustersPage({ snapshot = null }: ClustersPageProps) {
     <div className="settings-grid">{clusters.data?.map(cluster => <fieldset className="cluster-card" key={cluster.id} aria-label={cluster.name}>
       <div className="cluster-card-top"><h3>{cluster.name}</h3><span className="protocol-badge">{cluster.securityProtocol}</span></div>
       <div className="cluster-meta"><p>{cluster.bootstrapServers}</p><p>{cluster.saslMechanism || t('clusterConfig.connection')}</p></div>
-      <div className="threshold-summary">{t('clusterConfig.thresholdSummary', { normal: cluster.defaultNormalLagMax.toLocaleString('en-US'), high: cluster.defaultHighLagMin.toLocaleString('en-US') })}<br />{t('clusterConfig.durationSummary', { seconds: cluster.defaultOverLimitSeconds })}</div>
+      <div className="threshold-summary">{t('clusterConfig.thresholdSummary', { normal: cluster.defaultNormalLagMax.toLocaleString('en-US'), high: cluster.defaultHighLagMin.toLocaleString('en-US') })}<br />{t('clusterConfig.durationSummary', { count: cluster.defaultOverLimitSeconds })}</div>
       <FeishuAlertSummary clusterId={cluster.id} />
       <div className="cluster-card-actions">
       <button type="button" disabled={savingSettings} onClick={/* 在编辑按钮点击时清除旧保存反馈并关闭其他配置弹窗，隔离不同草稿。 */ () => { save.reset(); setRulesClusterId(null); setFeishuClusterId(null); setEditing(cluster) }}>{t('clusterConfig.editButton')}</button>

@@ -702,6 +702,19 @@ it('retains the open editor and rule draft when switching to English', async () 
   expect(sessions).toBe(before)
 })
 
+// 验证页面将真实数量传入复数解析，而非仅资源 helper 能显示单数。
+it('renders a single second and a single alert rule in English', async () => {
+  await i18n.changeLanguage('en')
+  server.use(
+    http.get('/api/clusters', () => HttpResponse.json([{ ...clusterFixture, defaultOverLimitSeconds: 1 }])),
+    http.get('/api/clusters/:id/feishu-alert', () => HttpResponse.json({ accessTokenConfigured: false, maskedAccessToken: null,
+      rules: [{ groupId: 'worker', topic: 'orders', lagThreshold: 1, growthSeconds: 10, enabled: true }] })),
+  )
+  renderPage()
+  expect(await screen.findByText(/Over-limit duration: 1 second$/)).toBeVisible()
+  expect(await screen.findByText(/1 Topic \+ Group rule$/)).toBeVisible()
+})
+
 // 验证 English 集群配置保留协议值和凭据标记，并显示连接测试与保存结果。
 it('edits cluster credentials and tests configuration in English', async () => {
   await i18n.changeLanguage('en')

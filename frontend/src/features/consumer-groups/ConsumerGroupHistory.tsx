@@ -69,7 +69,7 @@ export function ConsumerGroupHistory({ snapshot, history, stale }: { snapshot: C
   const groups = [...new Set(snapshots.flatMap(snapshot => snapshot.consumerGroups.map(row => row.groupId)))]
   const groupId = groups.includes(chosenGroup) ? chosenGroup : groups[0]
   if (!groupId) return null
-  return <section aria-label={t('consumerGroups.historyTitle')}><h3>{t('consumerGroups.historyTitle')}</h3>
+  return <section className="consumer-group-history" aria-label={t('consumerGroups.historyTitle')}><h3>{t('consumerGroups.historyTitle')}</h3>
     <p>{t('consumerGroups.historyDescription')}</p>
     <label>{t('consumerGroups.historyGroup')} <select value={groupId} onChange={/* 在趋势消费组选择变化时切换对应历史视图。 */ event => setChosenGroup(event.target.value)}>
       {groups.map(group => <option key={group}>{group}</option>)}

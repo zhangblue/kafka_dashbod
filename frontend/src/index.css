@@ -247,12 +247,12 @@ button.feishu-token-eye { display: grid; place-items: center; padding: 0; height
 .feishu-rule-row .feishu-checkbox { height: 42px; }
 .feishu-rule-row > button { height: 42px; white-space: nowrap; }
 .feishu-form-actions { flex-wrap: wrap; }
-section[aria-label="消费组 Lag 历史"] { margin-top: 24px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
-section[aria-label="消费组 Lag 历史"] > h3 { margin: 0; font-size: 14px; }
-section[aria-label="消费组 Lag 历史"] > p { font-size: 12px; }
-section[aria-label="消费组 Lag 历史"] fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin: 0 0 14px; }
-section[aria-label="消费组 Lag 历史"] legend { color: var(--muted); font-size: 12px; }
-section[aria-label="消费组 Lag 历史"] fieldset label { display: inline-flex; align-items: center; margin-bottom: 4px; }
+.consumer-group-history { margin-top: 24px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.consumer-group-history > h3 { margin: 0; font-size: 14px; }
+.consumer-group-history > p { font-size: 12px; }
+.consumer-group-history fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin: 0 0 14px; }
+.consumer-group-history legend { color: var(--muted); font-size: 12px; }
+.consumer-group-history fieldset label { display: inline-flex; align-items: center; margin-bottom: 4px; }
 summary { cursor: pointer; }
 .overview-skeleton { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; }
 .overview-skeleton p { grid-column: 1 / -1; }

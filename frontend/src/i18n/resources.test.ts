@@ -5,6 +5,15 @@ import { zhCN } from './resources/zh-CN'
 
 type ResourceTree = { readonly [key: string]: string | ResourceTree }
 
+// 数量在 0、1 和多个值时选择正确复数形式，防止英文固定复数误导单项显示。
+it.each([0, 1, 2])('uses English count grammar for %s items', count => {
+  const t = i18n.getFixedT('en')
+  expect(t('topics.count', { count })).toBe(`${count} ${count === 1 ? 'Topic' : 'Topics'}`)
+  expect(t('overview.partitions', { count, value: String(count) })).toBe(`${count} ${count === 1 ? 'Partition' : 'Partitions'} in total`)
+  expect(t('clusterConfig.ruleCount', { count })).toBe(` · ${count} Topic + Group ${count === 1 ? 'rule' : 'rules'}`)
+  expect(t('clusterConfig.durationSummary', { count, seconds: count })).toBe(`Over-limit duration: ${count} ${count === 1 ? 'second' : 'seconds'}`)
+})
+
 // 资源完整性检查时递归收集叶子值，以发现深层翻译缺失或空文本。
 function flattenLeaves(resource: ResourceTree, prefix = ''): Record<string, string> {
   const leaves: Record<string, string> = {}

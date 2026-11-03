@@ -65,6 +65,9 @@ for (const [language, labels] of [
       ]
       const header = await page.locator('header.topbar').boundingBox()
       const boxes = await Promise.all(controls.map(control => control.boundingBox()))
+      // 语言入口必须始终最靠右，断连新增重连按钮也不能改变此位置。
+      const languageBox = await page.locator('.language-switch').boundingBox()
+      for (const box of boxes) assert.ok(box.x + box.width <= languageBox.x + languageBox.width + 0.5, 'language switch must be the rightmost control')
       const failures = []
       for (const [index, box] of boxes.entries()) {
         if (!box || box.x < 0 || box.x + box.width > 360.5 || box.y < header.y || box.y + box.height > header.y + header.height + 0.5) failures.push(`control ${index} outside header or viewport`)
@@ -79,3 +82,40 @@ for (const [language, labels] of [
     })
   }
 }
+
+// 在真实页面对比切换前后的计算样式，覆盖卡片、标题、说明及历史序列选项，防止样式依赖翻译标签。
+test('history styling remains identical when its accessible name changes language', { timeout: 15000 }, async t => {
+  const page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1280, height: 900 } })
+  t.after(() => page.close())
+  await page.route('**/api/**', async route => {
+    const pathname = new URL(route.request().url()).pathname
+    if (!pathname.startsWith('/api/')) return route.continue()
+    if (pathname === '/api/clusters') return route.fulfill({ json: [cluster] })
+    if (pathname.endsWith('/lag-rules')) return route.fulfill({ json: { defaults: { normalMax: 999, highMin: 5000, overLimitSeconds: 30 }, overrides: [] } })
+    if (pathname.endsWith('/sessions')) return route.fulfill({ status: 201, json: { sessionId: 'history-layout', leaseSeconds: 30 } })
+    if (pathname.endsWith('/snapshot')) return route.fulfill({ json: { clusterId: cluster.id, collectedAt: new Date().toISOString(), topics: [], consumerGroupIds: ['worker'], partialFailures: [],
+      consumerGroups: [{ groupId: 'worker', topic: 'orders', lag: 1, unknownPartitionCount: 0, incomplete: false, partitions: [{ partition: 0, high: 2, committedOffset: 1, lag: 1 }] }] } })
+    if (route.request().method() === 'DELETE') return route.fulfill({ status: 204 })
+    throw new Error(`Unexpected fixture request: ${pathname}`)
+  })
+  await page.goto(new URL('consumer-groups', baseUrl).href)
+  // 读取真实历史组件的计算样式，独立于它采用哪一种 class 或辅助名称。
+  const styles = () => page.locator('section').filter({ has: page.getByRole('checkbox', { name: /orders \/ Partition 0/ }) }).last().evaluate(section => {
+    const card = getComputedStyle(section)
+    const heading = getComputedStyle(section.querySelector('h3'))
+    const description = getComputedStyle(section.querySelector('p'))
+    const fieldset = getComputedStyle(section.querySelector('fieldset'))
+    const legend = getComputedStyle(section.querySelector('legend'))
+    const label = getComputedStyle(section.querySelector('fieldset label'))
+    return { padding: card.padding, border: card.borderTopWidth, radius: card.borderRadius, margin: card.marginTop,
+      headingMargin: heading.margin, descriptionSize: description.fontSize, fieldPadding: fieldset.padding, fieldBorder: fieldset.borderTopWidth,
+      legendSize: legend.fontSize, labelDisplay: label.display, labelMargin: label.marginBottom }
+  })
+  await expect(page.getByRole('checkbox', { name: 'orders / Partition 0', exact: true })).toBeVisible()
+  const chinese = await styles()
+  await page.getByRole('button', { name: 'English', exact: true }).click()
+  const english = await styles()
+  assert.deepEqual(english, chinese)
+  assert.deepEqual(english, { padding: '18px', border: '1px', radius: '12px', margin: '24px', headingMargin: '0px', descriptionSize: '12px',
+    fieldPadding: '14px', fieldBorder: '1px', legendSize: '12px', labelDisplay: 'inline-flex', labelMargin: '4px' })
+})

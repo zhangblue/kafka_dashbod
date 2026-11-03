@@ -40,8 +40,8 @@ function Monitor({ cluster, clusters, refreshSeconds, onCluster, onInterval }: {
       <option value={3}>{t('dashboard.seconds', { count: 3 })}</option><option value={5}>{t('dashboard.seconds', { count: 5 })}</option><option value={10}>{t('dashboard.seconds', { count: 10 })}</option>
     </select></label>
     <button className="icon-button" type="button" aria-label={t('dashboard.manualRefresh')} title={t('dashboard.refreshNow')} disabled={monitor.status !== 'connected' || monitor.isFetching} onClick={() => void monitor.refresh()}>↻</button>
-    <LanguageSwitch />
     {monitor.status === 'error' && <button type="button" onClick={monitor.reconnect}>{t('dashboard.reconnect')}</button>}
+    <LanguageSwitch />
     </div></header>
     <ApiErrorNotice error={monitor.error} />
     {Boolean(monitor.snapshot?.partialFailures.length) && <p role="alert">{t('dashboard.partialFailure')}</p>}

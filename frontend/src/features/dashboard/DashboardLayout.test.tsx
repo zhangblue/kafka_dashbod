@@ -152,4 +152,6 @@ it('translates the header while retaining the selected cluster, interval and sam
   await user.click(screen.getByRole('button', { name: 'Manual refresh' }))
   expect(await screen.findByText('Disconnected; showing the last snapshot')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Reconnect' })).toBeEnabled()
+  // 断连后新增的重连控件必须位于语言入口之前，键盘顺序与最右侧设计保持一致。
+  expect(screen.getByRole('button', { name: 'Reconnect' }).compareDocumentPosition(screen.getByRole('button', { name: 'English' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 })
