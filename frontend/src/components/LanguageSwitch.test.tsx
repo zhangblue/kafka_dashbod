@@ -4,6 +4,13 @@ import { afterEach, expect, it, vi } from 'vitest'
 import i18n from '../i18n'
 import { LANGUAGE_STORAGE_KEY } from '../i18n/language'
 import { LanguageSwitch } from './LanguageSwitch'
+import { useTranslation } from 'react-i18next'
+
+// 在存储异常用例中展示实际翻译，防止只有按钮状态变化而页面文案未更新。
+function TranslatedContent() {
+  const { t } = useTranslation()
+  return <p>{t('common.errors.requestFailed')}</p>
+}
 
 // 每个语言控件用例后恢复存储替身，避免异常注入影响后续场景。
 afterEach(() => vi.restoreAllMocks())
@@ -48,12 +55,26 @@ it('keeps the page language when saving the preference throws', async () => {
     documentLanguageAtWrite = document.documentElement.lang
     throw new DOMException('Storage unavailable', 'SecurityError')
   })
-  render(<LanguageSwitch />)
+  render(<><LanguageSwitch /><TranslatedContent /></>)
   await user.click(screen.getByRole('button', { name: 'English' }))
+  expect(screen.getByText('Request failed. Please try again later.')).toBeVisible()
   expect(i18n.resolvedLanguage).toBe('en')
   expect(languageAtWrite).toBe('en')
   expect(documentLanguageAtWrite).toBe('en')
   expect(screen.getByRole('button', { name: 'English' })).toHaveAttribute('aria-pressed', 'true')
+})
+
+// 验证浏览器拒绝整个存储属性时仍可来回切换真实译文和文档语言。
+it('renders both languages when the browser denies localStorage access', async () => {
+  const user = userEvent.setup()
+  vi.spyOn(window, 'localStorage', 'get').mockImplementation(() => { throw new DOMException('Storage unavailable', 'SecurityError') })
+  render(<><LanguageSwitch /><TranslatedContent /></>)
+  await user.click(screen.getByRole('button', { name: 'English' }))
+  expect(screen.getByText('Request failed. Please try again later.')).toBeVisible()
+  expect(document.documentElement.lang).toBe('en')
+  await user.click(screen.getByRole('button', { name: '中文' }))
+  expect(screen.getByText('请求失败，请稍后重试。')).toBeVisible()
+  expect(document.documentElement.lang).toBe('zh-CN')
 })
 
 // 验证异步语言切换尚未完成时不提前保存偏好，防止刷新恢复尚未生效的语言。

@@ -2,6 +2,7 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import type { TopicConfigsResponse } from '../api/types'
 
+// 集群名称是用户数据，英文界面也必须原样保留；不要把此中文 fixture 当作漏译文案。
 export const clusterFixture = {
   id: 'cluster-a', name: '生产 Kafka', bootstrapServers: 'broker:9092',
   securityProtocol: 'SASL_SSL' as const, saslMechanism: 'PLAIN', username: 'operator',

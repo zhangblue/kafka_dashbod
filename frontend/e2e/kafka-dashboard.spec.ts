@@ -6,13 +6,81 @@ const topic = 'dashboard-e2e-orders'
 const group = 'dashboard-e2e-reader'
 const secret = process.env.E2E_FIXTURE_SECRET ?? 'missing-fixture-secret'
 
-test.beforeEach(/* 在每个浏览器用例前核对隔离服务、回环 broker 端口及一次性环境许可，防止误写已有集群。 */ () => {
+test.beforeEach(/* 在每个浏览器用例前核对隔离服务、回环 broker 端口及一次性环境许可，防止误写已有集群。 */ async ({ page }) => {
   expect(process.env.E2E_BASE_URL, 'Run through scripts/test-e2e.sh to start isolated services').toBeTruthy()
   expect(process.env.E2E_KAFKA_BROKERS).toMatch(/^127\.0\.0\.1:\d+$/)
   const port = Number(process.env.E2E_KAFKA_BROKERS?.split(':')[1])
   expect(port).toBeGreaterThan(0)
   expect(port).toBeLessThanOrEqual(65535)
   expect(process.env.E2E_KAFKA_FIXTURE_PERMIT).toBe('disposable-compose')
+  // 先访问同源无应用脚本页面，仅清除语言偏好一次，后续 reload 才能真实验证持久化。
+  await page.goto('/api/health')
+  await page.evaluate(() => localStorage.removeItem('kafka-lens.language'))
+})
+
+// 验证真实顶部栏操作、语言持久化及监控连续性；弹窗部分单独触发程序化变更，不声称背景可交互。
+test('switches locale through the topbar and retains an open dialog on a programmatic language change', async ({ page, request }) => {
+  await page.goto('/settings')
+  const id = await createCluster(page, 'E2E locale')
+  let creates = 0
+  let topicWrites = 0
+  page.on('request', /* 统计浏览器实际请求，语言切换不得重建 session 或提交 Topic 写入。 */ req => {
+    if (/\/api\/clusters\/[^/]+\/sessions$/.test(req.url()) && req.method() === 'POST') creates++
+    if (/\/api\/sessions\/[^/]+\/topics/.test(req.url()) && req.method() !== 'GET') topicWrites++
+  })
+  try {
+    await page.getByRole('link', { name: '概览', exact: true }).click()
+    await page.getByLabel('集群', { exact: true }).selectOption(id)
+    await expect(page.getByText('已连接', { exact: true })).toBeVisible()
+    await page.getByLabel('刷新频率').selectOption('10')
+    const url = page.url()
+    const before = creates
+    expect(before).toBe(1)
+    // 无弹窗时点击真实入口，验证导航、标题、顶部栏和语言偏好同步更新。
+    await page.getByRole('button', { name: 'English', exact: true }).click()
+    await expect(page.getByRole('link', { name: 'Cluster Settings', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Cluster Overview', exact: true })).toBeVisible()
+    await expect(page.getByLabel('Refresh interval')).toHaveValue('10')
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en')
+    expect(page.url()).toBe(url)
+    expect(creates).toBe(before)
+    await page.getByRole('link', { name: 'Topics', exact: true }).click()
+    await page.getByRole('button', { name: '中文', exact: true }).click()
+    await page.getByRole('button', { name: '新建 Topic', exact: true }).click()
+    const dialog = page.getByRole('dialog')
+    await dialog.getByLabel('Topic 名称', { exact: true }).fill('locale-unsaved-draft')
+    const dialogUrl = page.url()
+    // showModal 使背景 inert；仅程序化触发现有 handler 来验收重渲染状态，不使用 force click 伪装用户操作。
+    await page.locator('.topbar button[aria-label="English"]').evaluate((button: HTMLButtonElement) => button.click())
+    await expect(dialog).toHaveAccessibleName('Create Topic')
+    await expect(dialog).toHaveAttribute('open', '')
+    await expect(dialog.getByLabel('Topic name', { exact: true })).toHaveValue('locale-unsaved-draft')
+    expect(page.url()).toBe(dialogUrl)
+    expect(creates).toBe(before)
+    // 已填写草稿的取消操作会要求原生确认；先接受放弃，避免 Playwright 默认 dismiss 保留弹窗。
+    page.once('dialog', /* 仅接受本次放弃非敏感草稿的确认，不提交任何 Kafka 写入。 */ confirmation => confirmation.accept())
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(dialog).toHaveCount(0)
+    // 窄屏下通过真实键盘激活两种语言，关闭弹窗后顶部栏才恢复可操作。
+    await page.setViewportSize({ width: 360, height: 800 })
+    await page.getByRole('button', { name: '中文', exact: true }).focus()
+    await expect(page.getByRole('button', { name: '中文', exact: true })).toBeFocused()
+    await page.keyboard.press('Space')
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
+    expect(await page.evaluate(() => localStorage.getItem('kafka-lens.language'))).toBe('zh-CN')
+    await page.getByRole('button', { name: 'English', exact: true }).focus()
+    await page.keyboard.press('Enter')
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en')
+    expect(creates).toBe(before)
+    expect(topicWrites).toBe(0)
+    // reload 可重新建立会话；此前的计数断言只针对无刷新切换，持久化验收单独进行。
+    await page.reload()
+    await expect(page.getByRole('link', { name: 'Cluster Settings', exact: true })).toBeVisible()
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en')
+  } finally {
+    await page.goto('/settings')
+    expect((await request.delete(`/api/clusters/${id}`)).status()).toBe(204)
+  }
 })
 
 // 在浏览器验收准备阶段创建独立测试集群配置，等待连接测试和保存响应后返回目标标识。

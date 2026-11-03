@@ -13,7 +13,7 @@ const codes = [
   ['INTERNAL_ERROR', 'The request could not be completed. Please try again later.'],
   ['SESSION_EXPIRED', 'The session has expired. Please reconnect.'],
   ['SHUTTING_DOWN', 'The service is shutting down. Please try again later.'],
-  ['SNAPSHOT_IN_PROGRESS', 'A snapshot is already being collected. Please try again later.'],
+  ['SNAPSHOT_IN_PROGRESS', 'A snapshot or Topic operation is in progress. Please try again later.'],
   ['KAFKA_AUTH_FAILED', 'Kafka authentication failed. Check the credentials and permissions.'],
   ['KAFKA_DNS_FAILED', 'Kafka host lookup failed. Check the server addresses and DNS.'],
   ['KAFKA_TIMEOUT', 'The Kafka request timed out. Please try again later.'],

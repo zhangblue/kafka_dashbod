@@ -1,10 +1,11 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import App from './App'
 import userEvent from '@testing-library/user-event'
 import { clustersApi, feishuAlertsApi, lagRulesApi, sessionsApi } from '../api/client'
 import { clusterFixture, rulesFixture, snapshotFixture } from '../test/handlers'
 import type { ClusterSnapshot } from '../api/types'
+import i18n from '../i18n'
 
 // 路由测试无画布上下文，图表替身只承接调用，图表生命周期由专属用例覆盖。
 vi.mock('echarts/core', () => ({ /* 页面创建图表时返回无绘制替身。 */ init: () => ({ /* 图表更新时接收配置，避免访问画布。 */ setOption() {}, /* 容器变化时接收尺寸同步调用。 */ resize() {}, /* 图表卸载时接收释放调用。 */ dispose() {} }), /* 模块加载时接收图表插件注册。 */ use() {} }))
@@ -216,10 +217,12 @@ it('preserves an open settings dialog and its draft when language changes', asyn
   const dialog = screen.getByRole('dialog', { name: 'Kafka 集群配置' })
   const name = within(dialog).getByLabelText('集群名称')
   await user.type(name, '保留的集群草稿')
-  await user.click(screen.getByRole('button', { name: 'English' }))
+  // 原生模态框会禁用背景入口；直接发语言事件仅验证状态保留，不模拟不存在的用户点击路径。
+  await act(async () => { await i18n.changeLanguage('en') })
   expect(window.location.pathname).toBe('/settings')
   expect(dialog).toBeVisible()
   expect(dialog).toHaveAttribute('open')
+  expect(dialog).toHaveAccessibleName('Kafka cluster configuration')
   expect(name).toHaveValue('保留的集群草稿')
   expect(screen.getByRole('link', { name: 'Cluster Settings' })).toHaveAttribute('aria-current', 'page')
   expect(sessionsApi.create).not.toHaveBeenCalled()

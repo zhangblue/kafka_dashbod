@@ -692,7 +692,8 @@ it('retains the open editor and rule draft when switching to English', async () 
   await user.clear(screen.getByLabelText('Lag 阈值'))
   await user.type(screen.getByLabelText('Lag 阈值'), '42')
   const before = sessions
-  await user.click(screen.getByRole('button', { name: 'English' }))
+  // showModal 期间背景入口不可操作，本用例只通过真实语言事件验证编辑器和会话连续性。
+  await act(async () => { await i18n.changeLanguage('en') })
   expect(screen.getByRole('dialog', { name: 'Configure Feishu alerts' })).toBe(dialog)
   expect(dialog).toHaveAttribute('open')
   expect(screen.getByLabelText('Lag threshold')).toHaveValue(42)

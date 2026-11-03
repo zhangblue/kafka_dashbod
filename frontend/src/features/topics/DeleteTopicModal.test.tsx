@@ -71,7 +71,9 @@ it('keeps the confirmation and dialog after a safe API failure and allows retry'
 })
 
 // Catches repeating a successful DELETE after only the list refresh has failed.
-it('locks a successful deletion and offers close if refreshing rejects', /* 在本用例执行时验证删除成功即锁定操作，刷新失败只提供关闭。 */ async () => {
+it.each(['zh-CN', 'en'])('locks an accepted deletion request if refreshing rejects (%s)', /* 验证两种语言均区分请求成功与集群确认，刷新失败不可重复删除。 */ async language => {
+  await i18n.changeLanguage(language)
+  const english = language === 'en'
   const user = userEvent.setup()
   let deletes = 0
   server.use(http.delete('/api/sessions/:id/topics/:topic', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ () => {
@@ -81,14 +83,15 @@ it('locks a successful deletion and offers close if refreshing rejects', /* 在�
   const onClose = vi.fn()
   render(<DeleteTopicModal sessionId="session-a" topic="orders" onClose={onClose}
     onApplied={/* 在删除成功后故意让刷新拒绝，验证成功删除不会被误判为可重试写入。 */ async () => { throw new Error('synthetic refresh failure') }} />)
-  await user.type(screen.getByLabelText('确认 Topic 名称'), 'orders')
-  await user.click(screen.getByRole('button', { name: '确认删除' }))
-  expect(await screen.findByRole('status')).toHaveTextContent('删除请求已成功，但列表刷新失败。请关闭弹窗后手动刷新。')
-  expect(screen.getByRole('button', { name: '删除请求已成功' })).toBeDisabled()
-  await user.click(screen.getByRole('button', { name: '删除请求已成功' }))
+  await user.type(screen.getByLabelText(english ? 'Confirm Topic name' : '确认 Topic 名称'), 'orders')
+  await user.click(screen.getByRole('button', { name: english ? 'Confirm deletion' : '确认删除' }))
+  expect(await screen.findByRole('status')).toHaveTextContent(english ? 'Deletion request succeeded, but the list could not be refreshed. Close this dialog and refresh manually.' : '删除请求已成功，但列表刷新失败。请关闭弹窗后手动刷新。')
+  const accepted = screen.getByRole('button', { name: english ? 'Deletion request succeeded' : '删除请求已成功' })
+  expect(accepted).toBeDisabled()
+  await user.click(accepted)
   expect(deletes).toBe(1)
   expect(onClose).not.toHaveBeenCalled()
-  await user.click(screen.getByRole('button', { name: '关闭' }))
+  await user.click(screen.getByRole('button', { name: english ? 'Close' : '关闭' }))
   expect(onClose).toHaveBeenCalledOnce()
 })
 

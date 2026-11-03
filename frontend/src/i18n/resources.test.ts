@@ -32,6 +32,12 @@ it('contains no empty translations in either language', () => {
   expect(Object.values(flattenLeaves(zhCN))).not.toContain('')
 })
 
+// 验证英文资源不会混入普通中文界面文本；语言入口的自称在组件内独立保留。
+it('contains no untranslated Chinese UI prose in English resources', () => {
+  const untranslated = Object.entries(flattenLeaves(en)).filter(([, value]) => /\p{Script=Han}/u.test(value))
+  expect(untranslated).toEqual([])
+})
+
 // 验证首批导航和通用错误键已交付，防止同构但空缺的资源通过检查。
 it('provides the required first-stage translation keys', () => {
   expect(flattenKeys(zhCN)).toEqual(expect.arrayContaining([

@@ -247,7 +247,9 @@ it('keeps a created Topic locked after refresh failure and retains its page noti
 })
 
 // Catches deleting without the typed confirmation, missing refresh and misleading metadata propagation results.
-it('refreshes after deletion and reports metadata propagation until the Topic disappears', /* 在本用例执行时验证删除后刷新，在元数据收敛前提示传播延迟。 */ async () => {
+it.each(['zh-CN', 'en'])('reports request acceptance until the deleted Topic disappears (%s)', /* 在两种语言中验证删除请求成功不等于元数据已确认消失。 */ async language => {
+  await i18n.changeLanguage(language)
+  const english = language === 'en'
   const user = userEvent.setup()
   let received: unknown
   server.use(http.delete('/api/sessions/session-a/topics/order-events', /* 在本用例请求被拦截时执行场景设定的响应逻辑，使交互验证不依赖真实后端。 */ async ({ request }) => {
@@ -256,15 +258,16 @@ it('refreshes after deletion and reports metadata propagation until the Topic di
   }))
   const refresh = vi.fn(async () => {})
   const view = show(snapshot, { refresh })
-  await user.click(screen.getByRole('button', { name: '删除 order-events' }))
-  await user.type(screen.getByLabelText('确认 Topic 名称'), 'order-events')
-  await user.click(screen.getByRole('button', { name: '确认删除' }))
+  await user.click(screen.getByRole('button', { name: english ? 'Delete order-events' : '删除 order-events' }))
+  await user.type(screen.getByLabelText(english ? 'Confirm Topic name' : '确认 Topic 名称'), 'order-events')
+  await user.click(screen.getByRole('button', { name: english ? 'Confirm deletion' : '确认删除' }))
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   expect(received).toEqual({ confirmationName: 'order-events' })
   expect(refresh).toHaveBeenCalledOnce()
-  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('删除请求已成功，正在等待集群状态更新')
+  const result = screen.getByRole('status', { name: english ? 'Topic operation result' : 'Topic 操作结果' })
+  expect(result).toHaveTextContent(english ? 'Deletion request succeeded. Waiting for the cluster state to update' : '删除请求已成功，正在等待集群状态更新')
   view.update({ snapshot: { ...snapshot, topics: [snapshot.topics[1]] } })
-  expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('Topic 已删除')
+  expect(result).toHaveTextContent(english ? 'Topic deleted.' : 'Topic 已删除')
 })
 
 // Catches failed configuration writes being treated as successful page actions.

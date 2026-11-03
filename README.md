@@ -17,6 +17,14 @@ Kafka 监控与 Topic 管理面板：管理集群连接配置，查看 Topic / P
 
 正式页面使用实时采集数据；Lag 分布按 Consumer Group 汇总多个 Topic，未知分区明确标注。进入集群设置会释放仪表盘会话；打开 Lag 规则弹窗才按需连接，关闭后释放。窄屏保留顶部导航并允许表格内部横向滚动。
 
+## 语言切换
+
+首次打开时跟随浏览器的首选语言：中文语言使用中文，其余语言使用 English。所有页面顶部栏右侧均提供「中文 / EN」切换，窄屏显示「中 / EN」，支持键盘操作。切换即时生效，不刷新页面，也不重建 Kafka 会话或清空当前表单和历史数据。弹窗打开时顶部栏暂不可操作，关闭弹窗后可切换。
+
+主动选择仅保存在当前浏览器的站点存储中，不写入后端配置；下次访问优先使用该选择。清除站点存储（或 `kafka-lens.language` 项）后，下次加载重新跟随浏览器语言。浏览器禁用本地存储时仍可切换当前页面，但不会记住选择。无需配置环境变量或额外下载语言资源，开发运行和发行包均内置两种语言。
+
+Kafka Lens 品牌、Topic、Consumer Group、Lag、Offset、Partition、Broker、Bootstrap Servers、SASL、SSL、PEM、Request ID 等术语保持英文；集群名、Topic 名、Group ID 和用户输入原样显示。
+
 ## 本地运行
 
 在项目根目录创建 `.env` 后启动后端。复制发行模板后，执行 Cargo 前先编辑 `.env`：源码开发通常由 Vite 提供页面，应移除 `KAFKA_DASHBOARD_WEB_DIR=web`，或调整为含 `index.html` 的实际构建目录；将 `DATABASE_URL` 改为 `sqlite://kafka-dashboard.db?mode=rwc`，或先创建模板所需的可写 `data/` 目录。
@@ -152,6 +160,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 npm --prefix frontend run test -- --run
 npm --prefix frontend run build
+node --test frontend/scripts/i18n-audit.test.mjs
 node --test scripts/e2e-preview.test.mjs
 node --test tests/release_scripts.test.mjs
 npm --prefix frontend exec -- playwright install chromium
