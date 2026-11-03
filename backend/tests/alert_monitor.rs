@@ -204,7 +204,7 @@ impl AlertSender for FakeSender {
         }
         if self
             .failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
             Err(AlertSendError::Network)
