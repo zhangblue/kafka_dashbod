@@ -2,6 +2,7 @@ import { act, render, screen, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import i18n from '../../i18n'
 import { lagRulesApi } from '../../api/client'
 import type { ClusterSnapshot, ConsumerGroupTopicSnapshot } from '../../api/types'
 import { clusterFixture } from '../../test/handlers'
@@ -134,4 +135,36 @@ it.each(['topics', 'groups'])('does not count confirmed-absent group/topic rows 
   expect(screen.queryByRole('link', { name: 'worker / orders' })).not.toBeInTheDocument()
   expect(screen.getByRole('region', { name: '异常 Consumer Group 数' })).toHaveTextContent('0')
   expect(screen.getByRole('region', { name: 'Consumer Group 数' })).toHaveTextContent(scope === 'groups' ? '1' : '0')
+})
+
+// 验证英文概览与空状态跟随语言切换，同时保留真实集群名和 Kafka 术语。
+it('renders the English overview and empty attention state without translating the cluster name', async () => {
+  await i18n.changeLanguage('en')
+  const snapshot = fixture()
+  snapshot.consumerGroups = [row('正常-group', 5)]
+  snapshot.consumerGroupIds = ['正常-group']
+  snapshot.partialFailures = []
+  mount(snapshot)
+  expect(screen.getByRole('heading', { name: 'Cluster Overview' })).toBeInTheDocument()
+  expect(screen.getByText(`Live consumption status for ${clusterFixture.name}`)).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: 'Topics' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: 'Consumer Groups' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: 'Total Lag' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: 'Needs Attention' })).toBeInTheDocument()
+  expect(await screen.findByText('No consumer groups need attention.')).toBeInTheDocument()
+  expect(screen.getByRole('region', { name: 'Lag Distribution' })).toHaveTextContent('正常-group')
+})
+
+// 验证英文异常表和分布保留 Group/Topic 名，未知与不完整状态不被降成零值。
+it('localizes incomplete overview data while preserving Group and Topic identifiers', async () => {
+  await i18n.changeLanguage('en')
+  const snapshot = fixture()
+  snapshot.consumerGroups = [{ ...row('消费者-group', 12345), topic: '订单-topic', unknownPartitionCount: 1, incomplete: true }]
+  snapshot.partialFailures = []
+  mount(snapshot)
+  const table = await screen.findByRole('table', { name: 'Abnormal Consumer Groups' })
+  expect(within(table).getByRole('link', { name: '消费者-group / 订单-topic' })).toBeInTheDocument()
+  expect(table).toHaveTextContent('12,345 + 1 unknown')
+  expect(screen.getByRole('region', { name: 'Total Lag' })).toHaveTextContent('Known Lag (incomplete; unknown values excluded)')
+  expect(screen.getByRole('region', { name: 'Lag Distribution' })).toHaveTextContent('Known Lag · includes unknown Partitions')
 })

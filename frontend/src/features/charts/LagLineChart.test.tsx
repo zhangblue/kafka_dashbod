@@ -1,5 +1,6 @@
 import { act, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
+import i18n from '../../i18n'
 import { LagLineChart } from './LagLineChart'
 
 // ECharts owns a browser canvas; this boundary fake records the lifecycle contract.
@@ -25,8 +26,8 @@ it('initializes once, updates samples without joining unknown gaps, observes siz
     textStyle: { color: '#8997ad' },
     tooltip: expect.objectContaining({ backgroundColor: '#151e2f', borderColor: '#243147' }),
     legend: expect.objectContaining({ textStyle: { color: '#8997ad' } }),
-    xAxis: expect.objectContaining({ type: 'time', min: -3599000, max: 1000, axisLabel: { color: '#8997ad' } }),
-    yAxis: expect.objectContaining({ type: 'value', min: 0, axisLabel: { color: '#8997ad' } }),
+    xAxis: expect.objectContaining({ type: 'time', min: -3599000, max: 1000, axisLabel: expect.objectContaining({ color: '#8997ad' }) }),
+    yAxis: expect.objectContaining({ type: 'value', min: 0, axisLabel: expect.objectContaining({ color: '#8997ad' }) }),
     series: [expect.objectContaining({ data: [[1000, 12]], connectNulls: false })],
   }), true)
   rerender(<LagLineChart samples={[{ at: 1000, lag: 12 }, { at: 2000, lag: null }]} stale />)
@@ -39,4 +40,49 @@ it('initializes once, updates samples without joining unknown gaps, observes siz
   unmount()
   expect(disconnect).toHaveBeenCalledTimes(1)
   expect(chart.dispose).toHaveBeenCalledTimes(1)
+})
+
+// 验证默认系列、辅助数据和陈旧提示随语言更新，且图表实例不会被语言切换重建。
+it('updates the default legend and accessible chart data on language changes without rebuilding the chart', async () => {
+  const at = Date.parse('2026-10-15T12:00:00Z')
+  render(<LagLineChart samples={[{ at, lag: 12345 }, { at: at + 1000, lag: null }]} stale />)
+  await act(async () => { await i18n.changeLanguage('en') })
+  expect(screen.getByText('Total Lag · Last Hour')).toBeInTheDocument()
+  expect(screen.getByLabelText('Chart data is stale')).toHaveTextContent('Stale data')
+  expect(screen.getByText('View chart data')).toBeInTheDocument()
+  const table = screen.getByRole('table', { name: 'Total Lag data for the last hour' })
+  expect(table).toHaveTextContent('Collected At')
+  expect(table).toHaveTextContent('Unknown / Incomplete')
+  expect(table).toHaveTextContent('12,345')
+  expect(table.querySelector('time')).toHaveAttribute('dateTime', '2026-10-15T12:00:00.000Z')
+  expect(table.querySelector('time')?.textContent).toMatch(/2026.*(?:AM|PM)/)
+  expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({ legend: expect.objectContaining({ data: ['Total Lag'] }) }), true)
+  expect(init).toHaveBeenCalledTimes(1)
+  expect(chart.dispose).not.toHaveBeenCalled()
+  await act(async () => { await i18n.changeLanguage('zh-CN') })
+  expect(screen.getByRole('table', { name: '最近 1 小时总 Lag 数据' })).toHaveTextContent('未知 / 不完整')
+  expect(chart.setOption).toHaveBeenLastCalledWith(expect.objectContaining({ legend: expect.objectContaining({ data: ['总 Lag'] }) }), true)
+  expect(init).toHaveBeenCalledTimes(1)
+})
+
+// 验证外部系列稳定时仍更新坐标轴和 tooltip，Group/Topic 标识保持原样且未知不显示为零。
+it('refreshes localized chart formatters for stable external series without translating identifiers', async () => {
+  const name = '消费者-group / 订单-topic'
+  const at = Date.parse('2026-10-15T12:00:00Z')
+  render(<LagLineChart series={[{ name, samples: [{ at, lag: 12345 }, { at: at + 1000, lag: null }] }]} stale={false} label={name} />)
+  const before = chart.setOption.mock.calls.length
+  await act(async () => { await i18n.changeLanguage('en') })
+  expect(chart.setOption.mock.calls.length).toBeGreaterThan(before)
+  const option = chart.setOption.mock.lastCall![0]
+  expect(option.legend.data).toEqual([name])
+  expect(option.series[0].name).toBe(name)
+  expect(screen.getByRole('img', { name: `${name} line chart` })).toBeInTheDocument()
+  expect(screen.getByRole('table', { name: `${name} data` })).toHaveTextContent(name)
+  expect(option.xAxis.axisLabel.formatter(at)).toMatch(/(?:AM|PM)/)
+  expect(option.yAxis.axisLabel.formatter(12345)).toBe('12,345')
+  expect(option.tooltip.axisPointer.label.formatter({ value: at })).toMatch(/2026.*(?:AM|PM)/)
+  expect(option.tooltip.valueFormatter(12345)).toBe('12,345')
+  expect(option.tooltip.valueFormatter(null)).toBe('Unknown / Incomplete')
+  expect(init).toHaveBeenCalledTimes(1)
+  expect(chart.dispose).not.toHaveBeenCalled()
 })
