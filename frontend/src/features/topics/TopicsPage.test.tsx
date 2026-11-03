@@ -1,4 +1,5 @@
 /// <reference types="node" />
+import i18n from '../../i18n'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
@@ -394,4 +395,21 @@ it('retains the submitted outcome when refreshing disconnects the monitor sessio
   await user.click(screen.getByRole('button', { name: '保存配置' }))
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   expect(screen.getByRole('status', { name: 'Topic 操作结果' })).toHaveTextContent('已提交但暂时无法确认当前值')
+})
+
+// 英文页面必须保留资源标识，翻译可访问名称、Offset 语义及部分失败状态。
+it('renders English Topic controls and partition semantics', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  show({ ...snapshot, partialFailures: [{ scope: 'topic', resource: 'order-events', code: 'KAFKA_QUERY_FAILED', message: 'synthetic' }] })
+  expect(screen.getByRole('heading', { name: 'Topics' })).toBeVisible()
+  expect(screen.getByRole('searchbox', { name: 'Search Topics' })).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Create Topic' })).toBeEnabled()
+  expect(screen.getByText('Offsets are independent for each Partition.')).toBeVisible()
+  expect(screen.getByText(/Some data could not be collected/)).toBeVisible()
+  expect(screen.getByRole('columnheader', { name: /Minimum Offset/ })).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Configure order-events' })).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Delete order-events' })).toBeVisible()
+  await user.click(screen.getByRole('button', { name: 'Expand order-events' }))
+  expect(screen.getByRole('table', { name: 'order-events Partitions' })).toHaveTextContent('Maximum message Offset')
 })

@@ -1,5 +1,6 @@
 /// <reference types="node" />
-import { render, screen, waitFor, within } from '@testing-library/react'
+import i18n from '../../i18n'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { delay, http, HttpResponse } from 'msw'
 import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
@@ -159,10 +160,60 @@ it('validates edited values, keeps a failed save and confirms discarding unsaved
   await user.click(screen.getByRole('button', { name: '保存配置' }))
   expect(await screen.findByText(/配置已被其他客户端修改/)).toBeVisible()
   expect(screen.getByLabelText('日志段最大时间')).toHaveValue(1000)
-  expect(segment).toHaveAccessibleDescription(/当前值已改变/)
+  expect(segment).toHaveAccessibleDescription(/字段值无效/)
   await user.click(screen.getByRole('button', { name: '取消' }))
   expect(onClose).not.toHaveBeenCalled()
   confirm.mockReturnValue(true)
   await user.click(screen.getByRole('button', { name: '关闭弹窗' }))
   expect(onClose).toHaveBeenCalledOnce()
+})
+
+// 八项配置必须提供英文说明及风险，保存冲突字段只显示受控安全提示。
+it('translates all eight configuration cards and safely renders conflict fields', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  let received: UpdateTopicConfigsInput | undefined
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', async ({ request }) => {
+    received = await request.json() as UpdateTopicConfigsInput
+    return HttpResponse.json({ code: 'TOPIC_CONFIG_CHANGED', message: 'RAW_SECRET',
+      fields: { 'changes.segment.ms': 'RAW_SECRET', 'changes.RAW_SECRET': '__INTERNAL__' } }, { status: 409 })
+  }))
+  render(<TopicConfigModal sessionId="session-a" topic="Orders.v2" onClose={() => {}} onApplied={() => {}} />)
+  await screen.findByLabelText('Message retention time')
+  for (const [label, key] of [['Message retention time','retention.ms'],['Partition retention size','retention.bytes'],['Cleanup policy','cleanup.policy'],['Maximum segment time','segment.ms'],['Maximum segment size','segment.bytes'],['Minimum in-sync replicas','min.insync.replicas'],['Maximum message batch size','max.message.bytes'],['Compression type','compression.type']]) {
+    const card = screen.getByRole('article', { name: `${label} setting` })
+    expect(card).toHaveTextContent(key)
+    expect(card.querySelector('.topic-config-description')!.textContent).not.toMatch(/[\u4e00-\u9fff]/)
+    expect(card.querySelector('.topic-config-risk')!.textContent!.length).toBeGreaterThan(20)
+  }
+  expect(screen.getByRole('dialog').textContent).not.toMatch(/[\u4e00-\u9fff]|topicAdmin\./)
+  expect(screen.getAllByText('Topic override').length).toBeGreaterThan(0)
+  expect(screen.getAllByText('Broker default').length).toBeGreaterThan(0)
+  await user.click(screen.getByRole('button', { name: 'Restore Message retention time to Broker default' }))
+  expect(screen.getByText(/Inherit the Broker default after saving/)).toBeVisible()
+  const segment = screen.getByLabelText('Maximum segment time')
+  await user.clear(segment); await user.type(segment, '1000')
+  await user.click(screen.getByRole('button', { name: 'Save configuration' }))
+  expect(await screen.findByText('The Topic configuration has changed. Reload it before saving.')).toBeVisible()
+  expect(segment).toHaveAccessibleDescription(/This field is invalid/)
+  expect(document.body).not.toHaveTextContent('RAW_SECRET')
+  expect(document.body).not.toHaveTextContent('__INTERNAL__')
+  expect(received).toEqual({ changes: { 'retention.ms': null, 'segment.ms': '1000' },
+    expectedValues: { 'retention.ms': '604800000', 'segment.ms': '3600000' } })
+  expect(screen.getByRole('button', { name: 'Reload' })).toBeEnabled()
+})
+
+// 202 已应用状态必须保留不确定性，英文不能将其错误展示为保存失败。
+it('shows an English unconfirmed notice after an accepted update', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  server.use(http.put('/api/sessions/:id/topics/:topic/configs', () => HttpResponse.json({ status: 'appliedButUnconfirmed' }, { status: 202 })))
+  render(<TopicConfigModal sessionId="session-a" topic="orders" onClose={() => {}} onApplied={() => {}} />)
+  await user.selectOptions(await screen.findByLabelText('Cleanup policy'), 'compact')
+  await user.click(screen.getByRole('button', { name: 'Save configuration' }))
+  expect(await screen.findByText('Applied, but current values could not be confirmed')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Save configuration' })).toBeDisabled()
+  await act(async () => { await i18n.changeLanguage('zh-CN') })
+  expect(screen.getByRole('status')).toHaveTextContent('已提交但暂时无法确认当前值')
+  expect(screen.getByRole('button', { name: '保存配置' })).toBeDisabled()
 })

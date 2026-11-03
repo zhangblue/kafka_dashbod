@@ -1,3 +1,4 @@
+import type { ParseKeys } from 'i18next'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { localizeApiError } from '../../api/errorMessages'
@@ -6,31 +7,31 @@ import type { TopicConfigSource, TopicConfigValue, TopicMutationResult, UpdateTo
 import { Modal } from '../../components/Modal'
 import { topicConfigDefinitions, validateTopicConfigValue, type TopicConfigDefinition } from './topicConfig'
 
-const errorMessages: Record<string, string> = {
-  TOPIC_ALREADY_EXISTS: '同名 Topic 已存在。',
-  TOPIC_NOT_FOUND: 'Topic 已不存在，请刷新列表。',
-  TOPIC_AUTHORIZATION_FAILED: 'Kafka 账户无权执行此 Topic 操作。',
-  TOPIC_OPERATION_TIMEOUT: 'Topic 操作超时，请重新读取集群状态后确认。',
-  INVALID_TOPIC_CONFIG: 'Kafka 拒绝了此配置，请检查参数与集群限制。',
-  TOPIC_CONFIG_CHANGED: '配置已被其他客户端修改，请重新读取。',
-  INTERNAL_TOPIC_PROTECTED: '禁止删除 Kafka 内部 Topic。',
-  SESSION_EXPIRED: '会话已过期，请重新连接集群。',
-  SNAPSHOT_IN_PROGRESS: '当前会话正在采集或执行管理操作，请稍后重试。',
-  SHUTTING_DOWN: '服务正在关闭，请稍后重试。',
-  KAFKA_UNAVAILABLE: 'Kafka 暂时不可用，请检查连接后重试。',
-  VALIDATION_ERROR: '请检查表单中的配置参数。',
-}
+const errorKeys = {
+  TOPIC_ALREADY_EXISTS: 'topicAdmin.errors.TOPIC_ALREADY_EXISTS',
+  TOPIC_NOT_FOUND: 'topicAdmin.errors.TOPIC_NOT_FOUND',
+  TOPIC_AUTHORIZATION_FAILED: 'topicAdmin.errors.TOPIC_AUTHORIZATION_FAILED',
+  TOPIC_OPERATION_TIMEOUT: 'topicAdmin.errors.TOPIC_OPERATION_TIMEOUT',
+  INVALID_TOPIC_CONFIG: 'topicAdmin.errors.INVALID_TOPIC_CONFIG',
+  TOPIC_CONFIG_CHANGED: 'topicAdmin.errors.TOPIC_CONFIG_CHANGED',
+  INTERNAL_TOPIC_PROTECTED: 'topicAdmin.errors.INTERNAL_TOPIC_PROTECTED',
+  SESSION_EXPIRED: 'topicAdmin.errors.SESSION_EXPIRED',
+  SNAPSHOT_IN_PROGRESS: 'topicAdmin.errors.SNAPSHOT_IN_PROGRESS',
+  SHUTTING_DOWN: 'topicAdmin.errors.SHUTTING_DOWN',
+  KAFKA_UNAVAILABLE: 'topicAdmin.errors.KAFKA_UNAVAILABLE',
+  VALIDATION_ERROR: 'topicAdmin.errors.VALIDATION_ERROR',
+} as const
 
 // 在 Topic 管理请求失败时展示统一安全错误和未由字段控件承接的提示。
 export function TopicAdminErrorNotice({ error }: { error: unknown }) {
   const { t } = useTranslation()
   if (!error) return null
   // 保留 Topic 专属提示；其余错误按当前语言安全翻译，避免内部占位或后端原文进入页面。
-  const message = error instanceof ApiError && Object.hasOwn(errorMessages, error.code)
-    ? errorMessages[error.code] : localizeApiError(error, t).message
+  const message = error instanceof ApiError && Object.hasOwn(errorKeys, error.code)
+    ? t(errorKeys[error.code as keyof typeof errorKeys]) : localizeApiError(error, t).message
   return <div role="alert"><p>{message}</p>
-    {error instanceof ApiError && error.requestId && <p>Request ID: {error.requestId}</p>}
-    {error instanceof ApiError && Object.entries(error.fields).filter(([key]) =>
+    {error instanceof ApiError && error.requestId && <p>{t('topicAdmin.requestId', { id: error.requestId })}</p>}
+    {error instanceof ApiError && Object.entries(localizeApiError(error, t).fields).filter(([key]) =>
       !topicConfigDefinitions.some(item => key === item.key || key === `configs.${item.key}` || key === `changes.${item.key}`)
       && !['name', 'partitions', 'replicationFactor'].includes(key)).map(([key, message]) => <p key={key}>{message}</p>)}
   </div>
@@ -43,32 +44,33 @@ export function TopicConfigField({ definition, value, onChange, disabled, error,
   reset?: { pending: boolean; disabled: boolean; onClick: () => void }
 }) {
   const id = useId()
-  const sourceLabels = { topicOverride: 'Topic 覆盖值', brokerDefault: 'Broker 默认值', unknown: '来源未知' }
-  return <article className="topic-config-card" aria-label={`${definition.label} 配置项`}>
+  const { t } = useTranslation()
+  const label = t(definition.labelKey)
+  return <article className="topic-config-card" aria-label={t('topicAdmin.card', { label })}>
     <div className="topic-config-top"><div><div className="topic-config-title">
-      <h3 id={`${id}-title`}><label htmlFor={id}>{definition.label}</label></h3>
-      {source && <span className={`topic-source topic-source-${source}`}>{sourceLabels[source]}</span>}
+      <h3 id={`${id}-title`}><label htmlFor={id}>{label}</label></h3>
+      {source && <span className={`topic-source topic-source-${source}`}>{t(`topicAdmin.source.${source}`)}</span>}
     </div><div className="topic-config-key">{definition.key}</div></div>
       {reset && <button type="button" className="topic-reset" disabled={reset.disabled}
-        aria-label={`${reset.pending ? '撤销恢复' : '恢复'} ${definition.label} 为 Broker 默认值`} onClick={reset.onClick}>
-        {reset.pending ? '撤销恢复' : source === 'brokerDefault' ? '已使用默认' : '恢复默认'}</button>}
+        aria-label={t(reset.pending ? 'topicAdmin.undoResetLabel' : 'topicAdmin.resetLabel', { label })} onClick={reset.onClick}>
+        {reset.pending ? t('topicAdmin.undoReset') : source === 'brokerDefault' ? t('topicAdmin.usingDefault') : t('topicAdmin.reset')}</button>}
     </div>
-    <p className="topic-config-description" id={`${id}-description`}>{definition.description}</p>
+    <p className="topic-config-description" id={`${id}-description`}>{t(definition.descriptionKey)}</p>
     <div className="topic-config-control">
       {definition.inputType === 'select' ? <select id={id} value={value} disabled={disabled}
         aria-invalid={!!error} aria-describedby={`${id}-description ${id}-risk${error ? ` ${id}-error` : ''}`}
         onChange={/* 在控件变更时将当前值交回受控表单，由统一校验决定是否可保存。 */ event => onChange(event.target.value)}>
-        <option value="">{reset ? '当前值不可用' : '使用集群默认值'}</option>
-        {value && !definition.options?.some(option => option.value === value) && <option value={value}>{value}（当前值）</option>}
-        {definition.options?.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+        <option value="">{reset ? t('topicAdmin.unavailable') : t('topicAdmin.clusterDefault')}</option>
+        {value && !definition.options?.some(option => option.value === value) && <option value={value}>{t('topicAdmin.currentValue', { value })}</option>}
+        {definition.options?.map(option => <option key={option.value} value={option.value}>{t(option.labelKey)}</option>)}
       </select> : <input id={id} type="number" step="1" value={value} disabled={disabled}
-        placeholder={reset ? '当前值不可用' : '留空使用集群默认值'}
+        placeholder={reset ? t('topicAdmin.unavailable') : t('topicAdmin.blankDefault')}
         aria-invalid={!!error} aria-describedby={`${id}-description ${id}-risk${error ? ` ${id}-error` : ''}`}
         onChange={/* 在控件变更时将当前值交回受控表单，由统一校验决定是否可保存。 */ event => onChange(event.target.value)} />}
-      {definition.unit && <span>{definition.unit}</span>}
+      {definition.unitKey && <span>{t(definition.unitKey)}</span>}
     </div>
-    <p className="topic-config-risk" id={`${id}-risk`}>{definition.risk}</p>
-    {reset?.pending && <p className="topic-reset-pending">保存后继承 Broker 默认值；当前默认值将在保存后重新读取。</p>}
+    <p className="topic-config-risk" id={`${id}-risk`}>{t(definition.riskKey)}</p>
+    {reset?.pending && <p className="topic-reset-pending">{t('topicAdmin.resetHint')}</p>}
     {error && <p className="topic-field-error" role="alert" id={`${id}-error`}>{error}</p>}
   </article>
 }
@@ -87,15 +89,16 @@ export function TopicConfigModal(props: TopicConfigModalProps) {
 
 // 在参数编辑阶段实时读取 Kafka 当前值，维护增量草稿并处理冲突与已应用未确认结果。
 function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfigModalProps) {
+  const { t } = useTranslation()
   const [configs, setConfigs] = useState<TopicConfigValue[] | null>(null)
   const [draft, setDraft] = useState<Record<string, string | null>>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [loadError, setLoadError] = useState<unknown>(null)
   const [saveError, setSaveError] = useState<unknown>(null)
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
-  const [notice, setNotice] = useState('')
-  const [refreshError, setRefreshError] = useState('')
+  const [fieldErrors, setFieldErrors] = useState<Record<string, ParseKeys>>({})
+  const [notice, setNotice] = useState<ParseKeys | ''>('')
+  const [refreshError, setRefreshError] = useState<ParseKeys | ''>('')
   const request = useRef<AbortController | null>(null)
   const active = useRef(true)
   const submitting = useRef(false)
@@ -126,7 +129,7 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
   const changed = Object.keys(draft).length > 0
   // 在关闭参数弹窗时阻止保存中退出，并确认是否放弃未保存修改。
   const close = () => {
-    if (!saving && (!changed || window.confirm('有未保存的 Topic 配置修改，确定放弃吗？'))) onClose()
+    if (!saving && (!changed || window.confirm(t('topicAdmin.discardConfig')))) onClose()
   }
   // 在字段编辑或恢复默认时维护增量差异，值回到基线时移除冗余变更。
   const edit = (entry: TopicConfigValue, value: string | null) => {
@@ -141,7 +144,7 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
   // 在保存时提交修改字段与读取基线，随后重新读值并保留已应用但未确认的结果。
   const save = async () => {
     if (submitting.current || !configs || !changed || loading) return
-    const errors: Record<string, string> = {}
+    const errors: Record<string, ParseKeys> = {}
     for (const [key, value] of Object.entries(draft)) {
       const error = value === null ? undefined : validateTopicConfigValue(key, value)
       if (error) errors[key] = error
@@ -154,6 +157,7 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
     submitting.current = true; setSaving(true); setSaveError(null); setNotice(''); setRefreshError('')
     try {
       let result
+      // 保持配置 key 和提交值原样，服务端先比较读取基线再执行增量修改。
       try { result = await topicsApi.update(sessionId, topic, input) }
       catch (error) { if (active.current) setSaveError(error); return }
       if (!active.current) return
@@ -162,36 +166,36 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
       if (unconfirmed) { setConfigs(null); setDraft({}) }
       else { prepareRead(); unconfirmed = !await read() }
       if (!active.current) return
-      setNotice(unconfirmed ? '已提交但暂时无法确认当前值' : '配置已保存，当前值已从 Kafka 重新读取。')
+      setNotice(unconfirmed ? 'topicAdmin.unconfirmed' : 'topicAdmin.saved')
       try { await onApplied(unconfirmed ? { status: 'appliedButUnconfirmed' } : undefined) }
-      catch { if (active.current) setRefreshError('列表刷新失败，请稍后手动刷新。') }
+      catch { if (active.current) setRefreshError('topicAdmin.refreshFailed') }
     } finally {
       submitting.current = false
       if (active.current) setSaving(false)
     }
   }
-  return <Modal title="Topic 参数配置" description={`${topic} · 修改后直接应用到 Kafka，无需重启 Broker`}
+  return <Modal title={t('topicAdmin.configTitle')} description={t('topicAdmin.configDescription', { topic })}
     onClose={close} busy={saving} wide>
     <form className="topic-admin-form" noValidate onSubmit={/* 在表单提交时，阻止默认提交并交给当前表单校验及请求锁，避免重复写入。 */ event => { event.preventDefault(); void save() }}>
-      <div className="topic-config-notice"><b>修改前请确认影响。</b> 缩短保留时间或降低保留空间，可能使已有日志段在下一次清理时被删除；可靠性参数可能影响生产者写入。</div>
-      <div className="topic-config-legend"><span>参数来源：</span><span className="topic-source topic-source-topicOverride">Topic 覆盖值</span><span className="topic-source topic-source-brokerDefault">Broker 默认值</span></div>
-      {loading && <div className="topic-config-loading" role="status"><span>正在读取 Kafka 当前配置…</span>
+      <div className="topic-config-notice"><b>{t('topicAdmin.confirmImpact')}</b> {t('topicAdmin.configWarning')}</div>
+      <div className="topic-config-legend"><span>{t('topicAdmin.sources')}</span><span className="topic-source topic-source-topicOverride">{t('topicAdmin.source.topicOverride')}</span><span className="topic-source topic-source-brokerDefault">{t('topicAdmin.source.brokerDefault')}</span></div>
+      {loading && <div className="topic-config-loading" role="status"><span>{t('topicAdmin.loading')}</span>
         <div className="topic-config-grid" aria-hidden="true">{Array.from({ length: 8 }, (_, index) => <div key={index} />)}</div></div>}
       <TopicAdminErrorNotice error={loadError ?? saveError} />
-      {notice && <p className="topic-config-feedback" role="status">{notice}</p>}
-      {refreshError && <p role="alert">{refreshError}</p>}
+      {notice && <p className="topic-config-feedback" role="status">{t(notice)}</p>}
+      {refreshError && <p role="alert">{t(refreshError)}</p>}
       {!loading && (!configs || !!loadError || (saveError instanceof ApiError && saveError.code === 'TOPIC_CONFIG_CHANGED')) &&
         <button type="button" disabled={saving} onClick={/* 在按钮点击时，先确认放弃未保存修改，再清空旧比较基线并重读 Kafka，避免覆盖外部配置。 */ () => {
-          if (!changed || window.confirm('重新读取会放弃未保存的修改，确定继续吗？')) {
+          if (!changed || window.confirm(t('topicAdmin.discardReload'))) {
             setNotice(''); prepareRead(); void read()
           }
-        }}>重新读取</button>}
+        }}>{t('topicAdmin.reload')}</button>}
       {configs && <div className="topic-config-grid">{topicConfigDefinitions.map(definition => {
         const entry = configs.find(item => item.key === definition.key)
         const pending = draft[definition.key] === null
         const unavailable = !entry || entry.value === null
-        const error = fieldErrors[definition.key] ?? (saveError instanceof ApiError
-          ? saveError.fields[`changes.${definition.key}`] ?? saveError.fields[definition.key] : undefined)
+        const error = fieldErrors[definition.key] ? t(fieldErrors[definition.key]) : (saveError instanceof ApiError
+          ? localizeApiError(saveError, t).fields[`changes.${definition.key}`] ?? localizeApiError(saveError, t).fields[definition.key] : undefined)
         return <TopicConfigField key={definition.key} definition={definition}
           source={entry?.source ?? 'unknown'} value={pending ? '' : draft[definition.key] ?? entry?.value ?? ''}
           disabled={saving || unavailable || !!entry?.readOnly || pending} error={error}
@@ -202,10 +206,10 @@ function TopicConfigEditor({ sessionId, topic, onClose, onApplied }: TopicConfig
               else edit(entry, null)
             } } }} />
       })}</div>}
-      {configs?.some(entry => entry.readOnly) && <p className="form-note">只读参数受集群策略限制，无法修改或恢复默认；未返回的参数显示为不可用。</p>}
-      <div className="modal-actions topic-admin-actions"><small>保存时仅提交已修改的参数；恢复默认会删除 Topic 级覆盖值。</small>
-        <div><button type="button" disabled={saving} onClick={close}>取消</button>
-          <button type="submit" disabled={saving || loading || !configs || !changed}>{saving ? '保存中…' : '保存配置'}</button></div>
+      {configs?.some(entry => entry.readOnly) && <p className="form-note">{t('topicAdmin.readOnly')}</p>}
+      <div className="modal-actions topic-admin-actions"><small>{t('topicAdmin.saveHint')}</small>
+        <div><button type="button" disabled={saving} onClick={close}>{t('topicAdmin.cancel')}</button>
+          <button type="submit" disabled={saving || loading || !configs || !changed}>{saving ? t('topicAdmin.saving') : t('topicAdmin.save')}</button></div>
       </div>
     </form>
   </Modal>

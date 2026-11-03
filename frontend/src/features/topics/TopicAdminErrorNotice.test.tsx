@@ -23,14 +23,14 @@ it.each([
   expect(container.innerHTML).not.toMatch(/API_REQUEST_FAILED|private backend message/)
 })
 
-// 验证兜底迁移保留已有 Topic 专属提示，避免本修复提前改写完整 Topic 国际化行为。
-it('retains the existing Topic-specific message and request ID', async () => {
+// 验证 Topic 专属提示保留中文语境，并在切换语言时翻译且保留 Request ID。
+it('translates the Topic-specific message while retaining its request ID', async () => {
   render(<TopicAdminErrorNotice error={new ApiError(403, {
     code: 'TOPIC_AUTHORIZATION_FAILED', message: 'private backend detail', requestId: 'req-topic-known',
   })} />)
   expect(screen.getByRole('alert')).toHaveTextContent('Kafka 账户无权执行此 Topic 操作。')
   await act(async () => { await i18n.changeLanguage('en') })
-  expect(screen.getByRole('alert')).toHaveTextContent('Kafka 账户无权执行此 Topic 操作。')
+  expect(screen.getByRole('alert')).toHaveTextContent('This operation is not authorized for the Topic.')
   expect(screen.getByText('Request ID: req-topic-known')).toBeInTheDocument()
 })
 

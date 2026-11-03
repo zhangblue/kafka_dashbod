@@ -1,3 +1,4 @@
+import i18n from '../../i18n'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
@@ -113,4 +114,16 @@ it('ignores a deletion response after unmount', /* 在本用例执行时验证�
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
   expect(onApplied).not.toHaveBeenCalled()
   expect(onClose).not.toHaveBeenCalled()
+})
+
+// 英文删除说明和完整名称确认仍须保护内部 Topic。
+it('translates deletion warnings while protecting internal Topics', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  render(<DeleteTopicModal sessionId="session-a" topic="__consumer_offsets" onClose={() => {}} onApplied={() => {}} />)
+  expect(screen.getByText('This action cannot be undone.')).toBeVisible()
+  expect(screen.getByText(/Enter the full Topic name/)).toBeVisible()
+  await user.type(screen.getByLabelText('Confirm Topic name'), '__consumer_offsets')
+  expect(screen.getByRole('button', { name: 'Confirm deletion' })).toBeDisabled()
+  expect(screen.getByText('Internal Topics cannot be deleted.')).toBeVisible()
 })

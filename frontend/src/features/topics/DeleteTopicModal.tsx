@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import { useEffect, useId, useRef, useState } from 'react'
 import { topicsApi } from '../../api/client'
 import { Modal } from '../../components/Modal'
@@ -14,6 +15,7 @@ export function DeleteTopicModal(props: DeleteTopicModalProps) {
 
 // 在 Topic 删除阶段要求完整名称严格匹配，保护内部 Topic 并锁定已成功请求。
 function DeleteTopicForm({ sessionId, topic, onClose, onApplied }: DeleteTopicModalProps) {
+  const { t } = useTranslation()
   const id = useId()
   const [confirmationName, setConfirmationName] = useState('')
   const [error, setError] = useState<unknown>(null)
@@ -43,20 +45,21 @@ function DeleteTopicForm({ sessionId, topic, onClose, onApplied }: DeleteTopicMo
       if (active.current) onClose()
     } finally { submitting.current = false; if (active.current) setSaving(false) }
   }
-  return <Modal title="删除 Topic" description="删除会直接修改 Kafka 集群，请仔细确认目标。" onClose={close} busy={saving}>
+  return <Modal title={t('topicAdmin.deleteTitle')} description={t('topicAdmin.deleteDescription')} onClose={close} busy={saving}>
     <form className="topic-delete-form" onSubmit={/* 在表单提交时，阻止默认提交并交给当前表单校验及请求锁，避免重复写入。 */ event => { event.preventDefault(); void submit() }}>
-      <p className="topic-delete-warning"><b>此操作不可恢复。</b> Topic 中的数据将被删除，依赖它的生产者和消费者可能受到影响。</p>
-      <p>待删除 Topic：<strong className="topic-delete-name">{topic}</strong></p>
-      <label htmlFor={id}>确认 Topic 名称<input id={id} value={confirmationName} autoComplete="off" spellCheck={false}
+      <p className="topic-delete-warning"><b>{t('topicAdmin.irreversible')}</b> {t('topicAdmin.deleteWarning')}</p>
+      <p>{t('topicAdmin.deleteTarget')}<strong className="topic-delete-name">{topic}</strong></p>
+      <label htmlFor={id}>{t('topicAdmin.confirmName')}<input id={id} value={confirmationName} autoComplete="off" spellCheck={false}
         aria-describedby={`${id}-hint`} disabled={saving || deleted}
         onChange={/* 在确认名称变更时保留完整原始输入并清除旧错误，严格比较由提交边界执行。 */ event => { setConfirmationName(event.target.value); setError(null) }} /></label>
-      <p id={`${id}-hint`} className="form-note">请输入完整 Topic 名称，大小写必须完全一致。</p>
+      <p id={`${id}-hint`} className="form-note">{t('topicAdmin.confirmHint')}</p>
+      {topic.startsWith('__') && <p role="status">{t('errors.api.INTERNAL_TOPIC_PROTECTED')}</p>}
       <TopicAdminErrorNotice error={error} />
-      {refreshFailed && <p role="status">删除请求已成功，但列表刷新失败。请关闭弹窗后手动刷新。</p>}
-      <div className="modal-actions"><small>集群状态更新可能稍有延迟。</small><div>
-        <button type="button" disabled={saving} onClick={close}>{deleted ? '关闭' : '取消'}</button>
+      {refreshFailed && <p role="status">{t('topicAdmin.deletedRefreshFailed')}</p>}
+      <div className="modal-actions"><small>{t('topicAdmin.propagationHint')}</small><div>
+        <button type="button" disabled={saving} onClick={close}>{deleted ? t('topicAdmin.close') : t('topicAdmin.cancel')}</button>
         <button type="submit" className="danger-button" disabled={saving || deleted || confirmationName !== topic || topic.startsWith('__')}>
-          {deleted ? '删除请求已成功' : saving ? '删除中…' : '确认删除'}</button>
+          {deleted ? t('topicAdmin.deleted') : saving ? t('topicAdmin.deleting') : t('topicAdmin.confirmDelete')}</button>
       </div></div>
     </form>
   </Modal>

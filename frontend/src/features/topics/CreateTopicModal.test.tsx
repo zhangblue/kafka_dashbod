@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import i18n from '../../i18n'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { delay, http, HttpResponse } from 'msw'
 import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
@@ -88,7 +89,7 @@ it('validates inputs and retains optional values and API field errors after fail
   await user.selectOptions(screen.getByLabelText('清理策略'), 'compact')
   await user.click(screen.getByRole('button', { name: '创建 Topic' }))
   expect(await screen.findByText('同名 Topic 已存在。')).toBeVisible()
-  expect(screen.getByLabelText('Topic 名称')).toHaveAccessibleDescription(/请使用其他 Topic 名称/)
+  expect(screen.getByLabelText('Topic 名称')).toHaveAccessibleDescription(/字段值无效/)
   expect(screen.getByText(/request-create/)).toBeVisible()
   expect(screen.getByLabelText('消息保留时间')).toHaveValue(3600000)
   expect(received).toEqual({ name: 'orders', partitions: 3, replicationFactor: 2,
@@ -176,4 +177,38 @@ it('does not apply a completed creation to a page that has already left the sess
   await new Promise(resolve => setTimeout(resolve, 30))
   expect(onApplied).not.toHaveBeenCalled()
   expect(onClose).not.toHaveBeenCalled()
+})
+
+// 英文创建必须翻译字段与未知错误，服务端原始文本和内部占位不得进入 DOM。
+it('localizes English creation fields and safely handles API field errors', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  let received: CreateTopicInput | undefined
+  server.use(http.post('/api/sessions/:id/topics', async ({ request }) => {
+    received = await request.json() as CreateTopicInput
+    return HttpResponse.json({ code: 'VALIDATION_ERROR', message: 'RAW_SECRET', fields: {
+      name: 'Invalid topic name', 'configs.retention.ms': 'RAW_SECRET', RAW_SECRET: '__INTERNAL__',
+    } }, { status: 422 })
+  }))
+  render(<CreateTopicModal sessionId="session-a" onClose={() => {}} onApplied={async () => { throw new Error('synthetic refresh failure') }} />)
+  expect(screen.getByRole('dialog', { name: 'Create Topic' })).toBeVisible()
+  expect(screen.getByLabelText('Partitions')).toHaveValue(1)
+  expect(screen.getByLabelText('Replication factor')).toHaveAttribute('placeholder', 'Use cluster default')
+  await user.type(screen.getByLabelText('Topic name'), 'Orders.v2')
+  await user.type(screen.getByLabelText('Message retention time'), '1234')
+  await user.click(screen.getByRole('button', { name: 'Create Topic' }))
+  await waitFor(() => expect(screen.getByLabelText('Topic name')).toHaveAttribute('aria-invalid', 'true'))
+  expect(screen.getByLabelText('Message retention time')).toHaveAccessibleDescription(/This field is invalid/)
+  expect(document.body).not.toHaveTextContent('RAW_SECRET')
+  expect(document.body).not.toHaveTextContent('__INTERNAL__')
+  expect(received).toEqual({ name: 'Orders.v2', partitions: 1, replicationFactor: null, configs: { 'retention.ms': '1234' } })
+  await act(async () => { await i18n.changeLanguage('zh-CN') })
+  expect(screen.getByLabelText('消息保留时间')).toHaveAccessibleDescription(/字段值无效/)
+  expect(screen.getByLabelText('Topic 名称')).toHaveValue('Orders.v2')
+  await act(async () => { await i18n.changeLanguage('en') })
+  server.use(http.post('/api/sessions/:id/topics', () => HttpResponse.json({ status: 'created' }, { status: 201 })))
+  await user.click(screen.getByRole('button', { name: 'Create Topic' }))
+  expect(await screen.findByRole('status')).toHaveTextContent('Topic created, but the list could not be refreshed.')
+  expect(screen.getByRole('button', { name: 'Topic created' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled()
 })
