@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
+// 验证正式样式覆盖深色布局、导航、控件、表格、告警及窄屏核心选择器。
 test('dashboard stylesheet covers the core production controls', async () => {
   const stylesheet = await readFile(path.join(root, 'frontend/src/index.css'), 'utf8')
   assert.match(stylesheet, /--bg:\s*#070b14/)

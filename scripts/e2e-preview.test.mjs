@@ -9,6 +9,7 @@ import path from 'node:path'
 import { verifyPreview } from './e2e-preview.mjs'
 
 // The wrong process can return a healthy API response on the expected port.
+// 验证健康但无本次实例标识的其他服务被拒绝，且不会收到任何修改请求。
 test('rejects a healthy unrelated service before any mutating request', async t => {
   const requests = []
   const server = http.createServer((req, res) => {
@@ -22,6 +23,7 @@ test('rejects a healthy unrelated service before any mutating request', async t 
   assert.deepEqual(requests, ['GET'])
 })
 
+// 验证只有 PID 存活且实例标识一致的 preview 可被接受，拒绝 PID 或标识漂移。
 test('accepts only the matching live process and instance marker', async t => {
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'x-e2e-instance': 'this-run' }).end('{"status":"ok"}')
@@ -37,6 +39,7 @@ test('accepts only the matching live process and instance marker', async t => {
 
 // Removing the temporary dotenv or launching from the repository must break this boundary test.
 for (const existingDotenv of [false, true]) {
+  // 验证 E2E 后端只在私有运行目录读取临时 .env，保留仓库原配置并在失败后清理目录。
   test(`E2E backend uses a private runtime dotenv with repository dotenv ${existingDotenv ? 'present' : 'absent'}`, async t => {
     const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), 'e2e-startup-test-')))
     t.after(() => rm(directory, { recursive: true, force: true }))
@@ -49,6 +52,7 @@ for (const existingDotenv of [false, true]) {
     await mkdir(commands)
     await copyFile(new URL('./test-e2e.sh', import.meta.url), path.join(repository, 'scripts/test-e2e.sh'))
     if (existingDotenv) await writeFile(path.join(repository, '.env'), 'USER_SETTING=keep-this-file\n')
+    // 用本地替身跳过实际 broker 与编译，让用例只验证真实 Shell 启动及失败收尾边界。
     // These external tools would create a broker and compile code; this test only reaches startup.
     for (const command of ['docker', 'cargo']) {
       await writeFile(path.join(commands, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 })

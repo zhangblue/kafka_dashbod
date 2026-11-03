@@ -13,8 +13,10 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 const script = resolve("tools/publish-release.mjs");
+// 每个发布用例创建真实临时 Git 标签及三平台归档，只用本地 gh 替身模拟远端，绝不写入 GitHub。
 function fixture(mode) {
   const root = mkdtempSync(join(tmpdir(), "publish-test-"));
+  // fixture 装配期间同步执行真实 Git/tar，命令失败即中止，确保标签与压缩字节可信。
   const run = (cmd, args) => {
     const r = spawnSync(cmd, args, {
       cwd: root,
@@ -29,6 +31,7 @@ function fixture(mode) {
     join(root, "backend/Cargo.toml"),
     '[package]\nversion = "1.2.3"\n',
   );
+  // 先建立提交再创建精确标签，随后生成的 RELEASE.json 统一绑定同一份来源。
   run("git", ["init", "-q"]);
   run("git", ["add", "."]);
   run("git", [
@@ -135,6 +138,7 @@ function fixture(mode) {
         mode: name === "start.sh" || name.startsWith("bin/") ? 0o755 : 0o644,
       });
     }
+    // 保留真实压缩与外层哈希流程，使篡改测试能区分包内 checksum 与归档字节校验。
     run("tar", ["-czf", join(root, "dist", base + ".tar.gz"), base]);
     const bytes = readFileSync(join(root, "dist", base + ".tar.gz"));
     writeFileSync(
@@ -155,6 +159,7 @@ function fixture(mode) {
       "bad",
     );
   writeFileSync(join(root, "commit"), commit);
+  // 发布入口仅能调用此临时目录中的 gh 替身，所有上传、下载及取消草稿都停留在本地 fixture。
   writeFileSync(
     join(root, "fake", "gh"),
     readFileSync(new URL("./fixtures/publish-gh.cjs", import.meta.url)),
@@ -164,6 +169,7 @@ function fixture(mode) {
     writeFileSync(join(root, "state"), JSON.stringify({ draft: false }));
   return {
     root,
+    // 用例调用时以本地 gh 替身执行真实发布入口，可指定错误标签检验前置门禁。
     execute(tag = "v1.2.3") {
       return spawnSync(process.execPath, [script, tag, "dist"], {
         cwd: root,
@@ -175,6 +181,7 @@ function fixture(mode) {
         },
       });
     },
+    // 发布断言读取替身记录的调用顺序；尚未访问远端时返回空列表。
     calls() {
       try {
         return readFileSync(join(root, "calls"), "utf8")
@@ -219,6 +226,7 @@ for (const mode of [
   "remote-size",
   "not-draft",
 ])
+  // 参数化验证损坏附件、来源、远端状态及网络故障均阻止取消草稿。
   test(`reject ${mode} without publishing`, () => {
     const f = fixture(mode);
     try {
@@ -233,6 +241,7 @@ for (const mode of [
       rmSync(f.root, { recursive: true, force: true });
     }
   });
+// 验证错误标签在任何 gh 远端调用之前就被拒绝。
 test("wrong tag rejected before gh", () => {
   const f = fixture("");
   try {
@@ -242,6 +251,7 @@ test("wrong tag rejected before gh", () => {
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+// 验证完整六附件上传、六次下载逐字节核验均先于取消草稿，之后仍复核正式状态。
 test("six uploads then six downloads then publish and final verification", () => {
   const f = fixture("");
   try {
@@ -260,6 +270,7 @@ test("six uploads then six downloads then publish and final verification", () =>
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+// 验证远端附注标签先解析到最终提交，再完成相同来源门禁。
 test("annotated remote tag resolves to commit", () => {
   const f = fixture("annotated");
   try {
@@ -270,6 +281,7 @@ test("annotated remote tag resolves to commit", () => {
   }
 });
 for (const changed of [false, true])
+  // 验证已有草稿仅接受原始六附件相同字节的重试；不一致时既不覆盖也不发布。
   test(`existing draft retry with ${changed ? "different" : "identical"} bytes`, () => {
     const f = fixture("");
     try {

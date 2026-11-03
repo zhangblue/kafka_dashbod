@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 export LC_ALL=C
+# 验证任一步不符合发行约束时终止，已安装 trap 时继续清理本次测试资源。
 fail() { echo "$*" >&2; exit 1; }
 [ "$#" = 1 ] || fail 'Usage: tools/verify-release.sh dist/kafka-dashboard-vVERSION-PLATFORM'
 release=$(CDPATH= cd -- "$1" && pwd -P)
@@ -11,6 +12,7 @@ metadata=$(cat "$release/RELEASE.json")
 printf '%s\n' "$metadata" | grep -Eq '^\{"version":"[0-9]+\.[0-9]+\.[0-9]+","platform":"(darwin-arm64|linux-amd64|linux-arm64)","target":"[a-z0-9_-]+","commit":"[0-9a-f]{40}","dirty":(true|false)\}$' || fail 'Invalid release metadata'
 version=$(printf '%s' "$metadata" | sed 's/.*"version":"\([^"]*\)".*/\1/')
 platform=$(printf '%s' "$metadata" | sed 's/.*"platform":"\([^"]*\)".*/\1/')
+# 根据元数据仅验证所选架构，Linux 容器平台必须与发行目标一致。
 case "$platform" in
     darwin-arm64) target=aarch64-apple-darwin ;;
     linux-amd64) target=x86_64-unknown-linux-musl; docker_platform=linux/amd64 ;;
@@ -38,10 +40,12 @@ for runnable in start.sh "$binary"; do
     [ -x "$release/$runnable" ] || fail "Not executable: $runnable"
 done
 
+# 运行验收使用私有临时副本，真实 .env、数据库、PID 和日志不会写回原发行目录。
 temp=$(mktemp -d "${TMPDIR:-/tmp}/kafka-release-verify.XXXXXX")
 mac_pid=
 mac_release=
 container=
+# 验收退出时先通过启动器停止临时服务，再受身份限制回收残留 fixture、容器和临时目录。
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
@@ -51,6 +55,7 @@ cleanup() {
         if [ -z "$mac_pid" ] && [ -f "$mac_release/data/kafka-dashboard.pid" ]; then
             mac_pid=$(cat "$mac_release/data/kafka-dashboard.pid")
         fi
+        # 优先走启动器的完整身份核验与 SIGTERM 等待，不能拿缓存 PID 直接强制终止。
         "$mac_release/start.sh" stop >/dev/null 2>&1 || :
     fi
     if [ -n "$mac_pid" ]; then
@@ -61,6 +66,7 @@ cleanup() {
                 if kill -0 "$mac_pid" 2>/dev/null &&
                     cleanup_status=$("$mac_release/start.sh" status 2>/dev/null) &&
                     [ "$cleanup_status" = "Kafka Lens 正在运行，PID: $mac_pid" ]; then
+                    # 仅在私有副本内且启动器再次确认同一 PID 后，强制回收验证 fixture；正式 stop 不执行此操作。
                     kill -KILL "$mac_pid" 2>/dev/null || :
                 fi
                 ;;
@@ -85,6 +91,7 @@ trap 'exit 143' TERM
     # Require a complete, unique, sorted manifest; never accept paths outside the package.
     sed -n 's/^[0-9a-f]\{64\}  \(\.\/.*\)$/\1/p' SHA256SUMS > "$temp/manifest"
     cmp -s "$temp/files" "$temp/manifest" || fail 'Invalid checksum manifest file list'
+    # 清单先与完整文件集合精确比对，再逐项验哈希，防止缺项或包外路径绕过。
     shasum -a 256 -c SHA256SUMS || fail 'Release checksum verification failed'
 )
 file "$release/$binary"
@@ -111,6 +118,7 @@ else
 fi
 [ "$actual_version" = "kafka-dashboard $version" ] || fail 'Binary version does not match release metadata'
 
+# 指定平台服务就绪后检查健康、首页、SPA 和资源字节，并确认临时 SQLite 已完成迁移。
 check_http() {
     base=$1
     destination=$2
@@ -134,6 +142,7 @@ check_http() {
     [ "$(sqlite3 "$destination/data/kafka-dashboard.db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('clusters', 'lag_rules');")" = 2 ] || fail 'SQLite migrations missing'
 }
 if [ "$platform" = darwin-arm64 ]; then
+# macOS 在特殊字符目录的临时副本中运行启动器，验证迁移后仍能正确解析发行相对路径。
 mac_release="$temp/mac release?%20中文"
 cp -R "$release" "$mac_release"
 cp "$mac_release/.env.example" "$mac_release/.env"
@@ -155,6 +164,7 @@ while [ "$attempt" -lt 100 ]; do
 done
 [ -n "$mac_port" ] || fail 'Timed out waiting for macOS listener'
 
+# 先完成真实 HTTP 和数据库核验，再经 stop 等待退出，最后核对停止状态和 PID 清理。
 check_http "http://127.0.0.1:$mac_port" "$mac_release"
 "$mac_release/start.sh" stop
 mac_status=$("$mac_release/start.sh" status) || fail 'macOS stopped status command failed'
@@ -169,10 +179,12 @@ linux_release="$temp/linux release?%20中文"
 linux_mount='/release?%20 中文'
 cp -R "$release" "$linux_release"
 cp "$linux_release/.env.example" "$linux_release/.env"
+# 容器保留独立存活入口并以当前用户运行；启动器不作 PID 1，使后台服务的信号与状态可真实验收。
 container=$(docker run -d --platform "$docker_platform" --user "$(id -u):$(id -g)" \
     -v "$linux_release:$linux_mount" -p 127.0.0.1::3000 \
     -e KAFKA_DASHBOARD_BIND=0.0.0.0:3000 \
     "$runtime_image" sh -c 'while :; do sleep 3600; done')
+# Linux 同样先 start/status，再检查 HTTP，最后 stop/status 并确认 PID 消失，完整验证生命周期。
 docker exec "$container" "$linux_mount/start.sh" start
 linux_pid=$(docker exec "$container" cat "$linux_mount/data/kafka-dashboard.pid")
 linux_status=$(docker exec "$container" "$linux_mount/start.sh" status) || fail 'Linux status command failed'

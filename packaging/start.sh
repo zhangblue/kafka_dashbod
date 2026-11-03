@@ -2,6 +2,7 @@
 set -eu
 
 release_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+# 启动入口先按操作系统和架构选择唯一二进制，避免执行其他平台产物。
 case "$(uname -s)/$(uname -m)" in
     Darwin/arm64) platform=darwin-arm64 ;;
     Linux/x86_64) platform=linux-amd64 ;;
@@ -14,9 +15,13 @@ pid_file="$data_dir/kafka-dashboard.pid"
 log_file="$data_dir/kafka-dashboard.log"
 lock_dir="$data_dir/kafka-dashboard.lock"
 
+# 参数无效时输出中文子命令用法，供入口校验调用。
 usage() { echo '用法: ./start.sh [start|stop|status|restart|--version]' >&2; }
+# 管理操作遇到不可安全继续的状态时输出错误并结束启动器。
 fail() { echo "$*" >&2; exit 1; }
+# 管理操作退出时释放本次持有的空锁目录，由退出 trap 调用。
 release_lock() { [ ! -d "$lock_dir" ] || rmdir "$lock_dir" 2>/dev/null || :; }
+# 启动、停止、查询和重启前取得独占锁，并为退出及信号路径安装释放处理。
 acquire_lock() {
     mkdir "$lock_dir" 2>/dev/null || fail '无法执行操作：另一个启动器管理操作正在进行'
     trap release_lock EXIT
@@ -24,10 +29,14 @@ acquire_lock() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 }
+# 后台子进程创建后以同目录临时文件原子写入 PID，避免其他管理操作读到半条记录。
 write_pid() {
     pid_tmp="$pid_file.$$"
     printf '%s\n' "$1" > "$pid_tmp" && mv "$pid_tmp" "$pid_file"
 }
+# inspect_process 确认 PID 存活后核验内核可执行文件和完整参数边界，禁止仅凭命令显示名发信号。
+# macOS 分支内的 latin 读取原始字节，uint 解码小端整数，utf8 解码参数；run 在 osascript 入口组合这些 helper 完成身份核验。
+# 参数缓冲含环境数据，核验只返回匹配标志，不能输出缓冲内容。
 matches_process_identity() {
     case "$platform" in
         darwin-arm64)
@@ -119,6 +128,7 @@ matches_process_identity() {
 }
 
 # 0: matching live service; 1: stopped; 2: unsafe or unreadable process state.
+# 各管理子命令调用时读取并验证 PID；区分服务存活、已停止与不可安全操作的状态。
 inspect_process() {
     if [ ! -e "$pid_file" ] && [ ! -L "$pid_file" ]; then return 1; fi
     if [ ! -f "$pid_file" ] || [ ! -r "$pid_file" ]; then
@@ -165,10 +175,12 @@ inspect_process() {
         echo '无法检查进程：命令不可读' >&2
         return 2
     fi
+    # 存活检测不足以证明所有权，必须在返回可管理状态前核验完整进程身份。
     if matches_process_identity; then return 0; fi
     echo 'PID 文件对应的进程身份不匹配' >&2
     return 2
 }
+# start 或成功停止后的 restart 调用；先拒绝重复服务，再后台启动并确认初始存活。
 start_service() {
     if inspect_process; then
         echo "Kafka Lens 已在运行，PID: $pid" >&2
@@ -177,9 +189,11 @@ start_service() {
         state=$?
         [ "$state" -eq 1 ] || return "$state"
     fi
+    # 进程检查确认为停止后才创建子进程；日志追加保留既有诊断记录。
     nohup "$binary" </dev/null >>"$log_file" 2>&1 &
     service_pid=$!
     if ! write_pid "$service_pid"; then
+        # PID 记录失败时先终止并等待刚创建的子进程，避免产生无法管理的后台服务。
         kill -TERM "$service_pid" 2>/dev/null || :
         wait "$service_pid" 2>/dev/null || :
         rm -f "$pid_tmp"
@@ -193,6 +207,7 @@ start_service() {
     echo "Kafka Lens 已在后台启动，PID: $service_pid"
     echo "日志文件: $log_file"
 }
+# status 子命令调用时输出运行或停止状态；两种业务状态均成功返回，检查错误保持非零。
 status_service() {
     if inspect_process; then
         echo "Kafka Lens 正在运行，PID: $pid"
@@ -202,6 +217,7 @@ status_service() {
         echo 'Kafka Lens 未运行'
     fi
 }
+# stop 或 restart 调用；仅向身份匹配的服务发送 SIGTERM，并有界等待正常释放资源。
 stop_service() {
     if inspect_process; then
         service_pid=$pid
@@ -211,6 +227,7 @@ stop_service() {
         echo 'Kafka Lens 未运行'
         return 0
     fi
+    # 完整身份核验后才发送 SIGTERM；超时保留 PID，不升级为 SIGKILL，以便继续安全管理。
     kill -TERM "$service_pid" || fail "无法停止 Kafka Lens，PID: $service_pid"
     attempt=0
     while kill -0 "$service_pid" 2>/dev/null; do
@@ -221,6 +238,7 @@ stop_service() {
     rm -f "$pid_file" || fail '无法删除 PID 文件'
     echo 'Kafka Lens 已停止'
 }
+# restart 子命令先等待停止成功再启动，停止失败时保留现有进程与记录。
 restart_service() {
     stop_service || return "$?"
     start_service
@@ -236,6 +254,7 @@ esac
 cd "$release_dir"
 umask 077
 mkdir -p "$data_dir"
+# 所有管理操作共用一把锁，防止 PID 检查、写入与停止互相交错。
 acquire_lock
 case "$command" in
     start) start_service ;;

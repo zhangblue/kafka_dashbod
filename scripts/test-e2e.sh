@@ -4,12 +4,14 @@ umask 077
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
+# 本次验收独占临时目录与 Compose project，清理只针对本次创建的资源。
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/kafka-dashboard-e2e.XXXXXX")"
 project="kafka-dashboard-e2e-$(date +%s)-$$"
 backend_pid=''
 frontend_pid=''
 compose=(docker compose -f "$repo_dir/docker-compose.test.yml" -p "$project")
 
+# 验收收尾和异常清理时停止本次记录的子进程；先等 SIGTERM，失败时回收 fixture 并报告失败。
 stop_process() {
   local pid="$1"
   [[ -n "$pid" ]] || return 0
@@ -30,6 +32,7 @@ stop_process() {
   return "$exit_code"
 }
 
+# 清理临时日志前及验收结束时检查测试秘密是否泄漏，命中时抑制原文输出。
 check_logs() {
   E2E_LOG_DIR="$run_dir" node --input-type=module <<'JS'
 import fs from 'node:fs'
@@ -46,6 +49,7 @@ for (const file of fs.readdirSync(dir).filter(name => name.endsWith('.log'))) {
 JS
 }
 
+# EXIT/INT/TERM 收尾先回收前后端，再清理一次性 broker，检查日志后移除本次临时目录。
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
@@ -61,12 +65,14 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# 创建一次性 Kafka 前向回环接口申请临时端口，供 Compose 的 fixture 地址使用。
 free_port() {
   node --input-type=module -e 'import net from "node:net"; const s=net.createServer(); s.listen(0,"127.0.0.1",()=>{ console.log(s.address().port); s.close() })'
 }
 
 export KAFKA_TEST_PORT="$(free_port)"
 export E2E_KAFKA_BROKERS="127.0.0.1:$KAFKA_TEST_PORT"
+# 许可只配合本次动态回环 broker 使用，使写入 fixture 无法误用已有集群。
 export E2E_KAFKA_FIXTURE_PERMIT=disposable-compose
 export E2E_RUN_ID="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
 export E2E_FIXTURE_SECRET="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
@@ -77,6 +83,7 @@ export NO_COLOR=1
 unset FORCE_COLOR
 
 printf '%s\n' 'Starting disposable Kafka fixture…'
+# 先等待本次 Compose broker 可用，再运行明确授权的写入 fixture，之后才启动受测后端。
 "${compose[@]}" up --wait --wait-timeout 180
 cargo test -p backend --test kafka_fixture -- --ignored
 cargo build -p backend --bin kafka-dashboard
@@ -110,12 +117,14 @@ for ((attempt=0; attempt<200; attempt++)); do
   sleep 0.1
 done
 [[ "$ready" == true ]] || { printf '%s\n' 'Frontend readiness timed out'; exit 1; }
+# 浏览器操作前核验 preview 的 PID 与本次标识，防止误连同端口上的其他健康服务。
 E2E_BASE_URL="$(node scripts/e2e-preview.mjs verify "$run_dir/preview.json" "$frontend_pid")"
 export E2E_BASE_URL
 kill -0 "$backend_pid" 2>/dev/null || { printf '%s\n' 'Backend exited before browser tests'; exit 1; }
 (cd frontend && node --test scripts/token-safety.test.mjs)
 (cd frontend && node node_modules/@playwright/test/cli.js test "$@")
 # Assert SIGTERM returns a successful process status before general trap cleanup.
+# 正常路径先断言后端 SIGTERM 成功退出，再清空 PID，避免清理 trap 掩盖关闭失败。
 stop_process "$backend_pid"
 backend_pid=''
 check_logs

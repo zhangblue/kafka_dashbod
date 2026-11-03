@@ -16,15 +16,18 @@ const lifecycleTimeoutMs = 30_000;
 // These fixtures make curl return immediately: listener/health polling and stop
 // can each take 10s, reaping 2s, startup 1s. Allow subprocess scheduling overhead.
 const runtimeVerificationTimeoutMs = 60_000;
+// fixture 装配时写入可执行替身，保留真实启动器、文件系统和信号流程。
 async function executable(file, content) {
   await writeFile(file, content, { mode: 0o755 });
 }
+// 启动器测试开始时创建隔离发行目录及三平台替身，并登记仅属于本次测试的子进程清理。
 async function fixture(t, osName = 'Darwin', arch = 'arm64') {
   const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), 'release-test-')));
   const startedPids = path.join(temp, 'started-pids');
   const events = path.join(temp, 'service-events');
   const readyFile = path.join(temp, 'service-ready');
   const launcherPids = new Set();
+  // 测试成功或失败均由 fixture 所有者回收记录的服务，确认退出后才删除临时目录。
   t.after(async () => {
     if (existsSync(startedPids)) {
       for (const pid of (await readFile(startedPids, 'utf8')).trim().split('\n').map(Number).filter(pid => Number.isSafeInteger(pid) && pid > 0)) {
@@ -61,6 +64,7 @@ printf '%s\\n' "$$" > "$FAKE_READY_FILE"
 while :; do sleep 1; done
 `);
   }
+  // 返回的 run 方法供各用例执行真实启动器；清除继承的配置，收集新服务 PID 供收尾。
   return { release, temp, commands, events, readyFile, run(args = [], env = {}, location = release) {
     const cleanEnv = { ...process.env };
     delete cleanEnv.DATABASE_URL;
@@ -75,6 +79,7 @@ while :; do sleep 1; done
   } };
 }
 
+// 信号与清理断言中探测 PID 存活；只将 ESRCH 解释为退出，其余错误保留。
 function isRunning(pid) {
   try { process.kill(pid, 0); return true; } catch (error) {
     if (error.code === 'ESRCH') return false;
@@ -82,9 +87,11 @@ function isRunning(pid) {
   }
 }
 
+// 服务启动或停止断言时读取发行目录中启动器实际写入的 PID。
 async function readPid(release) {
   return Number((await readFile(path.join(release, 'data/kafka-dashboard.pid'), 'utf8')).trim());
 }
+// 发送管理信号前等待替身完成 TERM 处理器和事件初始化，避免启动竞态影响断言。
 async function serviceReady(f, pid) {
   const deadline = Date.now() + launcherTimeoutMs;
   while (Date.now() < deadline) {
@@ -97,8 +104,11 @@ async function serviceReady(f, pid) {
   }
   assert.fail(`fixture PID ${pid} did not install its TERM handler and write startup events`);
 }
+// 日志断言调用时统一定位发行目录的固定追加日志。
 const logPath = release => path.join(release, 'data/kafka-dashboard.log');
+// PID 文件断言调用时统一定位发行目录的固定进程记录。
 const pidPath = release => path.join(release, 'data/kafka-dashboard.pid');
+// 启动后等待替身将工作目录写入日志，再返回内容供路径和配置断言使用。
 async function serviceLog(release) {
   for (let attempt = 0; attempt < 100; attempt++) {
     const log = await readFile(logPath(release), 'utf8');
@@ -110,6 +120,7 @@ async function serviceLog(release) {
 
 // Detect foreground blocking, injected configuration, and a wrong working directory or binary.
 for (const [osName, arch, platform] of [['Darwin', 'arm64', 'darwin-arm64'], ['Linux', 'x86_64', 'linux-amd64'], ['Linux', 'aarch64', 'linux-arm64']]) {
+  // 验证各平台后台启动选择对应二进制并切换到发行工作目录。
   test(`${osName}/${arch} background start selects its binary and working directory`, async t => {
     const f = await fixture(t, osName, arch);
     const result = f.run(['start']);
@@ -126,6 +137,7 @@ for (const [osName, arch, platform] of [['Darwin', 'arm64', 'darwin-arm64'], ['L
     }
   });
 }
+// 验证默认子命令后台启动，且启动器不读取配置文件。
 test('default command starts in background without reading an env file', async t => {
   const f = await fixture(t);
   const result = f.run();
@@ -134,6 +146,7 @@ test('default command starts in background without reading an env file', async t
   assert.match(result.stdout, /Kafka Lens 已在后台启动，PID: [1-9][0-9]*/);
   assert.equal((await serviceLog(f.release)).split('\n')[0], 'darwin-arm64');
 });
+// 验证不支持的平台被拒绝，并提示三个受支持平台。
 test('unsupported platform reports all three supported platforms', async t => {
   const f = await fixture(t, 'Linux', 'riscv64');
   const result = f.run();
@@ -142,6 +155,7 @@ test('unsupported platform reports all three supported platforms', async t => {
   assert.match(result.stderr, /Linux\/x86_64/);
   assert.match(result.stderr, /Linux\/aarch64/);
 });
+// 验证发行包移动后后台启动仍解析到自身工作目录。
 test('moved package background startup resolves its working directory', async t => {
   const f = await fixture(t);
   const moved = path.join(f.temp, 'new location');
@@ -150,12 +164,14 @@ test('moved package background startup resolves its working directory', async t 
   assert.equal(result.status, 0, result.stderr);
   assert.equal((await serviceLog(moved)).split('\n')[1], moved);
 });
+// 验证后台启动原样保留父进程显式设置的数据库与静态资源路径。
 test('background startup preserves explicit database and web paths', async t => {
   const f = await fixture(t);
   const result = f.run([], { DATABASE_URL: 'sqlite:///custom.db', KAFKA_DASHBOARD_WEB_DIR: '/custom/web' });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual((await serviceLog(f.release)).split('\n').slice(2, 4), ['sqlite:///custom.db', '/custom/web']);
 });
+// 验证 C locale 下中文发行目录中的完整启动、状态、停止流程。
 test('C locale manages the complete lifecycle in a Chinese release directory', async t => {
   const f = await fixture(t);
   const moved = path.join(f.temp, '中文 movable release');
@@ -175,6 +191,7 @@ test('C locale manages the complete lifecycle in a Chinese release directory', a
   assert.equal(status.stdout.trim(), 'Kafka Lens 未运行');
 });
 
+// 验证子进程立即失败时删除 PID，并将排障入口指向日志。
 test('immediate startup failure removes pid and points to the log', async t => {
   const f = await fixture(t);
   const result = f.run([], { FAKE_EXIT: 'immediate' });
@@ -182,6 +199,7 @@ test('immediate startup failure removes pid and points to the log', async t => {
   assert.equal(existsSync(pidPath(f.release)), false);
   assert.match(result.stderr, /启动失败.*日志/);
 });
+// 验证重复启动拒绝创建新进程，保留已有 PID 和日志。
 test('duplicate background startup keeps the existing pid and log', async t => {
   const f = await fixture(t);
   assert.equal(f.run().status, 0);
@@ -193,6 +211,7 @@ test('duplicate background startup keeps the existing pid and log', async t => {
   assert.equal(await readPid(f.release), pid);
   assert.equal(await readFile(logPath(f.release), 'utf8'), log);
 });
+// 验证后台日志只追加，不在再次启动时截断旧记录。
 test('background startup uses an append-only log', async t => {
   const f = await fixture(t);
   await mkdir(path.join(f.release, 'data'));
@@ -201,6 +220,7 @@ test('background startup uses an append-only log', async t => {
   assert.match(await serviceLog(f.release), /^previous run\ndarwin-arm64\n/);
 });
 
+// 验证运行与停止两种业务状态均返回零，并输出准确中文状态。
 test('status describes both running and stopped states with exit code zero', async t => {
   const f = await fixture(t);
   const stopped = f.run(['status']);
@@ -212,6 +232,7 @@ test('status describes both running and stopped states with exit code zero', asy
   assert.equal(running.status, 0, running.stderr);
   assert.match(running.stdout, new RegExp(`Kafka Lens 正在运行，PID: ${pid}`));
 });
+// 验证状态查询清理已退出进程的陈旧 PID 并报告停止。
 test('status clears a stale pid and reports stopped', async t => {
   const f = await fixture(t);
   const child = spawn('/bin/sh', ['-c', 'exit 0']);
@@ -225,6 +246,7 @@ test('status clears a stale pid and reports stopped', async t => {
 });
 
 // Catch early success, repeated signals, forced kills, and starting before a successful stop.
+// 验证停止等待身份匹配的服务完成退出，再移除 PID 文件。
 test('stop waits for the matching service to exit and removes its pid file', async t => {
   const f = await fixture(t);
   assert.equal(f.run(['start']).status, 0);
@@ -239,6 +261,7 @@ test('stop waits for the matching service to exit and removes its pid file', asy
   assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\nTERM:${pid}\n`);
 });
 for (const stale of [false, true]) {
+  // 验证未启动或仅有陈旧 PID 时停止仍可成功收尾。
   test(`stop succeeds when ${stale ? 'a stale pid is present' : 'the service has not started'}`, async t => {
     const f = await fixture(t);
     if (stale) {
@@ -255,6 +278,7 @@ for (const stale of [false, true]) {
   });
 }
 for (const command of ['stop', 'restart']) {
+  // 验证停止或重启超时只发一次 TERM，保留活 PID 并禁止再次启动。
   test(`${command} timeout sends TERM once, preserves the live pid, and never starts again`, async t => {
     const f = await fixture(t);
     assert.equal(f.run(['start'], { FAKE_IGNORE_TERM: '1' }).status, 0);
@@ -272,6 +296,7 @@ for (const command of ['stop', 'restart']) {
     assert.equal(existsSync(path.join(f.release, 'data/kafka-dashboard.lock')), false);
   });
 }
+// 验证重启必须等待旧进程收到 TERM 并退出后才创建新服务。
 test('restart waits for old TERM and exit before starting a new service', async t => {
   const f = await fixture(t);
   assert.equal(f.run(['start']).status, 0);
@@ -288,6 +313,7 @@ test('restart waits for old TERM and exit before starting a new service', async 
   assert.match(result.stdout, new RegExp(`Kafka Lens 已在后台启动，PID: ${newPid}`));
   assert.equal(await readFile(f.events, 'utf8'), `START:${oldPid}\nTERM:${oldPid}\nSTART:${newPid}\n`);
 });
+// 验证等待停止失败时重启保留 PID，且不创建第二个服务。
 test('restart preserves the pid and never starts again when its shutdown wait fails', async t => {
   const f = await fixture(t);
   assert.equal(f.run(['start']).status, 0);
@@ -311,6 +337,7 @@ exec /bin/sleep "$@"
   assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\nTERM:${pid}\n`);
   assert.equal(existsSync(path.join(f.release, 'data/kafka-dashboard.lock')), false);
 });
+// 验证无运行服务时 restart 可完成一次正常启动。
 test('restart starts a service when none is running', async t => {
   const f = await fixture(t);
   const result = f.run(['restart']);
@@ -322,6 +349,7 @@ test('restart starts a service when none is running', async t => {
   assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\n`);
 });
 for (const content of ['not-a-pid\n', '0\n', '-1\n', '12\n34\n', '']) {
+  // 验证各种无效 PID 文本均作为管理错误明确拒绝。
   test(`invalid pid ${JSON.stringify(content)} is an explicit script error`, async t => {
     const f = await fixture(t);
     await mkdir(path.join(f.release, 'data'));
@@ -332,6 +360,7 @@ for (const content of ['not-a-pid\n', '0\n', '-1\n', '12\n34\n', '']) {
     assert.equal(await readFile(pidPath(f.release), 'utf8'), content);
   });
 }
+// 验证 PID 路径不可读时显式失败，不能误报服务已停止。
 test('unreadable pid path is an explicit script error', async t => {
   const f = await fixture(t);
   await mkdir(pidPath(f.release), { recursive: true });
@@ -339,6 +368,7 @@ test('unreadable pid path is an explicit script error', async t => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /无法读取 PID 文件/);
 });
+// 验证其他活进程的 PID 被拒绝且记录保留，避免误杀。
 test('live pid belonging to another process is rejected without deleting it', async t => {
   const f = await fixture(t);
   await mkdir(path.join(f.release, 'data'));
@@ -351,6 +381,7 @@ test('live pid belonging to another process is rejected without deleting it', as
   }
 });
 for (const kind of ['similar executable path', 'unrelated argument containing binary path']) {
+  // 验证伪造命令、参数等身份无法通过内核可执行文件与参数边界核验。
   test(`process identity rejects ${kind}`, async t => {
     const f = await fixture(t);
     const binary = path.join(f.release, 'bin/kafka-dashboard-darwin-arm64');
@@ -381,6 +412,7 @@ for (const kind of ['similar executable path', 'unrelated argument containing bi
   });
 }
 for (const reopenScript of [false, true]) {
+  // 验证脚本路径与参数拼接成二进制路径仍不能伪造完整身份。
   test(`process identity rejects a script path and argument that concatenate to the binary path${reopenScript ? ' with a reopened script descriptor' : ''}`, async t => {
     const f = await fixture(t);
     const prefixScript = path.join(f.temp, 'movable');
@@ -417,6 +449,7 @@ for (const reopenScript of [false, true]) {
     }
   });
 }
+// 验证原生进程伪造 argv[0] 不能冒充受管二进制。
 test('process identity rejects a native process with the binary path forged as argv zero', async t => {
   const f = await fixture(t);
   const child = spawn('/bin/cat', [], {
@@ -435,6 +468,7 @@ test('process identity rejects a native process with the binary path forged as a
   assert.match(result.stderr, /进程身份不匹配/);
   process.kill(child.pid, 0);
 });
+// 验证即使内存映射目标二进制，伪造 argv[0] 仍被拒绝。
 test('process identity rejects a forged native argv zero even when the target is memory mapped', async t => {
   const f = await fixture(t);
   const binary = path.join(f.release, 'bin/kafka-dashboard-darwin-arm64');
@@ -470,6 +504,7 @@ time.sleep(60)
   assert.match(result.stderr, /进程身份不匹配/);
   process.kill(child.pid, 0);
 });
+// 验证完整读取大进程表，不因提前截断管道产生诊断噪声。
 test('process inspection consumes a large table without broken pipe diagnostics', async t => {
   const f = await fixture(t);
   assert.equal(f.run(['start']).status, 0);
@@ -490,6 +525,7 @@ awk 'BEGIN {
   assert.equal(isRunning(pid), false);
 });
 for (const kind of ['exact command', 'similar first path', 'similar second path', 'extra argument', 'unrelated prefix']) {
+  // 验证仅凭进程表中的 QEMU 名称不能证明受管进程身份。
   test(`QEMU process identity rejects unproven ${kind} from a process table alone`, async t => {
     const f = await fixture(t);
     assert.equal(f.run(['start']).status, 0);
@@ -517,6 +553,7 @@ for (const kind of ['exact command', 'similar first path', 'similar second path'
     assert.equal(await readFile(f.events, 'utf8'), `START:${pid}\n`);
   });
 }
+// 验证进程检查失败保持管理错误并保留 PID，避免丢失安全依据。
 test('failed process inspection is a pid error and preserves the pid file', async t => {
   const f = await fixture(t);
   await mkdir(path.join(f.release, 'data'));
@@ -529,6 +566,7 @@ test('failed process inspection is a pid error and preserves the pid file', asyn
     assert.equal(await readPid(f.release), process.pid);
   }
 });
+// 验证已有管理锁阻止并发命令，且不删除其他操作持有的锁。
 test('existing lock rejects concurrent management without removing the lock', async t => {
   const f = await fixture(t);
   const lock = path.join(f.release, 'data/kafka-dashboard.lock');
@@ -540,6 +578,7 @@ test('existing lock rejects concurrent management without removing the lock', as
     assert.equal(existsSync(lock), true);
   }
 });
+// 验证信号退出只释放一次本次锁，不会删除后来持有者的新锁。
 test('signal exit releases its lock once and preserves a replacement owner lock', async t => {
   const f = await fixture(t);
   const lock = path.join(f.release, 'data/kafka-dashboard.lock');
@@ -576,6 +615,7 @@ fi
   assert.equal(await readFile(releases, 'utf8'), 'release\n');
   assert.equal(existsSync(lock), true, 'replacement owner must retain its lock');
 });
+// 验证版本查询前台返回，且不创建运行目录、PID 或日志。
 test('version runs in the foreground without creating data, pid, or log', async t => {
   const f = await fixture(t);
   const result = f.run(['--version']);
@@ -584,6 +624,7 @@ test('version runs in the foreground without creating data, pid, or log', async 
   assert.equal(existsSync(path.join(f.release, 'data')), false);
 });
 for (const args of [['unknown'], ['--bind', '127.0.0.1:9090'], ['start', 'extra'], ['--version', 'extra']]) {
+  // 验证未知参数和多余参数均输出中文用法并失败。
   test(`unknown argument ${JSON.stringify(args)} reports Chinese usage`, async t => {
     const f = await fixture(t);
     const result = f.run(args);
@@ -596,6 +637,7 @@ for (const args of [['unknown'], ['--bind', '127.0.0.1:9090'], ['start', 'extra'
 // Exercise SQLx's real URI parser: literal '?' and '%20' must remain directory names.
 const nativeBinary = path.join(root, 'dist/kafka-dashboard-v0.2.0-darwin-arm64/bin/kafka-dashboard-darwin-arm64');
 for (const directory of ['release?query', 'release%20encoded', 'release with spaces', '中文发行目录']) {
+  // 具备真实二进制时验证特殊字符目录搬移后仍可启动、检查健康并停止。
   test(`real binary starts after relocation to ${directory}`, {
     skip: process.platform !== 'darwin' || process.arch !== 'arm64' || !existsSync(nativeBinary)
       ? 'Requires the built Darwin/arm64 release binary' : false,
@@ -640,6 +682,7 @@ for (const directory of ['release?query', 'release%20encoded', 'release with spa
 }
 
 const releaseName = 'kafka-dashboard-v0.2.0-darwin-arm64';
+// 构建测试开始时装配隔离源码与昂贵编译器替身，保留真实 tar、checksum 和产物替换流程。
 async function buildFixture(t, fail = '') {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'release-build-test-'));
   t.after(() => rm(temp, { recursive: true, force: true }));
@@ -666,14 +709,17 @@ done
 mkdir -p "$output/$target/release"
 printf '%s' "$target" > "$output/$target/release/kafka-dashboard"
 `);
+  // 各构建用例通过 run 执行真实构建脚本，可注入失败阶段与环境以检验回滚边界。
   return { temp, run(args = ['--platform', 'darwin-arm64'], env = {}) { return spawnSync('/bin/sh', [path.join(temp, 'tools/build-release.sh'), ...args], { cwd: temp, encoding: 'utf8', env: { ...process.env, PATH: `${temp}/commands:${process.env.PATH}`, FAIL_STEP: fail, KAFKA_DASHBOARD_CURL_INCLUDE_DIR: path.join(temp, 'headers'), ...env } }); } };
 }
+// 验证编译前拒绝缺失或不支持的平台，以及不匹配的显式版本。
 test('build requires an explicit supported platform and matching version before compilation', async t => {
   const f = await buildFixture(t);
   for (const args of [[], ['--platform', 'all'], ['--platform', 'linux-riscv64'], ['--platform', 'darwin-arm64', '--version', 'v9.0.0'], ['--platform', 'darwin-arm64', '--version', '']]) assert.notEqual(f.run(args).status, 0);
   assert.equal(existsSync(path.join(f.temp, 'cargo-calls')), false);
 });
 for (const [platform, target, command] of [['darwin-arm64', 'aarch64-apple-darwin', 'build'], ['linux-amd64', 'x86_64-unknown-linux-musl', 'zigbuild'], ['linux-arm64', 'aarch64-unknown-linux-musl', 'zigbuild']]) {
+  // 验证各平台仅构建对应目标，真实归档及内外 checksum 均完整有效。
   test(`build ${platform} emits one target and genuine archive checksum`, async t => {
     const f = await buildFixture(t);
     const result = f.run(['--platform', platform, '--version', 'v0.2.0'], { CARGO_TARGET_DIR: path.join(f.temp, 'custom target') });
@@ -697,6 +743,7 @@ for (const [platform, target, command] of [['darwin-arm64', 'aarch64-apple-darwi
   });
 }
 for (const step of ['npm', 'cargo', 'tar', 'publication', 'checksum-publication']) {
+  // 验证依赖安装、编译、归档或替换失败均恢复原有三件发行产物。
   test(`${step} failure preserves all prior artifacts`, async t => {
     const f = await buildFixture(t, step);
     if (step === 'tar') await executable(path.join(f.temp, 'commands/tar'), '#!/bin/sh\nexit 18\n');
@@ -721,6 +768,7 @@ for (const [name, file, message] of [
   ['dependencies', 'web/node_modules/pkg/index.js', /Unexpected release/],
   ['tampering', 'web/index.html', /checksum/i],
 ]) {
+  // 验证包结构或元数据不合法时，在执行二进制前拒绝验收。
   test(`verification rejects ${name} before running binaries`, async t => {
     const f = await buildFixture(t);
     assert.equal(f.run().status, 0);
@@ -733,6 +781,7 @@ for (const [name, file, message] of [
   });
 }
 
+// 生命周期验证开始时基于真实构建产物替换受测服务并重算哈希，注入可控状态和 TERM 故障。
 async function runtimeFixture(t, ignoreTerm = false, platform = 'darwin-arm64') {
   const f = await buildFixture(t);
   assert.equal(f.run(['--platform', platform]).status, 0);
@@ -776,6 +825,7 @@ fi`));
   return { ...f, release };
 }
 
+// 验证运行验收失败时也会回收忽略 TERM 的本次 fixture。
 test('failed runtime verification reaps even a server that ignores TERM', async t => {
   const f = await runtimeFixture(t, true);
   const serverPidFile = path.join(f.temp, 'server.pid');
@@ -796,6 +846,7 @@ test('failed runtime verification reaps even a server that ignores TERM', async 
   assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
 });
 
+// 验证启动器拒绝完整身份后，验收清理不会凭缓存 PID 强制杀进程。
 test('failed verification never kills a pid after the launcher refuses its identity', async t => {
   const f = await runtimeFixture(t);
   const serverPidFile = path.join(f.temp, 'server.pid');
@@ -823,6 +874,7 @@ test('failed verification never kills a pid after the launcher refuses its ident
   assert.equal(isRunning(serverPid), true, 'identity refusal must prevent forced cleanup of this pid');
 });
 
+// 参数化生命周期用例调用，核对单个平台的 start/status/stop 顺序及状态故障拒绝行为。
 async function verifyPlatformLifecycle(t, fault, platform = 'darwin-arm64') {
   const f = await runtimeFixture(t, false, platform);
   const serverPidFile = path.join(f.temp, 'server.pid');
@@ -923,22 +975,26 @@ esac
   assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
 }
 for (const fault of ['', 'wrong-pid', 'running-error', 'wrong-stopped', 'stopped-error']) {
+  // 验证单独的 macOS 生命周期验收核对运行和停止状态，并拒绝每种状态故障。
   test(`single-platform lifecycle verification checks both macOS statuses${fault ? ` and rejects ${fault}` : ''}`,
     t => verifyPlatformLifecycle(t, fault));
 }
 
 for (const platform of ['linux-amd64', 'linux-arm64']) {
   for (const fault of ['', 'wrong-pid', 'running-error', 'wrong-stopped', 'stopped-error']) {
+    // 验证各 Linux 架构的生命周期顺序、状态故障拒绝与容器收尾。
     test(`${platform} lifecycle verification${fault ? ` rejects ${fault}` : ' passes'}`, t => verifyPlatformLifecycle(t, fault, platform));
   }
 }
 
 // These exercise the shared worktree lock and publication alongside genuine tar/hash operations.
+// 验证三个架构的产物可共存，后续构建不会覆盖其他平台。
 test('all three platform packages coexist without replacing other architectures', async t => {
   const f = await buildFixture(t);
   for (const platform of ['darwin-arm64', 'linux-amd64', 'linux-arm64']) assert.equal(f.run(['--platform', platform]).status, 0);
   assert.equal((await readdir(path.join(f.temp, 'dist'))).length, 9);
 });
+// 验证独占构建锁在调用编译器之前拒绝竞争，保留已有产物。
 test('exclusive build lock rejects work before invoking compilers', async t => {
   const f = await buildFixture(t);
   await mkdir(path.join(f.temp, 'dist/.build-release.lock'));
@@ -946,6 +1002,7 @@ test('exclusive build lock rejects work before invoking compilers', async t => {
   assert.equal(existsSync(path.join(f.temp, 'cargo-calls')), false);
   assert.equal(await readFile(path.join(f.temp, `dist/${releaseName}/old`), 'utf8'), 'previous release');
 });
+// 验证二进制即使 checksum 有效，版本不匹配也会被拒绝。
 test('verification rejects a checksum-valid binary with the wrong version', async t => {
   const f = await runtimeFixture(t);
   const binary = path.join(f.release, 'bin/kafka-dashboard-darwin-arm64');
@@ -958,6 +1015,7 @@ test('verification rejects a checksum-valid binary with the wrong version', asyn
 });
 
 for (const runtime of ['data/kafka-dashboard.db', '.env']) {
+  // 验证发行目录已有 data 或真实 .env 时拒绝替换并保留原始字节。
   test(`build refuses to replace deployment with ${runtime}`, async t => {
     const f = await buildFixture(t);
     const file = path.join(f.temp, 'dist', releaseName, runtime);
@@ -969,6 +1027,7 @@ for (const runtime of ['data/kafka-dashboard.db', '.env']) {
   });
 }
 
+// 验证 Linux ARM64 管理保留 /proc 可执行文件和精确 NUL 参数核验，失败时禁止信号。
 test('Linux ARM64 management retains proc executable and exact NUL argv checks', async t => {
   const f = await fixture(t, 'Linux', 'aarch64');
   assert.equal(f.run(['start']).status, 0);
@@ -989,6 +1048,7 @@ process.exit(Buffer.concat(chunks).equals(expected) && process.argv.at(-1) === '
   assert.equal(await readPid(f.release), pid);
 });
 
+// 验证未忽略的本地源码改动会写为 dirty，避免来源记录假称干净。
 test('source metadata marks nonignored local source changes dirty', async t => {
   const f = await buildFixture(t);
   await executable(path.join(f.temp, 'commands/git'), '#!/bin/sh\ncase "$1" in status) echo " M README.md";; *) echo 0123456789012345678901234567890123456789;; esac\n');
@@ -997,6 +1057,7 @@ test('source metadata marks nonignored local source changes dirty', async t => {
 });
 
 for (const runtime of ['data/kafka-dashboard.db', '.env']) {
+  // 验证编译期间新增的运行数据在产物替换前被再次发现并保留。
   test(`publication preserves ${runtime} created during compilation`, async t => {
     const f = await buildFixture(t);
     const cargo = path.join(f.temp, 'commands/cargo');
@@ -1010,9 +1071,11 @@ for (const runtime of ['data/kafka-dashboard.db', '.env']) {
 }
 
 for (const change of ['clean-source', 'dirty-source', 'untracked-source', 'head']) {
+  // 验证编译期间 HEAD、已跟踪或未跟踪源码变动均阻断产物替换。
   test(`source guard rejects ${change} mutation during compilation`, async t => {
     const f = await buildFixture(t);
     await executable(path.join(f.temp, 'commands/git'), '#!/bin/sh\nexec /usr/bin/git "$@"\n');
+    // 源码漂移用例在临时仓库执行真实 Git 操作，命令失败时立即终止 fixture 装配。
     const git = args => {
       const result = spawnSync('/usr/bin/git', args, { cwd: f.temp, encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);
@@ -1036,6 +1099,7 @@ for (const change of ['clean-source', 'dirty-source', 'untracked-source', 'head'
   });
 }
 
+// 验证旧目录移动后再次检查新增运行数据，并恢复旧发行目录。
 test('publication checks runtime data after moving the old directory', async t => {
   const f = await buildFixture(t);
   await executable(path.join(f.temp, 'commands/mv'), `#!/bin/sh
@@ -1047,6 +1111,7 @@ case "$2" in */previous${releaseName}) mkdir -p "$2/data"; printf 'moved runtime
   assert.equal(await readFile(path.join(f.temp, 'dist', releaseName, 'data/config.db'), 'utf8'), 'moved runtime');
   assert.equal(await readFile(path.join(f.temp, 'dist', releaseName, 'old'), 'utf8'), 'previous release');
 });
+// 验证回滚时保留已产生运行状态的新目录及旧备份，避免误删活跃部署。
 test('rollback preserves a newly running destination and retains its old backup', async t => {
   const f = await buildFixture(t);
   await executable(path.join(f.temp, 'commands/mv'), `#!/bin/sh

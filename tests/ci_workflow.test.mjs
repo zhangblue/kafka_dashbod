@@ -6,6 +6,7 @@ import test from 'node:test';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+// 验证 Kafka 连接 CI 在编译 bundled librdkafka 前安装所需 curl 头文件。
 test('Kafka connection CI installs the curl headers required by bundled librdkafka', async () => {
   const workflow = await readFile(path.join(root, '.github/workflows/kafka-connection.yml'), 'utf8');
 

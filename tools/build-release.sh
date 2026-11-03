@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 export LC_ALL=C
+# 参数、来源或产物检查失败时立即终止构建，交给已安装的清理流程恢复现场。
 fail() { echo "$*" >&2; exit 1; }
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 cd "$root"
@@ -14,6 +15,7 @@ while [ "$#" -gt 0 ]; do
         *) fail 'Usage: tools/build-release.sh --platform linux-amd64|linux-arm64|darwin-arm64 [--version vX.Y.Z]' ;;
     esac
 done
+# 强制显式选择单个平台，macOS 额外限制本机架构，避免误打包其他目标。
 case "$platform" in
     linux-amd64) target=x86_64-unknown-linux-musl; builder=zigbuild ;;
     linux-arm64) target=aarch64-unknown-linux-musl; builder=zigbuild ;;
@@ -24,11 +26,13 @@ esac
 version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\([0-9][0-9.]*\)"$/\1/p' backend/Cargo.toml)
 printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail 'Invalid Cargo package version'
 [ "$requested_version_set" = 0 ] || [ "$requested_version" = "v$version" ] || fail 'Explicit version must match Cargo package version'
+# 记录构建前的精确提交和未忽略源码状态；正式发布还要求包内 dirty 为 false。
 commit=$(git rev-parse HEAD)
 printf '%s\n' "$commit" | grep -Eq '^[0-9a-f]{40}$' || fail 'Invalid source commit'
 dirty=false
 [ -z "$(git status --porcelain --untracked-files=normal)" ] || dirty=true
 name="kafka-dashboard-v$version-$platform"
+# 替换、回滚和清理目录前检查 data/.env（包括符号链接），保护已部署的运行数据。
 has_runtime() {
     [ -e "$1/data" ] || [ -L "$1/data" ] || [ -e "$1/.env" ] || [ -L "$1/.env" ]
 }
@@ -36,11 +40,13 @@ has_runtime() {
 ! has_runtime "$root/dist/$name" || fail 'Refusing to replace a release containing runtime data or .env'
 mkdir -p "$root/dist"
 lock="$root/dist/.build-release.lock"
+# 同一 worktree 的前端输出与 dist 共用独占锁，编译前拒绝并发构建，避免互相覆盖。
 mkdir "$lock" 2>/dev/null || fail 'Another release build is already running'
 stage=
 publishing=0
 complete=0
 preserve_stage=0
+# 构建退出或信号触发时回滚未完成的三件产物；保留新增运行数据及其备份，最后释放锁。
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
@@ -80,9 +86,11 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# 临时构建目录位于 dist 同一文件系统，完成校验后才移动正式产物，失败可回滚。
 stage=$(mktemp -d "$root/dist/.release.XXXXXX")
 # Compare actual tracked diffs and untracked file contents, not just dirty=true.
 # These private files may contain source diffs and are never logged or packaged.
+# 编译前后分别记录 HEAD、差异及未跟踪文件内容，防止包内来源信息遗漏构建期间的改动。
 snapshot_source() {
     prefix=$1
     git rev-parse HEAD > "$prefix.head"
@@ -91,6 +99,7 @@ snapshot_source() {
     git ls-files --others --exclude-standard > "$prefix.untracked"
     git hash-object --stdin-paths < "$prefix.untracked" > "$prefix.contents"
 }
+# 在安装依赖和编译前建立源码基线；私有差异快照既不打印也不放入归档。
 snapshot_source "$stage/source-before"
 dirty=false
 [ ! -s "$stage/source-before.status" ] || dirty=true
@@ -120,6 +129,7 @@ if [ "$builder" = zigbuild ]; then
     flags_key="CFLAGS_$(printf '%s' "$target" | tr '-' '_')"
     existing_flags=$(printenv "$flags_key" || :)
 fi
+# 锁内先安装并构建前端，再编译唯一目标后端，确保归档静态资源属于本次构建。
 npm --prefix frontend ci
 npm --prefix frontend run build
 if [ "$builder" = zigbuild ]; then
@@ -136,14 +146,18 @@ printf '{"version":"%s","platform":"%s","target":"%s","commit":"%s","dirty":%s}\
 chmod 755 "$release/start.sh" "$release/bin/"*
 (
     cd "$release"
+    # 先对包内全部普通文件生成有序完整清单，再压缩，供解包后的完整性核验使用。
     find . -type f ! -name SHA256SUMS | sort | while IFS= read -r file; do shasum -a 256 "$file"; done > SHA256SUMS
 )
+# 归档完成后再对真实压缩字节生成 sidecar，不能用包内文件哈希代替归档哈希。
 COPYFILE_DISABLE=1 tar -czf "$stage/$name.tar.gz" -C "$stage" "$name"
 (cd "$stage"; shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+# 三件候选产物准备完成后重拍源码，全部快照一致才允许替换正式目录。
 snapshot_source "$stage/source-after"
 for component in head status diff untracked contents; do
     cmp -s "$stage/source-before.$component" "$stage/source-after.$component" || fail 'Source changed during release build'
 done
+# 先标记可回滚阶段，再逐件备份旧产物并替换；目录移动后重查运行数据，收窄并发部署窗口。
 publishing=1
 for suffix in '' .tar.gz .tar.gz.sha256; do
     if [ -e "$root/dist/$name$suffix" ]; then mv "$root/dist/$name$suffix" "$stage/previous$name$suffix"; fi
