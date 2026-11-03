@@ -140,7 +140,7 @@ function FeishuAlertEditor({ clusterId, value, snapshot, snapshotStale = false, 
       </div>
       <p className="form-note" id={`${id}-token-note`}>已保存 Token：{saved.accessTokenConfigured ? <span>{saved.maskedAccessToken ?? '已配置'}</span> : '未配置'}。只显示掩码；留空保留，更新值保存后以明文存入数据库。</p>
       <label className="feishu-checkbox"><input type="checkbox" checked={clearAccessToken} disabled={!!busy || !saved.accessTokenConfigured}
-        onChange={/* 在字段变更时，切换本次草稿 Token 的显隐，不读取已保存凭据。 */ event => { setClearAccessToken(event.target.checked); setAccessToken(''); setShowToken(false); setFeedback(null) }} />清除已保存 Token</label>
+        onChange={/* 在清除复选框变更时设置显式清除草稿、清空本次输入并恢复隐藏；勾选只修改草稿，保存时才删除已保存 Token。 */ event => { setClearAccessToken(event.target.checked); setAccessToken(''); setShowToken(false); setFeedback(null) }} />清除已保存 Token</label>
     </div>
     <p className="form-note">Lag 超过阈值并持续增长达到设定时间后发送通知；启用规则且配置 Token 后，后台会持续监控。</p>
     <section aria-labelledby={`${id}-rules-title`} className="feishu-rules-box">

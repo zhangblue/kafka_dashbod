@@ -129,8 +129,8 @@ export function TopicsPage() {
       {!topics.length && <p>{snapshot.topics.length ? '没有匹配的 Topic。' : '暂无 Topic。'}</p>}
     </>}
     {target && target.sessionId === sessionId && (target.kind === 'create'
-      ? <CreateTopicModal sessionId={target.sessionId} onClose={/* 在关闭弹窗时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => setTarget(null)} onApplied={applied} />
-      : target.kind === 'config' ? <TopicConfigModal sessionId={target.sessionId} topic={target.topic} onClose={/* 在关闭弹窗时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => setTarget(null)} onApplied={applied} />
-        : <DeleteTopicModal sessionId={target.sessionId} topic={target.topic} onClose={/* 在关闭弹窗时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => setTarget(null)} onApplied={applied} />)}
+      ? <CreateTopicModal sessionId={target.sessionId} onClose={/* 在关闭创建弹窗时清除管理目标并卸载创建表单，共享仪表盘会话继续存在并采样。 */ () => setTarget(null)} onApplied={applied} />
+      : target.kind === 'config' ? <TopicConfigModal sessionId={target.sessionId} topic={target.topic} onClose={/* 在关闭配置弹窗时清除管理目标并卸载配置表单，取消其配置读取；共享仪表盘会话继续存在并采样。 */ () => setTarget(null)} onApplied={applied} />
+        : <DeleteTopicModal sessionId={target.sessionId} topic={target.topic} onClose={/* 在关闭删除弹窗时清除管理目标并卸载删除表单，共享仪表盘会话继续存在并采样。 */ () => setTarget(null)} onApplied={applied} />)}
   </section>
 }
