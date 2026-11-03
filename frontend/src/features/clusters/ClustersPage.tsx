@@ -20,13 +20,15 @@ function feishuSettingsQuery(clusterId: string) {
 
 // 在集群设置卡片渲染时展示已配置标志与规则数量，避免读取或显示原始 Token。
 function FeishuAlertSummary({ clusterId }: { clusterId: string }) {
+  const { t } = useTranslation()
   const settings = useQuery(feishuSettingsQuery(clusterId))
-  return <div className="threshold-summary">飞书告警：{settings.isError ? '摘要加载失败' : !settings.data ? '正在加载…'
-    : `${settings.data.accessTokenConfigured ? 'Token 已配置' : '未配置'}${settings.data.accessTokenConfigured || settings.data.rules.length ? ` · ${settings.data.rules.length} 条 Topic + Group 规则` : ''}`}</div>
+  return <div className="threshold-summary">{t('clusterConfig.feishuSummary')}{settings.isError ? t('clusterConfig.summaryFailed') : !settings.data ? t('clusterConfig.loading')
+    : <>{settings.data.accessTokenConfigured ? t('clusterConfig.tokenConfigured') : t('clusterConfig.notConfigured')}{(settings.data.accessTokenConfigured || settings.data.rules.length > 0) && t('clusterConfig.ruleCount', { count: settings.data.rules.length })}</>}</div>
 }
 
 // 在飞书设置打开时维护当前编辑状态、反馈及可用快照，隔离不同集群的草稿。
 function FeishuAlertEditor({ cluster, snapshot, onClose }: { cluster: ClusterDto; snapshot: ClusterSnapshot | null; onClose: () => void }) {
+  const { t } = useTranslation()
   const client = useQueryClient()
   const settings = useQuery({ ...feishuSettingsQuery(cluster.id), refetchOnMount: 'always' })
   // Keep the loaded source stable while onSaved refreshes the summary cache, so the
@@ -46,11 +48,11 @@ function FeishuAlertEditor({ cluster, snapshot, onClose }: { cluster: ClusterDto
     }} />
   // 编辑器只复用新鲜的同集群有效采样，否则由临时会话重新发现选项，避免跨集群规则选择。
   const reusable = snapshot?.clusterId === cluster.id && !expired && Number.isFinite(Date.parse(snapshot.collectedAt)) && !snapshotUnavailable(snapshot)
-  return <section aria-label={`${cluster.name} 飞书告警`}>
-    <p className="rules-description">{cluster.name} · 独立配置 Token 与 Consumer Group + Topic 告警规则。</p>
-    {!source && !settings.isError && <p role="status">正在加载飞书告警配置…</p>}
-    {settings.isError && !source && <><p role="alert">加载飞书告警配置失败，请重试。</p>
-      <button type="button" onClick={/* 在读取失败后点击重试时重新请求当前集群飞书设置。 */ () => { void settings.refetch() }}>重新加载</button></>}
+  return <section aria-label={t('clusterConfig.feishuRegion', { name: cluster.name })}>
+    <p className="rules-description">{t('clusterConfig.feishuDescription', { name: cluster.name })}</p>
+    {!source && !settings.isError && <p role="status">{t('clusterConfig.feishuLoading')}</p>}
+    {settings.isError && !source && <><p role="alert">{t('clusterConfig.feishuLoadFailed')}</p>
+      <button type="button" onClick={/* 在读取失败后点击重试时重新请求当前集群飞书设置。 */ () => { void settings.refetch() }}>{t('clusterConfig.reload')}</button></>}
     {source && <ConfigurationSession clusterId={cluster.id} snapshot={reusable ? snapshot : null} attempt={attempt}
       onReconnect={/* 在用户请求重连时递增尝试标识，触发旧会话清理与新采样。 */ () => setAttempt(value => value + 1)}>{renderForm}</ConfigurationSession>}
   </section>
@@ -64,6 +66,7 @@ function ConfigurationSession({ clusterId, snapshot = null, attempt = 0, onRecon
   onReconnect: () => void
   children: (snapshot: ClusterSnapshot | null) => ReactNode
 }) {
+  const { t } = useTranslation()
   const [ownSnapshot, setOwnSnapshot] = useState<ClusterSnapshot | null>(null)
   const [connectionError, setConnectionError] = useState<unknown>(null)
   const [connecting, setConnecting] = useState(true)
@@ -158,16 +161,17 @@ function ConfigurationSession({ clusterId, snapshot = null, attempt = 0, onRecon
   }, [clusterId, visible, pageActive, snapshot, attempt])
   return <>
     <ApiErrorNotice error={connectionError} />
-    {(!visible || !pageActive) ? <p role="status">已暂停（页面不可见）</p> : !snapshot && connecting && <p role="status">正在连接集群…</p>}
+    {(!visible || !pageActive) ? <p role="status">{t('clusterConfig.paused')}</p> : !snapshot && connecting && <p role="status">{t('clusterConfig.connecting')}</p>}
     {!snapshot && (!ownSnapshot || snapshotUnavailable(ownSnapshot)) && <button type="button" disabled={connecting} onClick={/* 在配置重连按钮点击时先丢弃失效快照和旧错误，再触发新的会话尝试。 */ () => {
       setOwnSnapshot(null); setConnectionError(null); setConnecting(true); onReconnect()
-    }}>重新连接</button>}
+    }}>{t('clusterConfig.reconnect')}</button>}
     {children(visible && pageActive ? snapshot ?? ownSnapshot : null)}
   </>
 }
 
 // 在 Lag 规则弹窗打开时读取规则、选择监控或临时快照并保存规则草稿。
 function RulesEditor({ cluster, snapshot, onClose }: { cluster: ClusterDto; snapshot: ClusterSnapshot | null; onClose: () => void }) {
+  const { t } = useTranslation()
   const fieldErrorIdPrefix = useId()
   const client = useQueryClient()
   const rules = useQuery({ queryKey: ['lag-rules', cluster.id], queryFn: /* 在当前资源查询启动时传递取消信号读取绑定集群的数据，使查询取消能传递到 HTTP 请求。 */ ({ signal }) => lagRulesApi.get(cluster.id, signal) })
@@ -187,17 +191,17 @@ function RulesEditor({ cluster, snapshot, onClose }: { cluster: ClusterDto; snap
     snapshot={currentSnapshot} value={draft ?? rules.data} onChange={setDraft}
     fieldErrors={save.error instanceof ApiError ? save.error.fields : {}} fieldErrorIdPrefix={fieldErrorIdPrefix}
     onSave={/* 在请求保存时，提交当前受控草稿，由父级统一管理保存与错误反馈。 */ value => save.mutate(value)} saving={save.isPending} />
-  return <section aria-label={`${cluster.name} Lag 规则`}>
-    <p className="rules-description">{cluster.name} · 自定义规则精确匹配 Consumer Group + Topic，覆盖集群默认区间与持续时间。</p>
-    {rules.isPending && <p role="status">正在加载规则…</p>}
+  return <section aria-label={t('clusterConfig.lagRegion', { name: cluster.name })}>
+    <p className="rules-description">{t('clusterConfig.lagDescription', { name: cluster.name })}</p>
+    {rules.isPending && <p role="status">{t('clusterConfig.rulesLoading')}</p>}
     <ApiErrorNotice error={save.error ?? rules.error} fieldIdPrefix={fieldErrorIdPrefix} />
     {snapshot && (attempt === 0 || !snapshotUnavailable(snapshot)) ? <>
       {renderForm(snapshot)}
-      {snapshotUnavailable(snapshot) && <button type="button" onClick={/* 在用户请求重连时递增尝试标识，触发旧会话清理与新采样。 */ () => setAttempt(value => value + 1)}>重新连接</button>}
+      {snapshotUnavailable(snapshot) && <button type="button" onClick={/* 在用户请求重连时递增尝试标识，触发旧会话清理与新采样。 */ () => setAttempt(value => value + 1)}>{t('clusterConfig.reconnect')}</button>}
     </> : <ConfigurationSession key={attempt} clusterId={cluster.id}
       onReconnect={/* 在用户请求重连时递增尝试标识，触发旧会话清理与新采样。 */ () => setAttempt(value => value + 1)}>{renderForm}</ConfigurationSession>}
-    {save.isSuccess && <p role="status">规则已保存</p>}
-    <button type="button" disabled={save.isPending} onClick={onClose}>关闭规则设置</button>
+    {save.isSuccess && <p role="status">{t('clusterConfig.rulesSaved')}</p>}
+    <button type="button" disabled={save.isPending} onClick={onClose}>{t('clusterConfig.closeRules')}</button>
   </section>
 }
 
@@ -239,32 +243,32 @@ export function ClustersPage({ snapshot = null }: ClustersPageProps) {
   // 在点击新增集群时清除旧保存反馈并关闭其他编辑器。
   const addCluster = () => { save.reset(); setRulesClusterId(null); setFeishuClusterId(null); setEditing('new') }
   return <><header className="topbar settings-topbar"><span>Kafka Lens <span className="breadcrumb-separator">/</span> {t('navigation.settings')}</span><span className="muted">{t('settings.headerDescription')}</span><LanguageSwitch /></header>
-    <section className="page-content settings-page" aria-label="集群设置">
-    <div className="page-head"><div><h1>集群设置</h1><p>管理 Kafka 连接与各集群的 Lag 状态规则</p></div>
-    <button className="primary" type="button" disabled={savingSettings} onClick={addCluster}>新增集群</button></div>
-    {clusters.isPending && <p role="status">正在加载集群…</p>}
+    <section className="page-content settings-page" aria-label={t('clusterConfig.title')}>
+    <div className="page-head"><div><h1>{t('clusterConfig.title')}</h1><p>{t('clusterConfig.description')}</p></div>
+    <button className="primary" type="button" disabled={savingSettings} onClick={addCluster}>{t('clusterConfig.add')}</button></div>
+    {clusters.isPending && <p role="status">{t('clusterConfig.clustersLoading')}</p>}
     <ApiErrorNotice error={clusters.error ?? remove.error ?? test.error} />
-    {clusters.data?.length === 0 && <p>尚未配置集群，请新增集群。</p>}
+    {clusters.data?.length === 0 && <p>{t('clusterConfig.empty')}</p>}
     <div className="settings-grid">{clusters.data?.map(cluster => <fieldset className="cluster-card" key={cluster.id} aria-label={cluster.name}>
       <div className="cluster-card-top"><h3>{cluster.name}</h3><span className="protocol-badge">{cluster.securityProtocol}</span></div>
-      <div className="cluster-meta"><p>{cluster.bootstrapServers}</p><p>{cluster.saslMechanism || 'Kafka 集群连接'}</p></div>
-      <div className="threshold-summary">默认 Lag 阈值：正常 ≤ {cluster.defaultNormalLagMax.toLocaleString('en-US')} · 高 Lag ≥ {cluster.defaultHighLagMin.toLocaleString('en-US')}<br />持续超限 {cluster.defaultOverLimitSeconds} 秒</div>
+      <div className="cluster-meta"><p>{cluster.bootstrapServers}</p><p>{cluster.saslMechanism || t('clusterConfig.connection')}</p></div>
+      <div className="threshold-summary">{t('clusterConfig.thresholdSummary', { normal: cluster.defaultNormalLagMax.toLocaleString('en-US'), high: cluster.defaultHighLagMin.toLocaleString('en-US') })}<br />{t('clusterConfig.durationSummary', { seconds: cluster.defaultOverLimitSeconds })}</div>
       <FeishuAlertSummary clusterId={cluster.id} />
       <div className="cluster-card-actions">
-      <button type="button" disabled={savingSettings} onClick={/* 在编辑按钮点击时清除旧保存反馈并关闭其他配置弹窗，隔离不同草稿。 */ () => { save.reset(); setRulesClusterId(null); setFeishuClusterId(null); setEditing(cluster) }}>编辑</button>
-      <button type="button" disabled={test.isPending} onClick={/* 在测试按钮点击时记录集群标识并提交连接测试，以便反馈关联到正确卡片。 */ () => { setTestedId(cluster.id); test.mutate(cluster.id) }}>测试连接</button>
-      <button type="button" disabled={savingSettings} onClick={/* 在按钮点击时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => { setEditing(null); setFeishuClusterId(null); setRulesClusterId(cluster.id) }}>配置 Lag 规则</button>
-      <button type="button" disabled={savingSettings} onClick={/* 在按钮点击时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => { setEditing(null); setRulesClusterId(null); setFeishuClusterId(cluster.id) }}>配置飞书告警</button>
-      <button className="danger-button" type="button" disabled={remove.isPending || savingSettings} onClick={/* 在删除集群按钮点击时提交当前标识，由成功回调清理关联缓存和编辑器。 */ () => remove.mutate(cluster.id)}>删除</button></div>
-      {test.isSuccess && testedId === cluster.id && <p role="status">连接成功：{test.data.brokerCount} Broker，{test.data.topicCount} Topic，耗时 {test.data.elapsedMs} ms</p>}
-    </fieldset>)}<button className="empty-add" type="button" disabled={savingSettings} onClick={addCluster}><span aria-hidden="true">＋</span>添加 Kafka 集群</button></div>
-    {editing && <Modal title="Kafka 集群配置" description="配置连接信息与默认 Lag 状态判断区间" busy={savingSettings} onClose={/* 在关闭弹窗时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => setEditing(null)}><ClusterForm key={editing === 'new' ? 'new' : editing.id} cluster={editing === 'new' ? undefined : editing}
+      <button type="button" disabled={savingSettings} onClick={/* 在编辑按钮点击时清除旧保存反馈并关闭其他配置弹窗，隔离不同草稿。 */ () => { save.reset(); setRulesClusterId(null); setFeishuClusterId(null); setEditing(cluster) }}>{t('clusterConfig.editButton')}</button>
+      <button type="button" disabled={test.isPending} onClick={/* 在测试按钮点击时记录集群标识并提交连接测试，以便反馈关联到正确卡片。 */ () => { setTestedId(cluster.id); test.mutate(cluster.id) }}>{t('clusterConfig.test')}</button>
+      <button type="button" disabled={savingSettings} onClick={/* 在按钮点击时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => { setEditing(null); setFeishuClusterId(null); setRulesClusterId(cluster.id) }}>{t('clusterConfig.configureLag')}</button>
+      <button type="button" disabled={savingSettings} onClick={/* 在按钮点击时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => { setEditing(null); setRulesClusterId(null); setFeishuClusterId(cluster.id) }}>{t('clusterConfig.configureFeishu')}</button>
+      <button className="danger-button" type="button" disabled={remove.isPending || savingSettings} onClick={/* 在删除集群按钮点击时提交当前标识，由成功回调清理关联缓存和编辑器。 */ () => remove.mutate(cluster.id)}>{t('clusterConfig.delete')}</button></div>
+      {test.isSuccess && testedId === cluster.id && <p role="status">{t('clusterConfig.connected', { brokerCount: test.data.brokerCount, topicCount: test.data.topicCount, elapsedMs: test.data.elapsedMs })}</p>}
+    </fieldset>)}<button className="empty-add" type="button" disabled={savingSettings} onClick={addCluster}><span aria-hidden="true">＋</span>{t('clusterConfig.addKafka')}</button></div>
+    {editing && <Modal title={t('clusterConfig.modalTitle')} description={t('clusterConfig.modalDescription')} busy={savingSettings} onClose={/* 在关闭弹窗时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => setEditing(null)}><ClusterForm key={editing === 'new' ? 'new' : editing.id} cluster={editing === 'new' ? undefined : editing}
       saving={save.isPending} error={save.error} onCancel={/* 在取消编辑时，清除当前编辑目标，触发表单与会话的卸载清理。 */ () => setEditing(null)}
       onTest={/* 在测试草稿时提交当前输入并关联原集群，留空凭据由服务端按已有配置处理。 */ value => clustersApi.testDraft(value, editing === 'new' ? undefined : editing.id)}
       onSave={/* 在请求保存时，提交当前受控草稿，由父级统一管理保存与错误反馈。 */ value => save.mutate({ id: editing === 'new' ? undefined : editing.id, value })} /></Modal>}
-    {rulesCluster && <Modal title="Lag 状态判断区间" wide busy={savingSettings} onClose={/* 在规则弹窗关闭时清除目标并卸载临时会话，避免配置页持续连接。 */ () => setRulesClusterId(null)}><RulesEditor key={rulesCluster.id} cluster={rulesCluster}
+    {rulesCluster && <Modal title={t('clusterConfig.lagModal')} wide busy={savingSettings} onClose={/* 在规则弹窗关闭时清除目标并卸载临时会话，避免配置页持续连接。 */ () => setRulesClusterId(null)}><RulesEditor key={rulesCluster.id} cluster={rulesCluster}
       snapshot={snapshot?.clusterId === rulesCluster.id ? snapshot : null} onClose={/* 在规则弹窗关闭时清除目标并卸载临时会话，避免配置页持续连接。 */ () => setRulesClusterId(null)} /></Modal>}
-    {feishuCluster && <Modal title="配置飞书告警" wide onClose={/* 在飞书弹窗关闭时卸载编辑器，丢弃 Token 草稿并取消配置读取。 */ () => setFeishuClusterId(null)}><FeishuAlertEditor key={feishuCluster.id} cluster={feishuCluster}
+    {feishuCluster && <Modal title={t('clusterConfig.configureFeishu')} wide onClose={/* 在飞书弹窗关闭时卸载编辑器，丢弃 Token 草稿并取消配置读取。 */ () => setFeishuClusterId(null)}><FeishuAlertEditor key={feishuCluster.id} cluster={feishuCluster}
       snapshot={snapshot?.clusterId === feishuCluster.id ? snapshot : null} onClose={/* 在飞书弹窗关闭时卸载编辑器，丢弃 Token 草稿并取消配置读取。 */ () => setFeishuClusterId(null)} /></Modal>}
   </section></>
 }

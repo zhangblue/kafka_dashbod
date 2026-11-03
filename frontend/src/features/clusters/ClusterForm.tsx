@@ -6,11 +6,11 @@ import { ApiError } from '../../api/client'
 import type { ClusterDto, ClusterInput, ConnectionTestResult, SecurityProtocol } from '../../api/types'
 
 const secrets = [
-  { key: 'password', clear: 'clearPassword', label: '密码' },
-  { key: 'caPem', clear: 'clearCaPem', label: 'CA PEM' },
-  { key: 'clientCertificatePem', clear: 'clearClientCertificatePem', label: '客户端证书 PEM' },
-  { key: 'clientKeyPem', clear: 'clearClientKeyPem', label: '客户端私钥 PEM' },
-  { key: 'clientKeyPassphrase', clear: 'clearClientKeyPassphrase', label: '客户端私钥口令' },
+  { key: 'password', clear: 'clearPassword', label: 'clusterConfig.password' },
+  { key: 'caPem', clear: 'clearCaPem', label: 'clusterConfig.caPem' },
+  { key: 'clientCertificatePem', clear: 'clearClientCertificatePem', label: 'clusterConfig.clientCertificatePem' },
+  { key: 'clientKeyPem', clear: 'clearClientKeyPem', label: 'clusterConfig.clientKeyPem' },
+  { key: 'clientKeyPassphrase', clear: 'clearClientKeyPassphrase', label: 'clusterConfig.clientKeyPassphrase' },
 ] as const
 
 // 在集群表单或规则请求失败时展示统一安全错误、字段提示与请求编号。
@@ -21,7 +21,7 @@ export function ApiErrorNotice({ error, fieldIdPrefix }: { error: unknown; field
   const localized = localizeApiError(error, t)
   return <div role="alert"><p>{localized.message}</p>
     {Object.entries(localized.fields).map(([field, message]) => <p key={field} id={fieldIdPrefix ? `${fieldIdPrefix}-${field}` : undefined}>{message}</p>)}
-    {localized.requestId && <p>Request ID: {localized.requestId}</p>}
+    {localized.requestId && <p>{t('clusterConfig.requestId', { id: localized.requestId })}</p>}
   </div>
 }
 
@@ -36,6 +36,7 @@ export interface ClusterFormProps {
 
 // 在新增或编辑集群弹窗打开时维护连接草稿，区分保留凭据、显式清除和本次输入。
 export function ClusterForm({ cluster, onSave, onTest, onCancel, saving = false, error: saveError }: ClusterFormProps) {
+  const { t } = useTranslation()
   const id = useId()
   const [value, setValue] = useState({
     name: cluster?.name ?? '', bootstrapServers: cluster?.bootstrapServers ?? '',
@@ -84,9 +85,9 @@ export function ClusterForm({ cluster, onSave, onTest, onCancel, saving = false,
     test.reset()
     onSave(input())
   }}>
-    <fieldset className="form-grid" disabled={busy}><legend className="sr-only">{cluster ? '编辑集群' : '新增集群'}</legend>
-      {field('name', '集群名称')}
-      <label htmlFor={`${id}-protocol`}>安全协议
+    <fieldset className="form-grid" disabled={busy}><legend className="sr-only">{cluster ? t('clusterConfig.edit') : t('clusterConfig.add')}</legend>
+      {field('name', t('clusterConfig.name'))}
+      <label htmlFor={`${id}-protocol`}>{t('clusterConfig.protocol')}
         <select id={`${id}-protocol`} value={value.securityProtocol}
           aria-invalid={error instanceof ApiError && !!error.fields.securityProtocol}
           aria-describedby={error instanceof ApiError && error.fields.securityProtocol ? `${id}-error-securityProtocol` : undefined}
@@ -94,36 +95,36 @@ export function ClusterForm({ cluster, onSave, onTest, onCancel, saving = false,
           {['PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL'].map(protocol => <option key={protocol}>{protocol}</option>)}
         </select>
       </label>
-      {field('bootstrapServers', 'Bootstrap Servers')}
-      {field('saslMechanism', 'SASL Mechanism')}{field('username', '用户名')}
+      {field('bootstrapServers', t('clusterConfig.bootstrap'))}
+      {field('saslMechanism', t('clusterConfig.sasl'))}{field('username', t('clusterConfig.username'))}
       {secrets.map(({ key, label }) => <div className="secret-field" key={key}>
-        {key === 'password' || key === 'clientKeyPassphrase' ? field(key, label, 'password') : <label htmlFor={`${id}-${key}`}>
-        {label}
+        {key === 'password' || key === 'clientKeyPassphrase' ? field(key, t(label), 'password') : <label htmlFor={`${id}-${key}`}>
+        {t(label)}
         <textarea id={`${id}-${key}`} value={value[key]} autoComplete="off" disabled={cleared.has(key)}
           aria-invalid={error instanceof ApiError && !!error.fields[key]}
           aria-describedby={error instanceof ApiError && error.fields[key] ? `${id}-error-${key}` : undefined}
           onChange={/* 在字段编辑时更新对应连接草稿并清除过时的连接测试反馈。 */ event => update(key, event.target.value)} />
       </label>}
         {cluster && <>
-          <span>{cluster[`${key}Configured`] ? '已配置' : '未配置'}</span>
+          <span>{cluster[`${key}Configured`] ? t('clusterConfig.configured') : t('clusterConfig.notConfigured')}</span>
           <label><input type="checkbox" checked={cleared.has(key)} onChange={/* 在清除凭据复选框变化时更新显式删除集合，保存前不修改服务端凭据。 */ event => {
             test.reset()
             const next = new Set(cleared)
             if (event.target.checked) next.add(key); else next.delete(key)
             setCleared(next)
-          }} />清除已保存的{label}</label>
+          }} />{t('clusterConfig.clearSaved', { label: t(label) })}</label>
         </>}
       </div>)}
-      {cluster && <p className="form-note full">密码、证书、私钥与口令不回显；留空保留已保存的敏感字段，勾选清除后在保存时删除。</p>}
-      {field('connectionTimeoutMs', '连接超时（毫秒）', 'number')}
-      {field('defaultNormalLagMax', '默认正常上限', 'number')}
-      {field('defaultHighLagMin', '默认高 Lag 起始值', 'number')}
-      {field('defaultOverLimitSeconds', '默认持续超限时间（秒）', 'number')}
-      <div className="modal-actions full"><button type="button" disabled={!valid || busy} onClick={/* 在测试当前配置按钮点击时从草稿组装输入，测试结果不持久化连接。 */ () => test.mutate(input())}>测试当前配置</button>
-      <div>{onCancel && <button type="button" onClick={onCancel}>取消</button>}<button type="submit" disabled={!valid || busy}>保存集群</button></div></div>
+      {cluster && <p className="form-note full">{t('clusterConfig.credentialNote')}</p>}
+      {field('connectionTimeoutMs', t('clusterConfig.timeout'), 'number')}
+      {field('defaultNormalLagMax', t('clusterConfig.normal'), 'number')}
+      {field('defaultHighLagMin', t('clusterConfig.high'), 'number')}
+      {field('defaultOverLimitSeconds', t('clusterConfig.duration'), 'number')}
+      <div className="modal-actions full"><button type="button" disabled={!valid || busy} onClick={/* 在测试当前配置按钮点击时从草稿组装输入，测试结果不持久化连接。 */ () => test.mutate(input())}>{t('clusterConfig.testDraft')}</button>
+      <div>{onCancel && <button type="button" onClick={onCancel}>{t('clusterConfig.cancel')}</button>}<button type="submit" disabled={!valid || busy}>{t('clusterConfig.save')}</button></div></div>
     </fieldset>
-    {test.isPending && <p role="status">正在测试当前配置…</p>}
-    {test.isSuccess && <p role="status">当前配置连接成功：{test.data.brokerCount} Broker，{test.data.topicCount} Topic，耗时 {test.data.elapsedMs} ms</p>}
+    {test.isPending && <p role="status">{t('clusterConfig.testing')}</p>}
+    {test.isSuccess && <p role="status">{t('clusterConfig.draftConnected', { brokerCount: test.data.brokerCount, topicCount: test.data.topicCount, elapsedMs: test.data.elapsedMs })}</p>}
     <ApiErrorNotice error={error} fieldIdPrefix={`${id}-error`} />
   </form>
 }

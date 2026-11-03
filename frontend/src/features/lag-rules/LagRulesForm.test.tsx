@@ -1,3 +1,4 @@
+import i18n from '../../i18n'
 import { useState } from 'react'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -82,8 +83,8 @@ describe('Lag rule configuration', /* 在测试组注册阶段组织当前功能
     expect(screen.getByRole('button', { name: '新增规则' })).toBeDisabled()
     expect(screen.getByLabelText('Consumer Group')).toBeDisabled()
     expect(within(screen.getByRole('group', { name: '集群默认规则' })).getByLabelText('正常上限')).toBeDisabled()
-    expect(screen.getByText(/Topic metadata failed/)).toBeInTheDocument()
-    expect(screen.getByText(/Group discovery failed/)).toBeInTheDocument()
+    expect(screen.getAllByText(/Kafka 请求超时/)).toHaveLength(2)
+    expect(screen.queryByText(/Topic metadata failed/)).not.toBeInTheDocument()
   })
 
   it('allows known group/topic choices while explaining partial collection failures', /* 在本用例执行时验证部分采集失败时保留已知选项并说明失败原因。 */ async () => {
@@ -97,4 +98,31 @@ describe('Lag rule configuration', /* 在测试组注册阶段组织当前功能
     expect(screen.getByRole('option', { name: 'raw-orders' })).toBeInTheDocument()
     expect(screen.getByLabelText('Topic')).toBeEnabled()
   })
+})
+
+// 验证默认范围、缺失资源和规则动作均响应 English，原始资源名不变。
+it('localizes ranges and unavailable overrides in English', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  render(<Harness initial={{ ...rulesFixture, overrides: [{ id: 'saved', groupId: 'gone', topic: 'gone-topic', ...rulesFixture.defaults }] }} />)
+  expect(screen.getByRole('group', { name: 'Cluster default rules' })).toBeInTheDocument()
+  expect(screen.getByText('Normal · 0–999')).toBeInTheDocument()
+  expect(screen.getByText('Backlog · 1,000–4,999')).toBeInTheDocument()
+  expect(screen.getByRole('option', { name: 'gone (unavailable)' })).toBeInTheDocument()
+  expect(screen.getByLabelText('Consumer Group')).toBeDisabled()
+  expect(within(screen.getByRole('group', { name: 'Rule 1' })).getByLabelText('Over-limit duration (seconds)')).toBeDisabled()
+  await user.click(screen.getByRole('button', { name: 'Delete rule' }))
+  await user.click(screen.getByRole('button', { name: 'Add rule' }))
+  expect(screen.getByRole('button', { name: 'Save rules' })).toBeDisabled()
+  expect(screen.getByRole('alert')).toHaveTextContent('Complete all rules')
+})
+
+// 验证采集失败按受控错误码翻译，远端原文不能覆盖 English 页面。
+it('localizes collection failure messages without rendering remote text', async () => {
+  await i18n.changeLanguage('en')
+  render(<Harness snapshot={{ ...snapshotFixture, partialFailures: [
+    { scope: 'watermark', resource: 'raw-orders', code: 'KAFKA_TIMEOUT', message: 'remote detail' },
+  ] }} />)
+  expect(screen.getByRole('list', { name: 'Collection failure reasons' })).toHaveTextContent('The Kafka request timed out.')
+  expect(document.body.textContent?.includes('remote detail')).toBe(false)
 })

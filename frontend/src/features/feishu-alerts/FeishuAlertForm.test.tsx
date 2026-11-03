@@ -1,4 +1,5 @@
-import { configure, fireEvent, getConfig, render, screen, waitFor, within } from '@testing-library/react'
+import i18n from '../../i18n'
+import { act, configure, fireEvent, getConfig, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { http, HttpResponse } from 'msw'
@@ -241,4 +242,64 @@ describe('飞书告警 API boundary', /* 在测试组注册阶段组织当前功
     controller.abort()
     await expect(feishuAlertsApi.get('a', controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
   })
+})
+
+// 验证 English 凭据控件与规则校验，不让合成凭据进入断言诊断。
+it('localizes credential controls validation and save feedback in English', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  server.use(
+    http.put('/api/clusters/cluster-a/feishu-alert', () => HttpResponse.json(settings)),
+    http.post('/api/clusters/cluster-a/feishu-alert/test', () => HttpResponse.json({ ok: true })),
+  )
+  mount()
+  expect(screen.getByText('••••••••a1b2')).toBeInTheDocument()
+  await user.type(input('Update Token'), draftToken())
+  await user.click(screen.getByRole('button', { name: 'Show Token' }))
+  expect(input('Update Token').type === 'text').toBe(true)
+  await user.click(screen.getByRole('button', { name: 'Hide Token' }))
+  fireEvent.change(input('Duration (seconds)'), { target: { value: '9' } })
+  expect(screen.getByRole('alert')).toHaveTextContent('at least 10 seconds')
+  expect(screen.getByRole('button', { name: 'Save settings' })).toBeDisabled()
+  fireEvent.change(input('Duration (seconds)'), { target: { value: '10' } })
+  await user.click(screen.getByRole('button', { name: 'Save settings' }))
+  await screen.findByText('Feishu alert settings saved')
+  expect(input('Update Token').value === '').toBe(true)
+  await user.click(screen.getByRole('button', { name: 'Test notification' }))
+  await screen.findByText('Test notification sent')
+  expect(screen.getByRole('checkbox', { name: 'Clear saved Token' })).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Add rule' }))
+  expect(screen.getByRole('group', { name: 'Alert rule 2' })).toBeInTheDocument()
+  await user.click(within(screen.getByRole('group', { name: 'Alert rule 2' })).getByRole('button', { name: 'Delete rule' }))
+})
+
+// 验证失败按稳定错误码本地化，未知字段原文也不会进入反馈。
+it('localizes notification failures by code in English', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  server.use(http.post('/api/clusters/cluster-a/feishu-alert/test', () => HttpResponse.json({ code: 'FEISHU_SEND_FAILED', message: 'untrusted failure', fields: {}, requestId: 'english-failure' }, { status: 502 })))
+  mount()
+  await user.click(screen.getByRole('button', { name: 'Test notification' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('The Feishu notification could not be sent')
+  expect(document.body.textContent?.includes('untrusted failure')).toBe(false)
+})
+
+// 验证保存失败使用错误码且安全翻译字段，切换语言即时更新已有反馈。
+it('uses save error codes before status and safely localizes field feedback', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  server.use(http.put('/api/clusters/cluster-a/feishu-alert', () => HttpResponse.json({
+    code: 'VALIDATION_ERROR', message: draftToken(),
+    fields: { 'rules.0.growthSeconds': 'Must be a safe integer from 10 to 9007199254740991 seconds', accessToken: draftToken(), [draftToken()]: draftToken() },
+  }, { status: 404 })))
+  mount()
+  await user.click(screen.getByRole('button', { name: 'Save settings' }))
+  const alert = await screen.findByRole('alert')
+  expect(alert.textContent?.includes('Invalid settings.')).toBe(true)
+  expect(alert.textContent?.includes('Enter a safe integer of at least 10 seconds.')).toBe(true)
+  expect(alert.textContent?.includes('This field is invalid.')).toBe(true)
+  expect(document.body.innerHTML.includes(draftToken())).toBe(false)
+  await act(async () => { await i18n.changeLanguage('zh-CN') })
+  expect(screen.getByRole('alert').textContent?.includes('配置校验失败')).toBe(true)
+  expect(document.body.innerHTML.includes(draftToken())).toBe(false)
 })

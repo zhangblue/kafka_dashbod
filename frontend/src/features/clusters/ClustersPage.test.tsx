@@ -1,3 +1,4 @@
+import i18n from '../../i18n'
 import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -559,7 +560,7 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     )
     renderPage(null)
     await user.click(await screen.findByRole('button', { name: '配置 Lag 规则' }))
-    await screen.findByText(/All topics failed/)
+    await screen.findAllByText(/Kafka 请求超时/)
     expect(screen.getByRole('button', { name: '新增规则' })).toBeDisabled()
     await waitFor(() => expect(closed).toBe(1))
     await user.click(screen.getByRole('button', { name: '重新连接' }))
@@ -672,4 +673,63 @@ it('offers the language switch at the right of the settings header without creat
   expect(header).toHaveTextContent('Connections and Lag status rules')
   expect(within(header).getByRole('button', { name: 'English' })).toHaveAttribute('aria-pressed', 'true')
   expect(created).toBe(0)
+})
+
+// 验证语言切换只更新文本，不卸载已打开的飞书编辑器或额外创建会话。
+it('retains the open editor and rule draft when switching to English', async () => {
+  const user = userEvent.setup()
+  let sessions = 0
+  server.use(http.post('/api/clusters/:id/sessions', () => {
+    sessions++
+    return HttpResponse.json({ sessionId: 'language-session', leaseSeconds: 15 })
+  }))
+  renderPage({ ...snapshotFixture, collectedAt: new Date().toISOString() })
+  await user.click(await screen.findByRole('button', { name: '配置飞书告警' }))
+  const dialog = await screen.findByRole('dialog', { name: '配置飞书告警' })
+  await user.click(await within(dialog).findByRole('button', { name: '新增规则' }))
+  await user.selectOptions(screen.getByLabelText('Consumer Group'), 'flink-order-enrich')
+  await user.selectOptions(screen.getByLabelText('Topic'), 'raw-orders')
+  await user.clear(screen.getByLabelText('Lag 阈值'))
+  await user.type(screen.getByLabelText('Lag 阈值'), '42')
+  const before = sessions
+  await user.click(screen.getByRole('button', { name: 'English' }))
+  expect(screen.getByRole('dialog', { name: 'Configure Feishu alerts' })).toBe(dialog)
+  expect(dialog).toHaveAttribute('open')
+  expect(screen.getByLabelText('Lag threshold')).toHaveValue(42)
+  expect(screen.getByLabelText('Consumer Group')).toHaveValue('flink-order-enrich')
+  expect(screen.getByLabelText('Topic')).toHaveValue('raw-orders')
+  expect(sessions).toBe(before)
+})
+
+// 验证 English 集群配置保留协议值和凭据标记，并显示连接测试与保存结果。
+it('edits cluster credentials and tests configuration in English', async () => {
+  await i18n.changeLanguage('en')
+  const user = userEvent.setup()
+  let deleted = false
+  server.use(
+    http.get('/api/clusters', () => HttpResponse.json(deleted ? [] : [{ ...clusterFixture, passwordConfigured: true }])),
+    http.delete('/api/clusters/:id', () => { deleted = true; return new HttpResponse(null, { status: 204 }) }),
+    http.post('/api/clusters/:id/test', () => HttpResponse.json({ brokerCount: 3, topicCount: 12, elapsedMs: 20 })),
+    http.put('/api/clusters/:id', () => HttpResponse.json(clusterFixture)),
+  )
+  renderPage()
+  expect(await screen.findByRole('heading', { name: 'Cluster settings' })).toBeInTheDocument()
+  await user.click(await screen.findByRole('button', { name: 'Edit' }))
+  expect(screen.getByLabelText('Security protocol')).toHaveValue('SASL_SSL')
+  expect(screen.getByLabelText('Cluster name')).toHaveValue(clusterFixture.name)
+  expect(screen.getByRole('checkbox', { name: 'Clear saved Password' })).toBeInTheDocument()
+  expect(screen.getByText('Configured')).toBeInTheDocument()
+  expect(screen.getAllByText('Not configured').length).toBeGreaterThan(0)
+  expect(screen.getByLabelText('Default normal maximum')).toHaveValue(999)
+  await user.click(screen.getByRole('button', { name: 'Test current configuration' }))
+  expect(await screen.findByText(/Current configuration connected:/)).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Save cluster' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Add cluster' }))
+  expect(screen.getByLabelText('Cluster name')).toHaveValue('')
+  expect(screen.getByLabelText('Security protocol')).toHaveValue('PLAINTEXT')
+  await user.click(screen.getByRole('button', { name: 'Cancel' }))
+  await user.click(screen.getByRole('button', { name: 'Delete' }))
+  expect(await screen.findByText('No clusters configured. Add a cluster to get started.')).toBeInTheDocument()
 })
