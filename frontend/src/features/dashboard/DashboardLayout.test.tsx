@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Outlet, Route, Routes, useOutletContext } from 'react-router'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import userEvent from '@testing-library/user-event'
 import { clustersApi, sessionsApi } from '../../api/client'
 import { clusterFixture, snapshotFixture } from '../../test/handlers'
 import { DashboardLayout, type DashboardContext } from './DashboardLayout'
@@ -125,4 +126,30 @@ it('shows disconnection and reconnect for an HTTP 200 empty collector snapshot w
   fireEvent.click(screen.getByRole('button', { name: '重新连接' }))
   await screen.findByText('已连接')
   expect(created).toEqual(['cluster-a', 'cluster-a'])
+})
+
+// 验证顶部栏翻译不重建已选集群监控，保留快照历史与刷新间隔，并提供英文控件名称。
+it('translates the header while retaining the selected cluster, interval and samples', async () => {
+  const user = userEvent.setup()
+  renderLayout()
+  await screen.findByText('当前：生产 Kafka，样本：1')
+  await user.selectOptions(screen.getByRole('combobox', { name: '集群' }), 'cluster-b')
+  await screen.findByText('当前：备用 Kafka，样本：1')
+  await user.selectOptions(screen.getByRole('combobox', { name: '刷新频率' }), '10')
+  const createsBefore = created.length
+  const closesBefore = closed.length
+  await user.click(screen.getByRole('button', { name: 'English' }))
+  expect(screen.getByRole('combobox', { name: 'Cluster' })).toHaveValue('cluster-b')
+  expect(screen.getByRole('combobox', { name: 'Refresh interval' })).toHaveValue('10')
+  expect(screen.getByRole('option', { name: '10 s' })).toBeInTheDocument()
+  expect(screen.getByText('Connected')).toBeInTheDocument()
+  expect(screen.getByLabelText('Last updated')).toHaveAttribute('datetime', snapshotFixture.collectedAt)
+  expect(screen.getByRole('button', { name: 'Manual refresh' })).toHaveAttribute('title', 'Refresh now')
+  expect(screen.getByText('当前：备用 Kafka，样本：1')).toBeInTheDocument()
+  expect(created).toHaveLength(createsBefore)
+  expect(closed).toHaveLength(closesBefore)
+  vi.mocked(sessionsApi.snapshot).mockRejectedValue(new Error('Broker unavailable'))
+  await user.click(screen.getByRole('button', { name: 'Manual refresh' }))
+  expect(await screen.findByText('Disconnected; showing the last snapshot')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Reconnect' })).toBeEnabled()
 })

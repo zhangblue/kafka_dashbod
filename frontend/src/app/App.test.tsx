@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import App from './App'
-import { clustersApi, lagRulesApi, sessionsApi } from '../api/client'
+import userEvent from '@testing-library/user-event'
+import { clustersApi, feishuAlertsApi, lagRulesApi, sessionsApi } from '../api/client'
 import { clusterFixture, rulesFixture, snapshotFixture } from '../test/handlers'
 import type { ClusterSnapshot } from '../api/types'
 
@@ -174,4 +175,52 @@ it('retains failed resource display values across overview, topics and groups wh
   await collect({ ...complete, collectedAt: at(60) })
   expect(screen.getByRole('row', { name: /worker orders/ })).toHaveTextContent('正常')
   expect(screen.getByRole('row', { name: /worker orders/ })).not.toHaveTextContent('数据已陈旧')
+})
+
+// 验证真实路由中的语言切换保留当前页面、刷新选择、快照和原有会话，防止语言触发重挂载。
+it('translates navigation without replacing the active route or monitoring session', async () => {
+  const user = userEvent.setup()
+  window.history.replaceState({}, '', '/consumer-groups')
+  vi.spyOn(clustersApi, 'list').mockResolvedValue([clusterFixture])
+  vi.spyOn(lagRulesApi, 'get').mockResolvedValue(rulesFixture)
+  vi.spyOn(sessionsApi, 'create').mockResolvedValue({ sessionId: 'language-session', leaseSeconds: 30 })
+  vi.spyOn(sessionsApi, 'snapshot').mockResolvedValue(snapshotFixture)
+  vi.spyOn(sessionsApi, 'close').mockResolvedValue(undefined)
+  render(<App />)
+  const table = await screen.findByRole('table', { name: 'Consumer Groups 汇总' })
+  await user.selectOptions(screen.getByRole('combobox', { name: '刷新频率' }), '10')
+  const createsBefore = vi.mocked(sessionsApi.create).mock.calls.length
+  await user.click(screen.getByRole('button', { name: 'English' }))
+  expect(screen.getByRole('link', { name: 'Overview' })).toBeVisible()
+  expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Cluster Settings' })).toBeVisible()
+  expect(screen.getByRole('complementary', { name: 'Kafka Lens' })).toHaveTextContent('Monitoring and Topic management')
+  expect(screen.getByRole('complementary', { name: 'Kafka Lens' })).toHaveTextContent('Data is collected only while the page is open')
+  expect(window.location.pathname).toBe('/consumer-groups')
+  expect(table).toBeInTheDocument()
+  expect(screen.getByRole('combobox', { name: 'Refresh interval' })).toHaveValue('10')
+  expect(screen.getByLabelText('Last updated')).toHaveAttribute('datetime', snapshotFixture.collectedAt)
+  expect(sessionsApi.create).toHaveBeenCalledTimes(createsBefore)
+  expect(sessionsApi.close).not.toHaveBeenCalled()
+})
+
+// 验证真实设置路由在翻译重渲染后保留已打开弹窗及输入，防止根节点语言 key 丢弃草稿。
+it('preserves an open settings dialog and its draft when language changes', async () => {
+  const user = userEvent.setup()
+  window.history.replaceState({}, '', '/settings')
+  vi.spyOn(clustersApi, 'list').mockResolvedValue([clusterFixture])
+  vi.spyOn(feishuAlertsApi, 'get').mockResolvedValue({ accessTokenConfigured: false, maskedAccessToken: null, rules: [] })
+  vi.spyOn(sessionsApi, 'create').mockResolvedValue({ sessionId: 'unexpected', leaseSeconds: 30 })
+  render(<App />)
+  await user.click(await screen.findByRole('button', { name: '新增集群' }))
+  const dialog = screen.getByRole('dialog', { name: 'Kafka 集群配置' })
+  const name = within(dialog).getByLabelText('集群名称')
+  await user.type(name, '保留的集群草稿')
+  await user.click(screen.getByRole('button', { name: 'English' }))
+  expect(window.location.pathname).toBe('/settings')
+  expect(dialog).toBeVisible()
+  expect(dialog).toHaveAttribute('open')
+  expect(name).toHaveValue('保留的集群草稿')
+  expect(screen.getByRole('link', { name: 'Cluster Settings' })).toHaveAttribute('aria-current', 'page')
+  expect(sessionsApi.create).not.toHaveBeenCalled()
 })

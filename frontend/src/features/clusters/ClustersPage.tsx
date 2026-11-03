@@ -1,4 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { LanguageSwitch } from '../../components/LanguageSwitch'
 import type { ReactNode } from 'react'
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, clustersApi, feishuAlertsApi, lagRulesApi, sessionsApi } from '../../api/client'
@@ -203,6 +205,7 @@ export interface ClustersPageProps { snapshot?: ClusterSnapshot | null }
 
 // 在集群设置路由渲染时协调集群增删改查、连接测试及互斥的配置弹窗。
 export function ClustersPage({ snapshot = null }: ClustersPageProps) {
+  const { t } = useTranslation()
   const client = useQueryClient()
   const clusters = useQuery({ queryKey: ['clusters'], queryFn: /* 设置页加载或列表刷新时读取全部集群摘要，并透传取消信号。 */ ({ signal }) => clustersApi.list(signal) })
   const savingSettings = useIsMutating({ mutationKey: ['cluster-settings'] }) > 0
@@ -235,7 +238,7 @@ export function ClustersPage({ snapshot = null }: ClustersPageProps) {
 
   // 在点击新增集群时清除旧保存反馈并关闭其他编辑器。
   const addCluster = () => { save.reset(); setRulesClusterId(null); setFeishuClusterId(null); setEditing('new') }
-  return <><header className="topbar settings-topbar"><span>Kafka Lens <span className="breadcrumb-separator">/</span> 集群设置</span><span className="muted">连接与 Lag 状态规则</span></header>
+  return <><header className="topbar settings-topbar"><span>Kafka Lens <span className="breadcrumb-separator">/</span> {t('navigation.settings')}</span><span className="muted">{t('settings.headerDescription')}</span><LanguageSwitch /></header>
     <section className="page-content settings-page" aria-label="集群设置">
     <div className="page-head"><div><h1>集群设置</h1><p>管理 Kafka 连接与各集群的 Lag 状态规则</p></div>
     <button className="primary" type="button" disabled={savingSettings} onClick={addCluster}>新增集群</button></div>

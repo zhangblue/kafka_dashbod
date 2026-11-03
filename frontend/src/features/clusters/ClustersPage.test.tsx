@@ -653,3 +653,21 @@ describe('cluster settings', /* 在测试组注册阶段组织当前功能的交
     expect(screen.getByLabelText('集群名称')).toHaveValue('保存后的新草稿')
   })
 })
+
+// 验证直接进入设置即可切换顶部栏语言，且切换本身不会创建 Kafka 监控会话。
+it('offers the language switch at the right of the settings header without creating sessions', async () => {
+  const user = userEvent.setup()
+  let created = 0
+  server.use(http.post('/api/clusters/:id/sessions', /* 语言入口测试拦截意外建连，记录设置页是否错误创建监控会话。 */ () => {
+    created++
+    return HttpResponse.json({ sessionId: 'unexpected-language-session', leaseSeconds: 15 }, { status: 201 })
+  }))
+  renderPage()
+  await screen.findByRole('button', { name: '新增集群' })
+  const header = screen.getByRole('banner')
+  await user.click(within(header).getByRole('button', { name: 'English' }))
+  expect(header).toHaveTextContent('Cluster Settings')
+  expect(header).toHaveTextContent('Connections and Lag status rules')
+  expect(within(header).getByRole('button', { name: 'English' })).toHaveAttribute('aria-pressed', 'true')
+  expect(created).toBe(0)
+})
