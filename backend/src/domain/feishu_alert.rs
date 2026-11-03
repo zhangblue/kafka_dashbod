@@ -44,6 +44,7 @@ pub struct EnabledAlertCluster {
 }
 
 impl std::fmt::Debug for EnabledAlertCluster {
+    // 在调试格式化后台告警配置时仅输出脱敏标记，避免暴露机器人 Token。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("EnabledAlertCluster([REDACTED])")
     }
@@ -87,6 +88,7 @@ enum DeliveryState {
 }
 
 impl AlertState {
+    // 在后台每次采样后推进单条规则的增长窗口；未知样本中断增长，有效恢复才解除通知抑制。
     pub fn observe(
         &mut self,
         now: Instant,
@@ -94,6 +96,7 @@ impl AlertState {
         threshold: i64,
         duration: Duration,
     ) -> AlertDecision {
+        // 未知样本只能打断增长窗口，不能解除已通知或耗尽状态；唯有后面的有效阈值恢复才能重新布防。
         let Some(total_lag) = total_lag else {
             self.candidate = None;
             return AlertDecision::None;
@@ -137,11 +140,13 @@ impl AlertState {
             } if now >= at => failed_attempts,
             _ => return AlertDecision::None,
         };
+        // 在返回发送决策前先占用在途状态，防止异步通知完成前的新样本重复发送。
         self.delivery = DeliveryState::InFlight { failed_attempts };
         AlertDecision::Send
     }
 
     /// Complete the outstanding `Send`; the retry delay starts at this result.
+    // 在异步通知返回结果后完成在途尝试，从结果时刻开始计算重试等待并限制本轮尝试次数。
     pub fn record_attempt(&mut self, now: Instant, succeeded: bool) {
         let DeliveryState::InFlight { failed_attempts } = self.delivery else {
             return;
@@ -169,6 +174,7 @@ mod tests {
         Attempt(u64, bool),
     }
 
+    // 在状态机测试中按给定时间顺序回放采样和发送结果，核对每一步通知决策。
     fn check(steps: &[Step]) {
         let start = Instant::now();
         let mut state = AlertState::default();
@@ -185,6 +191,7 @@ mod tests {
                     "at {seconds}s with total Lag {lag:?}",
                 ),
                 Step::Attempt(seconds, succeeded) => {
+                    // 按回放顺序记录发送结果，验证重试计时从完成时刻而非发起时刻开始。
                     state.record_attempt(start + Duration::from_secs(seconds), succeeded);
                 }
             }
@@ -192,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证仅严格超过阈值的首个样本启动持续时间。
     fn duration_starts_at_first_sample_strictly_above_threshold() {
         use AlertDecision::{None as Quiet, Send};
         check(&[
@@ -204,6 +212,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证采样间隔再长也必须取得至少三个有效样本。
     fn widely_spaced_samples_still_require_three_valid_observations() {
         use AlertDecision::{None as Quiet, Send};
         check(&[
@@ -214,6 +223,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证 Lag 下降会重置有效样本计数，防止沿用旧窗口触发。
     fn decrease_resets_the_minimum_sample_count() {
         use AlertDecision::{None as Quiet, Send};
         check(&[
@@ -226,6 +236,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证持续持平即使达到时长也不能替代真实增长。
     fn flat_lag_requires_actual_growth_even_after_duration() {
         use AlertDecision::{None as Quiet, Send};
         check(&[
@@ -238,6 +249,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证增长后的平台期保留增长证据及窗口起点。
     fn plateau_preserves_actual_growth_and_duration() {
         use AlertDecision::{None as Quiet, Send};
         check(&[
@@ -249,6 +261,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证 Lag 下降从当前样本重开窗口，防止累计下降前的时间。
     fn decrease_restarts_window_from_the_current_sample() {
         use AlertDecision::{None as Quiet, Send};
         check(&[
@@ -262,6 +275,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证下降清除增长证据，后续持平不能误发通知。
     fn decrease_clears_growth_evidence() {
         use AlertDecision::None as Quiet;
         check(&[
@@ -274,6 +288,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证未知总 Lag 立即清除候选窗口，避免部分数据参与告警。
     fn invalid_total_lag_immediately_clears_candidate() {
         use AlertDecision::{None as Quiet, Send};
         check(&[
@@ -287,6 +302,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证阈值以内的有效样本清除候选窗口。
     fn threshold_or_below_clears_candidate() {
         use AlertDecision::{None as Quiet, Send};
         for recovered_lag in [5_000, 4_999, 0] {
@@ -302,6 +318,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证成功通知每轮只发送一次，未知或下降样本不能替代有效恢复。
     fn successful_notification_is_sent_once_until_valid_recovery() {
         use AlertDecision::{None as Quiet, Send};
         for recovered_lag in [5_000, 4_999] {
@@ -325,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证失败结果返回后等待三十秒再重试，成功后停止重试。
     fn failed_attempt_retries_thirty_seconds_after_result_then_stops_on_success() {
         use AlertDecision::{None as Quiet, Send};
         check(&[
@@ -341,6 +359,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证第三次失败耗尽本轮尝试，只有有效恢复后才能重新通知。
     fn third_failure_suppresses_until_valid_recovery() {
         use AlertDecision::{None as Quiet, Send};
         for recovered_lag in [5_000, 4_999] {
@@ -372,6 +391,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证未知或下降后须重建增长窗口，即使重试等待已满也不立即发送。
     fn invalid_or_decreased_lag_requires_a_new_growth_window_before_retry() {
         use AlertDecision::{None as Quiet, Send};
         for interrupted_lag in [None, Some(5_050)] {
@@ -393,6 +413,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证通知在途时后续采样不会再次发起发送。
     fn observe_does_not_issue_another_send_while_attempt_is_in_flight() {
         use AlertDecision::{None as Quiet, Send};
         check(&[
@@ -408,6 +429,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证有效恢复取消等待中的重试并重新允许下一轮判断。
     fn recovery_cancels_waiting_retry() {
         use AlertDecision::{None as Quiet, Send};
         check(&[

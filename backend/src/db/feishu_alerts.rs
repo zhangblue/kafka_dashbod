@@ -12,21 +12,26 @@ pub struct FeishuAlertRepository {
 }
 
 impl FeishuAlertRepository {
+    // 在组装告警 API 和后台监控依赖时，使用共享连接池构造告警配置仓储。
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
+    // 在告警设置 API 读取时于一致事务内获取 Token 和规则，只返回 Token 掩码。
     pub async fn get(&self, cluster_id: &str) -> Result<FeishuAlertSettings, RepositoryError> {
+        // Token 和规则在同一读事务内取得，防止公开摘要混入并发保存前后的不同版本。
         let mut tx = self.pool.begin().await?;
         let token: Option<String> = sqlx::query_scalar("SELECT settings.access_token FROM clusters LEFT JOIN feishu_alert_settings settings ON settings.cluster_id = clusters.id WHERE clusters.id = ?")
             .bind(cluster_id).fetch_optional(&mut *tx).await?.ok_or(RepositoryError::ClusterNotFound)?;
         let rules = sqlx::query_as("SELECT id, group_id, topic, lag_threshold, growth_seconds, enabled FROM feishu_alert_rules WHERE cluster_id = ? ORDER BY group_id, topic")
             .bind(cluster_id).fetch_all(&mut *tx).await?;
+        // 取得完整公开设置所需的数据后结束读事务，再生成不含 Token 原值的响应。
         tx.commit().await?;
         Ok(public_settings(token.as_deref(), rules))
     }
 
     /// Save token changes and the complete rule collection in a single transaction.
+    // 在告警设置 API 保存时原子替换 Token 和完整规则集合，失败回滚以保留旧配置。
     pub async fn replace(
         &self,
         cluster_id: &str,
@@ -34,6 +39,7 @@ impl FeishuAlertRepository {
         clear_access_token: bool,
         rules: &[FeishuAlertRuleInput],
     ) -> Result<FeishuAlertSettings, RepositoryError> {
+        // 将旧 Token 合并和整批规则替换放在同一事务内；校验或写入失败时不提交。
         let mut tx = self.pool.begin().await?;
         let old_token: Option<String> = sqlx::query_scalar("SELECT settings.access_token FROM clusters LEFT JOIN feishu_alert_settings settings ON settings.cluster_id = clusters.id WHERE clusters.id = ?")
             .bind(cluster_id).fetch_optional(&mut *tx).await?.ok_or(RepositoryError::ClusterNotFound)?;
@@ -43,6 +49,7 @@ impl FeishuAlertRepository {
         if clear_access_token && new_token.is_some() {
             return Err(RepositoryError::InvalidInput);
         }
+        // 先处理新值与清除冲突，再合并旧 Token；留空只保留秘密，不能意外清空后台通知凭据。
         let token = if clear_access_token {
             None
         } else {
@@ -56,6 +63,7 @@ impl FeishuAlertRepository {
         let existing: HashMap<_, _> = existing.into_iter().collect();
         let mut pairs = HashSet::new();
         let mut ids = HashSet::new();
+        // 在删除旧规则前验证整批范围、Group/Topic 唯一性和已有 ID 归属，保证失败不破坏旧配置。
         for rule in rules {
             if rule.group_id.trim().is_empty()
                 || rule.topic.trim().is_empty()
@@ -70,6 +78,7 @@ impl FeishuAlertRepository {
                 return Err(RepositoryError::InvalidInput);
             }
         }
+        // updated_at 同时作为后台监控 revision；每次整批保存同步更新，使规则或 Token 变化重建内存状态。
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query("INSERT INTO feishu_alert_settings (cluster_id, access_token, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(cluster_id) DO UPDATE SET access_token = excluded.access_token, updated_at = excluded.updated_at")
             .bind(cluster_id).bind(&token).bind(&now).bind(&now).execute(&mut *tx).await?;
@@ -97,6 +106,7 @@ impl FeishuAlertRepository {
                 enabled: rule.enabled,
             });
         }
+        // Token、revision 与所有规则写入成功后才提交，中途失败会回滚整套配置。
         tx.commit().await?;
         saved.sort_by(|left, right| {
             (&left.group_id, &left.topic).cmp(&(&right.group_id, &right.topic))
@@ -105,6 +115,7 @@ impl FeishuAlertRepository {
     }
 
     /// Internal access for test notifications; never include this result in public output.
+    // 在测试通知需要已保存 Token 时读取内部秘密，禁止将结果用于公开输出。
     pub async fn token(&self, cluster_id: &str) -> Result<Option<String>, RepositoryError> {
         let token: Option<String> = sqlx::query_scalar("SELECT settings.access_token FROM clusters LEFT JOIN feishu_alert_settings settings ON settings.cluster_id = clusters.id WHERE clusters.id = ?")
             .bind(cluster_id).fetch_optional(&self.pool).await?.ok_or(RepositoryError::ClusterNotFound)?;
@@ -112,7 +123,9 @@ impl FeishuAlertRepository {
     }
 
     /// Read eligible worker configurations and their enabled rules from one snapshot.
+    // 在后台监控协调时从一致快照读取具备 Token 和启用规则的集群及 revision。
     pub async fn enabled_clusters(&self) -> Result<Vec<EnabledAlertCluster>, RepositoryError> {
+        // 后台资格筛选与规则读取共享快照，避免监控依据旧 Token 搭配新规则启动。
         let mut tx = self.pool.begin().await?;
         let settings: Vec<(String, String, String)> = sqlx::query_as("SELECT cluster_id, access_token, updated_at FROM feishu_alert_settings WHERE access_token IS NOT NULL AND EXISTS (SELECT 1 FROM feishu_alert_rules rules WHERE rules.cluster_id = feishu_alert_settings.cluster_id AND rules.enabled = 1) ORDER BY cluster_id")
             .fetch_all(&mut *tx).await?;
@@ -123,6 +136,7 @@ impl FeishuAlertRepository {
             }
             let rules = sqlx::query_as("SELECT id, group_id, topic, lag_threshold, growth_seconds, enabled FROM feishu_alert_rules WHERE cluster_id = ? AND enabled = 1 ORDER BY group_id, topic")
                 .bind(&cluster_id).fetch_all(&mut *tx).await?;
+            // revision 与 Token、规则来自同一事务快照，协调器据此判断何时替换旧监控状态。
             clusters.push(EnabledAlertCluster {
                 cluster_id,
                 access_token,
@@ -130,11 +144,13 @@ impl FeishuAlertRepository {
                 revision,
             });
         }
+        // 各集群资格、revision 和启用规则全部读取后结束事务，再交给协调器比较版本。
         tx.commit().await?;
         Ok(clusters)
     }
 }
 
+// 在告警配置查询或保存完成后构造公开设置，过滤空 Token 并只提供掩码。
 fn public_settings(token: Option<&str>, rules: Vec<FeishuAlertRule>) -> FeishuAlertSettings {
     let token = token.filter(|token| !token.trim().is_empty());
     FeishuAlertSettings {
@@ -144,6 +160,7 @@ fn public_settings(token: Option<&str>, rules: Vec<FeishuAlertRule>) -> FeishuAl
     }
 }
 
+// 在生成公开告警摘要时遮蔽 Token，短 Token 不提供后缀以避免完整泄漏。
 fn mask_token(token: &str) -> String {
     // Short tokens must never be disclosed in full, even as a masked suffix.
     let suffix: String = if token.chars().count() > 4 {

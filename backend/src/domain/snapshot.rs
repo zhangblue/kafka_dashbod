@@ -14,6 +14,7 @@ pub struct PartitionWatermark {
 }
 
 impl PartitionWatermark {
+    // 在采集到有效分区水位后构造快照，使用 Low/High 推导最大消息 Offset 和范围估算。
     pub fn new(partition: i32, low: i64, high: i64) -> Self {
         Self {
             partition,
@@ -24,6 +25,7 @@ impl PartitionWatermark {
         }
     }
 
+    // 在分区水位采集失败时构造显式未知快照，避免以零冒充真实水位。
     pub fn unavailable(partition: i32) -> Self {
         Self {
             partition,
@@ -51,6 +53,7 @@ pub struct TopicSnapshot {
 }
 
 impl TopicSnapshot {
+    // 在汇总 Topic 采集结果时合并已知分区指标，并标记缺少水位导致的不完整状态。
     pub fn from_partitions(topic: String, partitions: Vec<PartitionWatermark>) -> Self {
         Self {
             topic,
@@ -83,6 +86,7 @@ pub struct GroupPartitionSnapshot {
 }
 
 impl GroupPartitionSnapshot {
+    // 在采集消费组分区后结合水位与提交位置构造快照，任一必要值未知时保留未知 Lag。
     pub fn new(
         partition: i32,
         high: impl Into<Option<i64>>,
@@ -93,6 +97,7 @@ impl GroupPartitionSnapshot {
             partition,
             high,
             committed_offset,
+            // 先要求水位已知，再由 lag 保留未提交的未知语义，不能用零填充任何缺失输入。
             lag: high.and_then(|high| lag(high, committed_offset)),
         }
     }
@@ -112,6 +117,7 @@ pub struct ConsumerGroupTopicSnapshot {
 }
 
 impl ConsumerGroupTopicSnapshot {
+    // 在汇总消费组 Topic 时只累加已知 Lag，同时记录未知分区数和不完整标志。
     pub fn from_partitions(
         group_id: String,
         topic: String,
@@ -124,6 +130,7 @@ impl ConsumerGroupTopicSnapshot {
                 .iter()
                 .filter_map(|partition| partition.lag)
                 .sum(),
+            // 已知分区之和可能为零，但仍必须同时传播未知数量，供页面和告警识别不完整总量。
             unknown_partition_count: partitions
                 .iter()
                 .filter(|partition| partition.lag.is_none())
@@ -163,6 +170,7 @@ mod tests {
 
     // Catch summing partition offsets or mistaking the exclusive high for the latest offset.
     #[test]
+    // 在领域回归中验证 Topic 使用最小 Low、最大消息 Offset 和各分区范围之和，避免混淆局部分区位置。
     fn topic_uses_min_low_max_latest_and_sum_of_spans() {
         let snapshot = TopicSnapshot::from_partitions(
             "orders".into(),
@@ -181,6 +189,7 @@ mod tests {
 
     // Catch fabricating a latest offset when no partition retains messages.
     #[test]
+    // 在领域回归中验证不存在或全部为空的 Topic 不会虚构最大消息 Offset。
     fn empty_topics_have_no_latest_message_offset() {
         let absent = TopicSnapshot::from_partitions("absent".into(), vec![]);
         assert_eq!(absent.low, None);
@@ -196,6 +205,7 @@ mod tests {
 
     // Catch counting uncommitted partitions as known zero lag or summing committed offsets.
     #[test]
+    // 在领域回归中验证只汇总已知 Lag 并计数未知分区，防止未提交状态被当成零。
     fn group_topic_sums_known_lag_and_counts_unknown_partitions() {
         let snapshot = ConsumerGroupTopicSnapshot::from_partitions(
             "billing".into(),
@@ -214,6 +224,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证全部未提交时仍保留未知分区数量，避免零汇总误示完整数据。
     fn entirely_uncommitted_group_keeps_unknown_count() {
         let snapshot = ConsumerGroupTopicSnapshot::from_partitions(
             "billing".into(),
@@ -226,6 +237,7 @@ mod tests {
 
     // Catch snake_case fields or omission of unknown values in the public JSON contract.
     #[test]
+    // 在领域回归中验证公开 JSON 的驼峰字段和显式 null，防止未知值在序列化时丢失。
     fn cluster_json_uses_camel_case_and_explicit_unknown_values() {
         let snapshot = ClusterSnapshot {
             cluster_id: "local".into(),

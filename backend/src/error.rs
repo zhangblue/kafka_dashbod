@@ -34,6 +34,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    // 在 API 错误映射时构造统一响应体，调用方仅应传入可公开的安全消息。
     pub fn new(status: StatusCode, code: &'static str, message: &str) -> Self {
         Self {
             status,
@@ -47,6 +48,7 @@ impl ApiError {
         }
     }
 
+    // 在请求字段校验失败时生成 422 错误，保留安全的字段说明供表单显示。
     pub fn validation(details: BTreeMap<String, String>) -> Self {
         let mut error = Self::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -57,11 +59,13 @@ impl ApiError {
         error
     }
 
+    // 在处理已知集群的失败请求时附加内部日志关联标识，不将其序列化为公开字段。
     pub fn with_cluster_id(mut self, cluster_id: Option<String>) -> Self {
         self.body.cluster_id = cluster_id.map(String::into_boxed_str);
         self
     }
 
+    // 在目标集群不存在时构造统一的 404 错误，供路由和仓储错误转换复用。
     pub fn cluster_not_found() -> Self {
         Self::new(
             StatusCode::NOT_FOUND,
@@ -70,6 +74,7 @@ impl ApiError {
         )
     }
 
+    // 在 JSON 提取失败时映射大小限制或格式错误，避免将含敏感输入的原始拒绝原因返回。
     pub fn from_json(rejection: JsonRejection) -> Self {
         if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
             return Self::new(
@@ -87,6 +92,7 @@ impl ApiError {
 }
 
 impl From<RepositoryError> for ApiError {
+    // 在 API 接收仓储失败时转换稳定错误码，隐藏底层数据库错误和存储内容。
     fn from(error: RepositoryError) -> Self {
         match error {
             RepositoryError::ClusterNotFound => Self::cluster_not_found(),
@@ -114,6 +120,7 @@ impl From<RepositoryError> for ApiError {
 }
 
 impl IntoResponse for ApiError {
+    // 在路由返回错误时生成 JSON 响应，并将错误体交给外层请求标识中间件补全。
     fn into_response(self) -> Response {
         let mut response = (self.status, Json(self.body.clone())).into_response();
         response.extensions_mut().insert(self.body);
@@ -121,6 +128,7 @@ impl IntoResponse for ApiError {
     }
 }
 
+// 在每次请求经过中间件时关联 Request ID、统一失败响应并记录脱敏操作信息。
 pub async fn request_id(request: Request, next: Next) -> Response {
     // Use only registered route templates; never log full URIs or query strings.
     let route = request
@@ -144,6 +152,7 @@ pub async fn request_id(request: Request, next: Next) -> Response {
             HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())
                 .expect("UUID is a valid header")
         });
+    // 先执行内层提取器和处理器，再统一补全它们产生的错误与 Request ID。
     let mut response = next.run(request).await;
     let error = response.extensions_mut().remove::<ErrorBody>().or_else(|| {
         // Extractors may reject a request before its handler can return ApiError.
@@ -190,10 +199,12 @@ pub async fn request_id(request: Request, next: Next) -> Response {
     response
 }
 
+// 在 API 未匹配路由时返回 JSON 404，供路由兜底使用。
 pub async fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "NOT_FOUND", "Route not found")
 }
 
+// 在已匹配路径收到不支持的方法时返回统一 JSON 405。
 pub async fn method_not_allowed() -> ApiError {
     ApiError::new(
         StatusCode::METHOD_NOT_ALLOWED,

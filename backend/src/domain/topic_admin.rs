@@ -25,8 +25,10 @@ pub struct CreateTopicInput {
 }
 
 impl CreateTopicInput {
+    // 在创建 Topic 进入原生管理调用前校验名称、数量上限和白名单配置，阻止非法输入下沉。
     pub fn validate(&self) -> Result<(), BTreeMap<String, String>> {
         let mut errors = BTreeMap::new();
+        // 先在领域层拒绝非法名称，再检查原生数量上限及配置，避免无效请求触及 Kafka。
         validate_topic_name(&self.name, "name", &mut errors);
 
         if self.partitions <= 0 {
@@ -64,10 +66,12 @@ impl CreateTopicInput {
     }
 }
 
+// 在反序列化创建请求未指定分区数时提供单分区默认值。
 const fn default_partitions() -> i32 {
     1
 }
 
+// 在创建或删除前校验 Topic 名称的长度和字符边界，并累积安全字段错误。
 fn validate_topic_name(name: &str, field: &str, errors: &mut BTreeMap<String, String>) {
     let valid_chars = name
         .bytes()
@@ -77,6 +81,7 @@ fn validate_topic_name(name: &str, field: &str, errors: &mut BTreeMap<String, St
     }
 }
 
+// 在创建和增量修改配置校验阶段限制允许的键和值，不回显请求中的配置值。
 fn validate_configs(
     configs: &BTreeMap<String, String>,
     field: &str,
@@ -96,6 +101,7 @@ fn validate_configs(
     }
 }
 
+// 在白名单配置校验时按各键的数值或枚举语义判断值是否合法。
 fn valid_config_value(key: &str, value: &str) -> bool {
     match key {
         "retention.ms" | "retention.bytes" => {
@@ -113,6 +119,7 @@ fn valid_config_value(key: &str, value: &str) -> bool {
     }
 }
 
+// 在配置值校验时只解析无符号十进制文本，拒绝空值、符号和超出 i64 的整数。
 fn parse_decimal_i64(value: &str) -> Option<i64> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -145,6 +152,7 @@ pub struct UpdateTopicConfigsInput {
 }
 
 impl UpdateTopicConfigsInput {
+    // 在增量修改进入 Kafka 前校验非空变更、白名单和预期旧值，保证后续可检查写前冲突。
     pub fn validate(&self) -> Result<(), BTreeMap<String, String>> {
         let mut errors = BTreeMap::new();
         if self.changes.is_empty() {
@@ -215,6 +223,7 @@ pub enum TopicAdminError {
 }
 
 impl TopicAdminError {
+    // 在管理错误映射为 API 响应时返回稳定错误码，避免依赖原生错误文本。
     pub fn code(&self) -> &'static str {
         match self {
             Self::Validation(_) => "VALIDATION_ERROR",
@@ -229,6 +238,7 @@ impl TopicAdminError {
         }
     }
 
+    // 在生成管理校验错误响应时获取字段说明，非校验错误返回空集合。
     pub fn validation_errors(&self) -> &BTreeMap<String, String> {
         match self {
             Self::Validation(errors) => errors,
@@ -240,6 +250,7 @@ impl TopicAdminError {
 static EMPTY_VALIDATION_ERRORS: BTreeMap<String, String> = BTreeMap::new();
 
 impl fmt::Display for TopicAdminError {
+    // 在展示或记录管理错误时输出固定安全消息，防止泄漏 Kafka 原始错误。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::Validation(_) => "Invalid topic administration request",
@@ -258,8 +269,10 @@ impl fmt::Display for TopicAdminError {
 
 impl std::error::Error for TopicAdminError {}
 
+// 在删除 Topic 进入原生调用前依次校验名称、内部 Topic 保护和完整确认名，限制不可恢复删除。
 pub fn validate_delete(topic: &str, confirmation_name: &str) -> Result<(), TopicAdminError> {
     let mut errors = BTreeMap::new();
+    // 名称合法后才检查内部保护与完整确认，确保删除入口沿同一安全顺序拒绝非法目标。
     validate_topic_name(topic, "name", &mut errors);
     if !errors.is_empty() {
         return Err(TopicAdminError::Validation(errors));
@@ -286,6 +299,7 @@ mod tests {
         TopicConfigUpdateOutcome, TopicConfigValue, UpdateTopicConfigsInput, validate_delete,
     };
 
+    // 在 Topic 管理领域测试中构造最小合法创建请求，便于独立修改待测字段。
     fn create_input(name: &str) -> CreateTopicInput {
         CreateTopicInput {
             name: name.into(),
@@ -296,6 +310,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证合法名称及字符和长度边界，阻止无效名称进入 Kafka。
     fn accepts_valid_topic_names_and_rejects_invalid_names() {
         for name in ["orders.v1", "_private-topic", "UPPER9"] {
             assert!(create_input(name).validate().is_ok(), "{name}");
@@ -316,6 +331,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证分区数和副本数必须为正，防止非法原生创建参数。
     fn rejects_non_positive_partition_and_replication_counts() {
         for partitions in [0, -1] {
             let mut input = create_input("orders");
@@ -337,6 +353,7 @@ mod tests {
 
     // Catches rejecting the supported native upper boundaries before contacting Kafka.
     #[test]
+    // 在领域回归中验证本地支持的原生数量上界可被接受。
     fn accepts_creation_counts_at_native_upper_boundaries() {
         let mut input = create_input("orders");
         input.partitions = 100_000;
@@ -346,6 +363,7 @@ mod tests {
 
     // Catches passing locally unsupported counts into AdminOpCreation instead of validation.
     #[test]
+    // 在领域回归中验证超出本地原生上限的分区数在连接 Kafka 前被拒绝。
     fn rejects_partition_counts_above_native_limit() {
         for partitions in [100_001, i32::MAX] {
             let mut input = create_input("orders");
@@ -361,6 +379,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证超出本地原生上限的副本数在连接 Kafka 前被拒绝。
     fn rejects_replication_counts_above_native_limit() {
         for factor in [10_001, i32::MAX] {
             let mut input = create_input("orders");
@@ -377,6 +396,7 @@ mod tests {
 
     // Catches defaults or unknown-field acceptance changing the HTTP creation contract.
     #[test]
+    // 在领域回归中验证创建请求默认值和拒绝未知字段的公开协议。
     fn deserializes_creation_defaults_and_rejects_unknown_fields() {
         let input: CreateTopicInput =
             serde_json::from_value(serde_json::json!({"name":"orders"})).unwrap();
@@ -394,6 +414,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证八个白名单参数均可使用，其他配置不能透传。
     fn accepts_each_topic_config_key_and_rejects_unknown_configs() {
         let valid_values = [
             ("retention.ms", "-1"),
@@ -435,6 +456,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证各配置值域及错误脱敏，防止非法值或秘密回显。
     fn validates_topic_config_value_domains_without_echoing_values() {
         let invalid_values = [
             ("retention.ms", "-2"),
@@ -474,6 +496,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证修改非空、预期值齐全且键均受白名单约束。
     fn validates_non_empty_update_changes_and_expected_values() {
         let empty = UpdateTopicConfigsInput {
             changes: BTreeMap::new(),
@@ -522,6 +545,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证内部 Topic 保护和大小写完全一致的删除确认。
     fn protects_internal_topics_and_requires_exact_delete_confirmation() {
         let error = validate_delete("__consumer_offsets", "__consumer_offsets").unwrap_err();
         assert_eq!(error.code(), "INTERNAL_TOPIC_PROTECTED");
@@ -535,6 +559,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证配置来源、只读标志和已应用未确认结果的稳定序列化。
     fn serializes_stable_topic_config_source_values() {
         assert_eq!(
             serde_json::to_string(&TopicConfigSource::TopicOverride).unwrap(),
@@ -567,6 +592,7 @@ mod tests {
     }
 
     #[test]
+    // 在领域回归中验证管理错误码及安全消息，防止底层敏感内容外泄。
     fn exposes_stable_safe_topic_admin_error_codes() {
         let cases = [
             (TopicAdminError::AlreadyExists, "TOPIC_ALREADY_EXISTS"),

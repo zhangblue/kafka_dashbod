@@ -11,6 +11,7 @@ pub enum SecurityProtocol {
 }
 
 impl SecurityProtocol {
+    // 在构建 Kafka 参数或持久化集群配置时，返回协议对应的稳定字符串。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Plaintext => "PLAINTEXT",
@@ -44,20 +45,25 @@ pub struct ClusterInput {
     pub default_over_limit_seconds: i64,
 }
 
+// 在反序列化缺省字段或构造明文输入时，提供连接超时毫秒数。
 fn default_timeout() -> i64 {
     10_000
 }
+// 在反序列化缺省字段或构造明文输入时，提供默认正常 Lag 上限。
 fn default_normal() -> i64 {
     999
 }
+// 在反序列化缺省字段或构造明文输入时，提供默认高 Lag 起始值。
 fn default_high() -> i64 {
     5000
 }
+// 在反序列化缺省字段或构造明文输入时，提供持续超限秒数。
 fn default_duration() -> i64 {
     30
 }
 
 impl ClusterInput {
+    // 在测试或简化创建流程时构造无认证集群输入，同时填充默认阈值和超时。
     pub fn plaintext(name: impl Into<String>, bootstrap_servers: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -79,6 +85,7 @@ impl ClusterInput {
 }
 
 impl std::fmt::Debug for ClusterInput {
+    // 在调试格式化集群输入时输出固定脱敏文本，防止凭据随调试信息泄漏。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ClusterInput([REDACTED])")
     }
@@ -131,6 +138,7 @@ pub struct DecryptedClusterConfig {
 }
 
 impl DecryptedClusterConfig {
+    // 在测试或无需认证的连接场景中构造明文 Kafka 客户端配置。
     pub fn plaintext(bootstrap_servers: impl Into<String>) -> Self {
         Self {
             bootstrap_servers: bootstrap_servers.into(),
@@ -148,6 +156,7 @@ impl DecryptedClusterConfig {
 }
 
 impl std::fmt::Debug for DecryptedClusterConfig {
+    // 在调试格式化内部连接配置时隐藏全部字段，防止密码和 PEM 泄漏。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("DecryptedClusterConfig([REDACTED])")
     }

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+// Lag 设置保存请求中的 Group + Topic 覆盖项；持久化前由仓储统一校验整批阈值。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LagRuleInput {
@@ -10,6 +11,7 @@ pub struct LagRuleInput {
     pub over_limit_seconds: i64,
 }
 
+// 仓储读取后返回的覆盖规则，用于页面以 Group + Topic 覆盖集群默认阈值。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct LagRule {
