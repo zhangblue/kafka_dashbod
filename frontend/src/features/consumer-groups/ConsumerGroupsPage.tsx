@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import { Fragment, useId, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import type { ClusterSnapshot, ConsumerGroupTopicSnapshot } from '../../api/types'
@@ -8,7 +9,7 @@ import { groupPartitionDisplayKey, topicPartitionDisplayKey } from '../dashboard
 import { ApiErrorNotice } from '../clusters/ClusterForm'
 import { useDashboard } from '../dashboard/useDashboard'
 import type { MonitorSession } from '../dashboard/useMonitorSession'
-import { lagRowKey, statusLabels, type LagStatus } from './status'
+import { lagRowKey, statusTranslationKeys, type LagStatus } from './status'
 import { useConsumerGroupLag, type ConsumerGroupLagRow } from './useConsumerGroupLag'
 import { useSnapshotStale } from '../dashboard/useSnapshotStale'
 import { ConsumerGroupHistory } from './ConsumerGroupHistory'
@@ -35,6 +36,7 @@ function PartitionTable({ row, snapshot, staleResources }: { row: ConsumerGroupT
 
 // 在规则加载完成后展示和筛选消费组状态，按链接展开精确的 Group 与 Topic 分区。
 function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId: string; monitor: MonitorSession; evaluatedRows: ConsumerGroupLagRow[] }) {
+  const { t } = useTranslation()
   const [params] = useSearchParams()
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<LagStatus | 'all' | 'abnormal'>('all')
@@ -55,7 +57,7 @@ function ConsumerGroupsTable({ clusterId, monitor, evaluatedRows }: { clusterId:
     </div></div>
     <div className="offset-note rules-note"><span>默认区间：正常 ≤ {cluster?.defaultNormalLagMax.toLocaleString('en-US')} · 高 Lag ≥ {cluster?.defaultHighLagMin.toLocaleString('en-US')} · 连续超限 {cluster?.defaultOverLimitSeconds} 秒后变色；自定义规则另有标记。</span>
     <label><span className="sr-only">状态筛选</span><select value={filter} onChange={/* 在状态筛选变化时更新筛选条件，保留共享的 Lag 判定与采样连续性。 */ event => setFilter(event.target.value as typeof filter)}>
-      <option value="all">全部状态</option><option value="abnormal">全部异常</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+      <option value="all">全部状态</option><option value="abnormal">全部异常</option>{Object.entries(statusTranslationKeys).map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}
     </select></label></div>
     {status !== 'connected' && <p role="status">当前未持续采样，暂停计时；显示最后一次快照，恢复后重新累计。</p>}
     {!!snapshot?.partialFailures.length && <p role="status">部分数据采集失败；仅展示已发现的 Consumer Group / Topic，未知值不代表 0。</p>}

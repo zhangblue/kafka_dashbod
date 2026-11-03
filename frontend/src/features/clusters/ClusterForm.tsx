@@ -1,3 +1,5 @@
+import { useTranslation } from 'react-i18next'
+import { localizeApiError } from '../../api/errorMessages'
 import { useId, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { ApiError } from '../../api/client'
@@ -13,10 +15,13 @@ const secrets = [
 
 // 在集群表单或规则请求失败时展示统一安全错误、字段提示与请求编号。
 export function ApiErrorNotice({ error, fieldIdPrefix }: { error: unknown; fieldIdPrefix?: string }) {
+  const { t } = useTranslation()
   if (!error) return null
-  return <div role="alert"><p>{error instanceof ApiError ? error.message : '请求失败，请稍后重试'}</p>
-    {error instanceof ApiError && <>{Object.entries(error.fields).map(([field, message]) => <p key={field} id={fieldIdPrefix ? `${fieldIdPrefix}-${field}` : undefined}>{message}</p>)}
-      {error.requestId && <p>Request ID: {error.requestId}</p>}</>}
+  // 显示前统一翻译并约束字段路径，防止后端原文经文本或辅助说明关联进入页面。
+  const localized = localizeApiError(error, t)
+  return <div role="alert"><p>{localized.message}</p>
+    {Object.entries(localized.fields).map(([field, message]) => <p key={field} id={fieldIdPrefix ? `${fieldIdPrefix}-${field}` : undefined}>{message}</p>)}
+    {localized.requestId && <p>Request ID: {localized.requestId}</p>}
   </div>
 }
 

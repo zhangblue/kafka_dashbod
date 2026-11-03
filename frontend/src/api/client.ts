@@ -7,9 +7,10 @@ export class ApiError extends Error {
   readonly fields: Record<string, string>
   readonly requestId?: string
 
-  // 在 HTTP 失败响应转换时保存安全错误字段与请求标识，供表单和错误提示消费。
+  // 在 HTTP 失败响应转换时保存结构化字段与请求标识，显示端须经过安全错误翻译。
   constructor(status: number, body: { code?: string; message?: string; fields?: Record<string, string>; details?: Record<string, string>; requestId?: string }) {
-    super(body.message ?? '请求失败，请稍后重试')
+    // 错误对象只保留内部占位；页面必须按 code 翻译，避免后端 message 被其他入口直接展示。
+    super('API_REQUEST_FAILED')
     this.name = 'ApiError'
     this.status = status
     this.code = body.code ?? 'HTTP_ERROR'

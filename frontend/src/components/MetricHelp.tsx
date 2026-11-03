@@ -1,8 +1,10 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
 
 // 指标字段渲染时提供可悬停、聚焦或固定的说明，并将提示挂到当前弹窗或页面。
 export function MetricHelp({ label, children, trigger = '?' }: { label: string; children: ReactNode; trigger?: ReactNode }) {
+  const { t } = useTranslation()
   const id = useId()
   const anchor = useRef<HTMLSpanElement>(null)
   const tooltip = useRef<HTMLSpanElement>(null)
@@ -36,7 +38,7 @@ export function MetricHelp({ label, children, trigger = '?' }: { label: string; 
   }, [visible])
   return <span ref={anchor} style={{ position: 'relative', display: 'inline-block' }}
     onMouseEnter={event => { setPortalHost(event.currentTarget.closest('dialog') ?? document.body); setHovered(true); setDismissed(false) }} onMouseLeave={() => setHovered(false)}>
-    <button type="button" className={trigger === '?' ? 'help-trigger' : 'rule-badge'} aria-label={`${label} 字段说明`} aria-describedby={visible ? id : undefined}
+    <button type="button" className={trigger === '?' ? 'help-trigger' : 'rule-badge'} aria-label={t('shared.fieldHelp', { label })} aria-describedby={visible ? id : undefined}
       onFocus={event => { setPortalHost(event.currentTarget.closest('dialog') ?? document.body); setFocused(true); setDismissed(false) }}
       onBlur={() => { setFocused(false); setPinned(false); setDismissed(false) }}
       onClick={() => { setPinned(!pinned); setDismissed(pinned) }}>{trigger}</button>

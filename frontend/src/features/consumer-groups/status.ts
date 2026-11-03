@@ -1,9 +1,9 @@
 import type { ClusterSnapshot, ConsumerGroupTopicSnapshot, LagRuleSet, LagThresholds } from '../../api/types'
 
 export type LagStatus = 'normal' | 'backlog' | 'high' | 'uncommitted' | 'error'
-export const statusLabels: Record<LagStatus, string> = {
-  normal: '正常', backlog: '积压', high: '高 Lag', uncommitted: '未提交', error: '采集异常',
-}
+export const statusTranslationKeys = {
+  normal: 'status.normal', backlog: 'status.backlog', high: 'status.high', uncommitted: 'status.uncommitted', error: 'status.error',
+} as const satisfies Record<LagStatus, string>
 export interface LagState { status: LagStatus; overLimitMs: number; overLimit: boolean }
 // 在首次采样、恢复正常或连续性重置时创建无累计时间的正常状态。
 export const initialLagState = (): LagState => ({ status: 'normal', overLimitMs: 0, overLimit: false })

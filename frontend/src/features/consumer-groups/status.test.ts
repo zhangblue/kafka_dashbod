@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import type { ClusterSnapshot } from '../../api/types'
 import { snapshotFixture } from '../../test/handlers'
-import { advanceLagStates, evaluateLag, initialLagState, resetAllLagStates, resolveLagRule, rowHealth } from './status'
+import { advanceLagStates, evaluateLag, initialLagState, resetAllLagStates, resolveLagRule, rowHealth, statusTranslationKeys } from './status'
 
 const rule = { normalMax: 999, highMin: 5000, overLimitSeconds: 0 }
 
@@ -100,4 +100,10 @@ it.each(['pause', 'rebuild'])('does not count hidden time when %s exposes the re
   book = advanceLagStates({ snapshot: sample(0), status: 'connected', continuityKey, rules }, book)
   book = advanceLagStates({ snapshot: sample(600), status: 'connected', continuityKey, rules }, book)
   expect(Object.values(book.rows)[0].state).toMatchObject({ status: 'normal', overLimitMs: 0 })
+})
+
+// 验证状态层只公开翻译键，避免显示语言影响业务状态与超限计时。
+it('exposes language-independent translation keys for every Lag status', () => {
+  expect(statusTranslationKeys).toEqual({ normal: 'status.normal', backlog: 'status.backlog',
+    high: 'status.high', uncommitted: 'status.uncommitted', error: 'status.error' })
 })

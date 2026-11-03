@@ -91,3 +91,12 @@ describe('API boundary', () => {
     expect(await clustersApi.list()).not.toHaveProperty('0.password')
   })
 })
+
+// 验证内部错误占位丢弃后端消息，同时保留业务状态与请求编号。
+it('uses an internal placeholder for both provided and missing backend messages', () => {
+  for (const message of ['private backend detail', undefined]) {
+    const error = new ApiError(404, { code: 'CLUSTER_NOT_FOUND', message, requestId: 'req-safe' })
+    expect(error.message).toBe('API_REQUEST_FAILED')
+    expect(error).toMatchObject({ status: 404, code: 'CLUSTER_NOT_FOUND', requestId: 'req-safe' })
+  }
+})
