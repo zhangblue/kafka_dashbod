@@ -47,10 +47,14 @@ export function retainDisplaySnapshot(current: ClusterSnapshot, previous?: Displ
     return [...now, ...old.filter(item => !now.some(value => key(value) === key(item)) && retainMissing(item))]
   }
   const topics = merge(current.topics, before.topics, topic => topic.topic, topic => topicFailed(topic.topic)).map(topic => {
+    // 新快照展示合并时逐 Topic 匹配旧记录，仅为失败范围回填旧分区水位。
+    // 分区合并后向 Topic 传播保留值中最早的成功采集时间；发现失败的空 Topic 则保留行级时间。
     const old = before.topics.find(value => value.topic === topic.topic)
     if (!old) return topic
     const partitions = merge(topic.partitions, old.partitions, partition => partition.partition,
       partition => watermarkFailed(topic.topic, partition.partition)).map(partition => {
+      // 合并每个水位分区时，仅在旧分区存在且本次发现或水位采集失败时整体沿用旧值并登记其成功采集时间。
+      // 新分区或本次采集成功的分区保持当前值，避免把正常更新错误标为陈旧。
       const prior = old.partitions.find(value => value.partition === partition.partition)
       if (!prior || !watermarkFailed(topic.topic, partition.partition)) return partition
       retain(topicPartitionDisplayKey(topic.topic, partition.partition))
@@ -72,11 +76,15 @@ export function retainDisplaySnapshot(current: ClusterSnapshot, previous?: Displ
         && (currentGroups.has(row.groupId) || groupUnknown)
         && (currentTopics.has(row.topic) || topicUnknown)
     }).map(row => {
+    // 当前关联行与允许补回的旧行合并后，按完整 Group / Topic 匹配旧记录；rowMissing 区分整行补回与局部分区失败。
+    // 回填后向父行传播保留分区中最早的成功采集时间并重算展示 Lag；缺失或发现失败的空行仍记录原成功采集时间。
     const old = before.consumerGroups.find(value => value.groupId === row.groupId && value.topic === row.topic)
     if (!old) return row
     const rowMissing = !current.consumerGroups.some(value => value.groupId === row.groupId && value.topic === row.topic)
     const partitions = merge(row.partitions, old.partitions, partition => partition.partition,
       partition => committedFailed(row.groupId, row.topic, partition.partition)).map(partition => {
+      // 合并消费分区时先要求旧分区存在，再要求整条关联行缺失或本分区发现、水位、提交读取失败，满足后才沿用旧 Offset / Lag。
+      // 整行补回时无需再次要求分区级失败；采用旧值必须登记其成功采集时间，否则保留当前分区。
       const prior = old.partitions.find(value => value.partition === partition.partition)
       if (!prior || (!rowMissing && !committedFailed(row.groupId, row.topic, partition.partition))) return partition
       retain(groupPartitionDisplayKey(row.groupId, row.topic, partition.partition))
